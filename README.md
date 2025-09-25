@@ -60,3 +60,6 @@
 - 代码使用 `python -m compileall src` 可进行快速语法检查。
 - 若需要运行示例接入脚本，可参考 `demo_dashscope_microphone.py`。
 - 如需更换图标，可替换项目根目录下的 `translate.svg` 并重新运行应用。
+
+## 演示
+![演示](演示.jpg)
