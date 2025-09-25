@@ -1,0 +1,7 @@
+PyQt6>=6.7.0
+soundcard>=0.4.5
+numpy>=1.24.0
+websocket-client>=1.7.0
+alibabacloud_tea_openapi>=0.3.8
+alibabacloud_bailian20230601>=1.1.0
+alibabacloud_endpoint_util>=0.0.4

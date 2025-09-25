@@ -1,0 +1,28 @@
+# Python cache
+__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+
+# Virtual environments
+.venv/
+venv/
+ENV/
+
+# IDE files
+.vscode/
+.idea/
+*.code-workspace
+
+# Local configuration & secrets
+config.ini
+.env
+
+# Runtime artifacts
+*.log
+*.tmp
+浮光译影字幕/
+
+# OS noise
+.DS_Store
+Thumbs.db
