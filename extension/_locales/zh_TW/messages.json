@@ -1,0 +1,18 @@
+{
+  "appName": {
+    "message": "流聲字幕 - 基於 ASR 與大語言模型的串流影視、動漫生肉影片字幕生成與翻譯",
+    "description": "Chrome Web Store 標題和擴充功能名稱。"
+  },
+  "appShortName": {
+    "message": "流聲字幕",
+    "description": "Chrome 工具列和緊湊位置使用的短名稱。"
+  },
+  "appDescription": {
+    "message": "基於 ASR 與大語言模型，為串流影視、動漫生肉影片生成字幕並翻譯。",
+    "description": "Chrome Web Store 和擴充功能管理頁顯示的簡短說明。"
+  },
+  "actionTitle": {
+    "message": "流聲字幕",
+    "description": "擴充功能按鈕懸停標題。"
+  }
+}

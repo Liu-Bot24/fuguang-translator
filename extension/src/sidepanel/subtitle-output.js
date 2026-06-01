@@ -55,7 +55,7 @@
       const sourceOnly = !translatedText && Boolean(sourceText);
       const text = translatedText || sourceText;
       if (Number.isFinite(start) && Number.isFinite(end) && text) {
-        cues.push({
+        const cue = {
           start,
           end,
           time: formatCueTime(start, end),
@@ -63,7 +63,14 @@
           sourceText: sourceText && (sourceOnly || sourceText !== text) ? sourceText : "",
           speakerLabel: cleanSubtitleText(sourceSegment.speakerLabel || translatedSegment.speakerLabel || ""),
           sourceOnly
-        });
+        };
+        const chunkIndex = firstFiniteNumber(translatedSegment.chunkIndex, sourceSegment.chunkIndex);
+        const segmentIndex = firstFiniteNumber(translatedSegment.segmentIndex, sourceSegment.segmentIndex);
+        if (Number.isInteger(chunkIndex) && Number.isInteger(segmentIndex)) {
+          cue.chunkIndex = chunkIndex;
+          cue.segmentIndex = segmentIndex;
+        }
+        cues.push(cue);
       }
     }
     return cues;

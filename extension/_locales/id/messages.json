@@ -1,0 +1,18 @@
+{
+  "appName": {
+    "message": "Liusheng Subtitles - Buat dan terjemahkan subtitle video dengan ASR/LLM",
+    "description": "Judul Chrome Web Store dan nama ekstensi."
+  },
+  "appShortName": {
+    "message": "Liusheng Subtitles",
+    "description": "Nama pendek yang dipakai di toolbar Chrome."
+  },
+  "appDescription": {
+    "message": "Buat dan terjemahkan subtitle video web dengan layanan ASR dan LLM.",
+    "description": "Deskripsi pendek untuk Chrome Web Store dan halaman pengelolaan ekstensi."
+  },
+  "actionTitle": {
+    "message": "Liusheng Subtitles",
+    "description": "Judul tooltip tombol ekstensi."
+  }
+}

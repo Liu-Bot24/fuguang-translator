@@ -17,10 +17,16 @@ import vm from "node:vm";
   assert.ok(html.includes('role="tab"'));
   assert.ok(html.includes('aria-selected="true"'));
   assert.ok(html.includes('role="status"'));
+  assert.match(html, /id="subtitleNotice"[^>]*role="status"[^>]*aria-live="polite"/);
   assert.ok(html.includes('href="https://blog.liu-qi.cn/tools"'));
   assert.ok(html.includes('target="_blank"'));
   assert.ok(html.includes('rel="noopener noreferrer"'));
   assert.ok(css.includes("focus-visible"), "keyboard focus state missing");
+  assert.equal(
+    /id="subtitleModeToggle"[^>]*aria-pressed/.test(html),
+    false,
+    "three-state subtitle mode toggle should not expose binary aria-pressed"
+  );
   assert.ok(css.includes("appearance: none"), "button/input rendering should not depend on OS defaults");
   assert.ok(html.includes('id="sourceLanguage"'), "source language selector missing");
   assert.equal(html.includes('id="asrVocabularyId"'), false, "Fun-ASR hotword vocabulary id should not be exposed to users");
@@ -54,7 +60,14 @@ import vm from "node:vm";
     "chunk",
     "completed",
     "completed_with_warnings",
+    "cue-delete",
+    "cue-edit-button",
+    "cue-text-edit",
+    "cue-time-edit",
+    "cue-time-row",
     "done",
+    "editable",
+    "editing",
     "failed",
     "stage",
     "stage-cancelled",
@@ -62,6 +75,7 @@ import vm from "node:vm";
     "stage-error",
     "stage-failed",
     "subtitles-focus",
+    "subtitle-text-row",
     "translated",
     "translation"
   ]);
@@ -796,7 +810,7 @@ const speakerLabelListState = await vm.runInContext(`
     return {
       speakerClass: textWrap.children[0].className,
       speakerText: textWrap.children[0].textContent,
-      subtitleText: textWrap.children[1].textContent
+      subtitleText: textWrap.children[1].children[0].textContent
     };
   })()
 `, context);
@@ -3862,6 +3876,42 @@ const pausedHighlightState = await vm.runInContext(`
 
 assert.equal(pausedHighlightState.activeCueIndex, 0);
 
+const editModeHighlightState = await vm.runInContext(`
+  (async () => {
+    const first = document.createElement("div");
+    first.className = "cue";
+    first.dataset.index = "0";
+    const second = document.createElement("div");
+    second.className = "cue";
+    second.dataset.index = "1";
+    elements.subtitleList.replaceChildren(first, second);
+    subtitleCues = [
+      { start: 0, end: 2, time: "00:00:00.000 --> 00:00:02.000", text: "first cue" },
+      { start: 3, end: 5, time: "00:00:03.000 --> 00:00:05.000", text: "second cue" }
+    ];
+    activeTab = { id: 1 };
+    activeCueIndex = -1;
+    subtitleEditMode = true;
+    chrome.runtime.sendMessage = async () => ({
+      ok: true,
+      state: { currentTime: 3.5, paused: false, synthetic: false }
+    });
+    await syncSubtitleHighlight();
+    subtitleEditMode = false;
+    return {
+      activeCueIndex,
+      secondActive: second.classList.contains("active"),
+      secondScrolled: Boolean(second.scrolledIntoView)
+    };
+  })()
+`, context);
+
+assert.deepEqual(JSON.parse(JSON.stringify(editModeHighlightState)), {
+  activeCueIndex: 1,
+  secondActive: true,
+  secondScrolled: false
+});
+
 const gapHighlightState = await vm.runInContext(`
   (async () => {
     subtitleCues = [
@@ -4105,7 +4155,7 @@ const sourceOnlyCompletedTranslatedListState = await vm.runInContext(`
     renderSubtitleCueList();
     return {
       listText: elements.subtitleList.textContent,
-      children: elements.subtitleList.children.map(item => item.children[1].children.map(line => line.textContent))
+      children: elements.subtitleList.children.map(item => item.children[1].children.map(line => line.children?.[0]?.textContent || line.textContent))
     };
   })()
 `, context);
@@ -4161,7 +4211,7 @@ const sourceOnlyRunningTranslatedListState = await vm.runInContext(`
       }
     ];
     renderSubtitleCueList();
-    return elements.subtitleList.children.map(item => item.children[1].children.map(line => line.textContent));
+    return elements.subtitleList.children.map(item => item.children[1].children.map(line => line.children?.[0]?.textContent || line.textContent));
   })()
 `, context);
 
@@ -4241,16 +4291,36 @@ const subtitleModeCycleState = await vm.runInContext(`
     subtitleOverlayEnabled = false;
     subtitleDisplayMode = "translated";
     renderSubtitleModeButton();
-    const translatedPressed = elements.subtitleModeToggle["aria-pressed"];
+    const translatedPressed = elements.subtitleModeToggle["aria-pressed"] ?? null;
+    const translatedActive = elements.subtitleModeToggle.dataset.active;
+    const translatedLabel = elements.subtitleModeToggle["aria-label"];
     await toggleSubtitleMode();
     const first = subtitleDisplayMode;
-    const sourcePressed = elements.subtitleModeToggle["aria-pressed"];
+    const sourcePressed = elements.subtitleModeToggle["aria-pressed"] ?? null;
+    const sourceActive = elements.subtitleModeToggle.dataset.active;
+    const sourceLabel = elements.subtitleModeToggle["aria-label"];
     await toggleSubtitleMode();
     const second = subtitleDisplayMode;
-    const bilingualPressed = elements.subtitleModeToggle["aria-pressed"];
+    const bilingualPressed = elements.subtitleModeToggle["aria-pressed"] ?? null;
+    const bilingualActive = elements.subtitleModeToggle.dataset.active;
+    const bilingualLabel = elements.subtitleModeToggle["aria-label"];
     await toggleSubtitleMode();
     const third = subtitleDisplayMode;
-    return { first, second, third, buttonText: elements.subtitleModeToggle.textContent, translatedPressed, sourcePressed, bilingualPressed };
+    return {
+      first,
+      second,
+      third,
+      buttonText: elements.subtitleModeToggle.textContent,
+      translatedPressed,
+      sourcePressed,
+      bilingualPressed,
+      translatedActive,
+      sourceActive,
+      bilingualActive,
+      translatedLabel,
+      sourceLabel,
+      bilingualLabel
+    };
   })()
 `, context);
 
@@ -4259,10 +4329,240 @@ assert.deepEqual(JSON.parse(JSON.stringify(subtitleModeCycleState)), {
   second: "bilingual",
   third: "translated",
   buttonText: "译文",
-  translatedPressed: "true",
-  sourcePressed: "false",
-  bilingualPressed: "true"
+  translatedPressed: null,
+  sourcePressed: null,
+  bilingualPressed: null,
+  translatedActive: "true",
+  sourceActive: "false",
+  bilingualActive: "true",
+  translatedLabel: "译文",
+  sourceLabel: "原文",
+  bilingualLabel: "双语"
 });
+
+const subtitleEditModeState = await vm.runInContext(`
+  (async () => {
+    function findAllByClassName(root, className) {
+      if (!root) {
+        return [];
+      }
+      const own = String(root.className || "").split(/\\s+/).includes(className) ? [root] : [];
+      return own.concat((root.children || []).flatMap(child => findAllByClassName(child, className)));
+    }
+    const originalCacheCurrentSubtitles = cacheCurrentSubtitles;
+    const originalAttachCurrentSubtitlesToPage = attachCurrentSubtitlesToPage;
+    const originalSyncSet = chrome.storage.sync.set;
+    const syncPayloads = [];
+    chrome.storage.sync.set = async payload => {
+      syncPayloads.push(payload);
+    };
+    cacheCurrentSubtitles = async () => {};
+    attachCurrentSubtitlesToPage = async () => {};
+    try {
+      currentTranscript = {
+        source: [
+          { start: 0, end: 1.76, text: "오늘 재미있었다 그치?", chunkIndex: 0, segmentIndex: 0 },
+          { start: 2, end: 3, text: "원문만 있는 줄", chunkIndex: 0, segmentIndex: 1 }
+        ],
+        translated: [{ start: 0, end: 1.76, text: "今天很有趣，对吧?", chunkIndex: 0, segmentIndex: 0 }],
+        chunkStatuses: []
+      };
+      subtitleCues = cuesFromTranscript(currentTranscript);
+      subtitleCueSource = "transcript";
+      subtitleDisplayMode = "source";
+      subtitleOverlayEnabled = true;
+      subtitleEditMode = false;
+      activeCueIndex = -1;
+      elements.subtitleList.scrollTop = 180;
+      await toggleSubtitleEditMode();
+      const cue = elements.subtitleList.children[0];
+      const textWrap = cue.children[1];
+      const sourceOnlyCue = elements.subtitleList.children[1];
+      const sourceOnlyTextWrap = sourceOnlyCue.children[1];
+      return {
+        mode: subtitleDisplayMode,
+        editMode: subtitleEditMode,
+        buttonText: elements.subtitleEditToggle.textContent,
+        sourceEditButtons: findAllByClassName(textWrap.children[0], "cue-text-edit").length,
+        textEditButtons: findAllByClassName(textWrap, "cue-text-edit").length,
+        timeEditButtons: findAllByClassName(cue, "cue-time-edit").length,
+        deleteButtons: findAllByClassName(cue, "cue-delete").length,
+        sourceText: textWrap.children[0].textContent,
+        translatedText: textWrap.children[1].children[0].textContent,
+        sourceOnlySourceEditButtons: findAllByClassName(sourceOnlyTextWrap.children[0], "cue-text-edit").length,
+        sourceOnlyTextEditButtons: findAllByClassName(sourceOnlyTextWrap, "cue-text-edit").length,
+        sourceOnlySourceText: sourceOnlyTextWrap.children[0].textContent,
+        sourceOnlyTranslatedText: sourceOnlyTextWrap.children[1].children[0].textContent,
+        listScrollTop: elements.subtitleList.scrollTop,
+        firstCueScrolled: cue.scrolledIntoView || null,
+        syncPayloads
+      };
+    } finally {
+      cacheCurrentSubtitles = originalCacheCurrentSubtitles;
+      attachCurrentSubtitlesToPage = originalAttachCurrentSubtitlesToPage;
+      chrome.storage.sync.set = originalSyncSet;
+    }
+  })()
+`, context);
+
+assert.equal(subtitleEditModeState.mode, "bilingual");
+assert.equal(subtitleEditModeState.editMode, true);
+assert.equal(subtitleEditModeState.buttonText, "退出");
+assert.equal(subtitleEditModeState.sourceEditButtons, 0);
+assert.equal(subtitleEditModeState.textEditButtons, 1);
+assert.equal(subtitleEditModeState.timeEditButtons, 1);
+assert.equal(subtitleEditModeState.deleteButtons, 1);
+assert.equal(subtitleEditModeState.sourceText, "오늘 재미있었다 그치?");
+assert.equal(subtitleEditModeState.translatedText, "今天很有趣，对吧?");
+assert.equal(subtitleEditModeState.sourceOnlySourceEditButtons, 0);
+assert.equal(subtitleEditModeState.sourceOnlyTextEditButtons, 1);
+assert.equal(subtitleEditModeState.sourceOnlySourceText, "원문만 있는 줄");
+assert.equal(subtitleEditModeState.sourceOnlyTranslatedText, "");
+assert.equal(subtitleEditModeState.listScrollTop, 180);
+assert.equal(subtitleEditModeState.firstCueScrolled, null);
+assert.deepEqual(JSON.parse(JSON.stringify(subtitleEditModeState.syncPayloads)), [{ subtitleDisplayMode: "bilingual" }]);
+
+const subtitleEditAutosaveState = await vm.runInContext(`
+  (async () => {
+    function findAllByClassName(root, className) {
+      if (!root) {
+        return [];
+      }
+      const own = String(root.className || "").split(/\\s+/).includes(className) ? [root] : [];
+      return own.concat((root.children || []).flatMap(child => findAllByClassName(child, className)));
+    }
+    function findByClassName(root, className) {
+      return findAllByClassName(root, className)[0] || null;
+    }
+    const originalCacheCurrentSubtitles = cacheCurrentSubtitles;
+    const originalAttachCurrentSubtitlesToPage = attachCurrentSubtitlesToPage;
+    let cacheWrites = 0;
+    let attachWrites = 0;
+    cacheCurrentSubtitles = async () => {
+      cacheWrites += 1;
+    };
+    attachCurrentSubtitlesToPage = async () => {
+      attachWrites += 1;
+    };
+    try {
+      currentTranscript = {
+        source: [
+          { start: 0, end: 1.76, text: "오늘 재미있었다 그치?", chunkIndex: 0, segmentIndex: 0 },
+          { start: 4.019, end: 10.599, text: "바깥에서 계속 껴안았잖아", chunkIndex: 0, segmentIndex: 1 }
+        ],
+        translated: [
+          { start: 0, end: 1.76, text: "今天很有趣，对吧?", chunkIndex: 0, segmentIndex: 0 },
+          { start: 4.019, end: 10.599, text: "但是我一直在外面露胸，你没心动吗?", chunkIndex: 0, segmentIndex: 1 }
+        ],
+        chunkStatuses: []
+      };
+      subtitleCues = cuesFromTranscript(currentTranscript);
+      subtitleCueSource = "transcript";
+      subtitleDisplayMode = "bilingual";
+      subtitleEditMode = true;
+      subtitleEditingTextIndex = -1;
+      subtitleEditingTimeIndex = -1;
+      activeCueIndex = -1;
+      renderSubtitleCueList();
+
+      findByClassName(elements.subtitleList.children[0], "cue-text-edit").listeners.get("click")({ preventDefault() {}, stopPropagation() {} });
+      const textArea = findByClassName(elements.subtitleList.children[0], "subtitle-edit-textarea");
+      const textAreaAriaLabel = textArea["aria-label"];
+      textArea.value = "今天真的很有趣，对吧？";
+      await textArea.listeners.get("input")({ target: textArea });
+      const cacheWritesAfterTextInput = cacheWrites;
+      const attachWritesAfterTextInput = attachWrites;
+      await handleSubtitleInlineEditPointerDown({ target: textArea });
+      const textEditingIndexAfterInsideClick = subtitleEditingTextIndex;
+      await handleSubtitleInlineEditPointerDown({ target: elements.subtitleList });
+      const textEditingIndexAfterOutsideClick = subtitleEditingTextIndex;
+
+      findByClassName(elements.subtitleList.children[0], "cue-time-edit").listeners.get("click")({ preventDefault() {}, stopPropagation() {} });
+      const timeInputs = findAllByClassName(elements.subtitleList.children[0], "subtitle-time-input");
+      timeInputs[0].value = "00:00:00.250 --> 00:00:01.500";
+      await timeInputs[0].listeners.get("input")({ target: timeInputs[0] });
+      await handleSubtitleInlineEditPointerDown({ target: timeInputs[0] });
+      const timeEditingIndexAfterInsideClick = subtitleEditingTimeIndex;
+      await handleSubtitleInlineEditPointerDown({ target: elements.subtitleList });
+      const timeEditingIndexAfterOutsideClick = subtitleEditingTimeIndex;
+
+      elements.taskMessage.hidden = true;
+      elements.taskMessage.textContent = "";
+      elements.subtitleList.scrollTop = 240;
+      elements.subtitleList.scrollLeft = 4;
+      window.scrollY = 620;
+      window.scrollX = 8;
+      const scrollToCalls = [];
+      window.scrollTo = (left, top) => {
+        scrollToCalls.push([left, top]);
+        window.scrollX = left;
+        window.scrollY = top;
+      };
+      await findByClassName(elements.subtitleList.children[1], "cue-delete").listeners.get("click")({ preventDefault() {}, stopPropagation() {} });
+
+      return {
+        cueText: subtitleCues[0]?.text,
+        cueStart: subtitleCues[0]?.start,
+        cueEnd: subtitleCues[0]?.end,
+        translatedText: currentTranscript.translated[0]?.text,
+        translatedStart: currentTranscript.translated[0]?.start,
+        translatedEnd: currentTranscript.translated[0]?.end,
+        sourceStart: currentTranscript.source[0]?.start,
+        sourceEnd: currentTranscript.source[0]?.end,
+        cueCount: subtitleCues.length,
+        sourceCount: currentTranscript.source.length,
+        translatedCount: currentTranscript.translated.length,
+        textEditingIndexAfterInsideClick,
+        textEditingIndexAfterOutsideClick,
+        timeEditingIndexAfterInsideClick,
+        timeEditingIndexAfterOutsideClick,
+        textAreaAriaLabel,
+        cacheWritesAfterTextInput,
+        attachWritesAfterTextInput,
+        listScrollTopAfterDelete: elements.subtitleList.scrollTop,
+        listScrollLeftAfterDelete: elements.subtitleList.scrollLeft,
+        pageScrollYAfterDelete: window.scrollY,
+        pageScrollXAfterDelete: window.scrollX,
+        scrollToCalls,
+        taskMessageHiddenAfterDelete: elements.taskMessage.hidden,
+        taskMessageTextAfterDelete: elements.taskMessage.textContent,
+        cacheWrites,
+        attachWrites
+      };
+    } finally {
+      cacheCurrentSubtitles = originalCacheCurrentSubtitles;
+      attachCurrentSubtitlesToPage = originalAttachCurrentSubtitlesToPage;
+    }
+  })()
+`, context);
+
+assert.equal(subtitleEditAutosaveState.cueText, "今天真的很有趣，对吧？");
+assert.equal(subtitleEditAutosaveState.translatedText, "今天真的很有趣，对吧？");
+assert.equal(subtitleEditAutosaveState.cueStart, 0.25);
+assert.equal(subtitleEditAutosaveState.cueEnd, 1.5);
+assert.equal(subtitleEditAutosaveState.translatedStart, 0.25);
+assert.equal(subtitleEditAutosaveState.translatedEnd, 1.5);
+assert.equal(subtitleEditAutosaveState.sourceStart, 0.25);
+assert.equal(subtitleEditAutosaveState.sourceEnd, 1.5);
+assert.equal(subtitleEditAutosaveState.cueCount, 1);
+assert.equal(subtitleEditAutosaveState.sourceCount, 1);
+assert.equal(subtitleEditAutosaveState.translatedCount, 1);
+assert.equal(subtitleEditAutosaveState.textEditingIndexAfterInsideClick, 0);
+assert.equal(subtitleEditAutosaveState.textEditingIndexAfterOutsideClick, -1);
+assert.equal(subtitleEditAutosaveState.timeEditingIndexAfterInsideClick, 0);
+assert.equal(subtitleEditAutosaveState.timeEditingIndexAfterOutsideClick, -1);
+assert.equal(subtitleEditAutosaveState.textAreaAriaLabel, "编辑译文");
+assert.equal(subtitleEditAutosaveState.cacheWritesAfterTextInput, 0);
+assert.equal(subtitleEditAutosaveState.attachWritesAfterTextInput, 0);
+assert.equal(subtitleEditAutosaveState.listScrollTopAfterDelete, 240);
+assert.equal(subtitleEditAutosaveState.listScrollLeftAfterDelete, 4);
+assert.equal(subtitleEditAutosaveState.pageScrollYAfterDelete, 620);
+assert.equal(subtitleEditAutosaveState.pageScrollXAfterDelete, 8);
+assert.deepEqual(JSON.parse(JSON.stringify(subtitleEditAutosaveState.scrollToCalls.at(-1))), [8, 620]);
+assert.equal(subtitleEditAutosaveState.taskMessageHiddenAfterDelete, true);
+assert.equal(subtitleEditAutosaveState.taskMessageTextAfterDelete, "");
+assert.equal(subtitleEditAutosaveState.cacheWrites >= 3, true);
+assert.equal(subtitleEditAutosaveState.attachWrites >= 3, true);
 
 const sourcePreviewNoticeText = await vm.runInContext(`
   (() => {
@@ -5179,6 +5479,70 @@ const sameCountUpdatedSubtitleState = await vm.runInContext(`
 
 assert.equal(sameCountUpdatedSubtitleState.cueText, "new text");
 assert.match(sameCountUpdatedSubtitleState.attachedVtt, /new text/);
+
+const vttRenderClearsStaleTranscriptState = await vm.runInContext(`
+  (async () => {
+    const originalSendMessage = chrome.runtime.sendMessage;
+    const originalCacheCurrentSubtitles = cacheCurrentSubtitles;
+    const originalAttachCurrentSubtitlesToPage = attachCurrentSubtitlesToPage;
+    cacheCurrentSubtitles = async () => {};
+    attachCurrentSubtitlesToPage = async () => {};
+    try {
+      activeTab = { id: 1, url: "https://example.test/vtt-only" };
+      currentJobId = "job-vtt-only";
+      renderedSubtitleJobId = "";
+      renderedSubtitleSignature = "";
+      subtitleCues = [];
+      subtitleCueSource = "";
+      activeCueIndex = -1;
+      currentTranscript = {
+        source: [{ start: 10, end: 11, text: "旧原文", chunkIndex: 9, segmentIndex: 9 }],
+        translated: [{ start: 10, end: 11, text: "旧译文", chunkIndex: 9, segmentIndex: 9 }],
+        chunkStatuses: []
+      };
+      chrome.runtime.sendMessage = async message => {
+        if (message.type === "FUGUANG_GET_PRELOAD_TRANSCRIPT") {
+          return { ok: false };
+        }
+        if (message.type === "FUGUANG_GET_PRELOAD_VTT") {
+          return { ok: true, vtt: "WEBVTT\\n\\n00:00:00.000 --> 00:00:01.000\\nVTT text\\n" };
+        }
+        return { ok: true };
+      };
+      await renderSubtitles("job-vtt-only", {
+        translation: {
+          segmentCount: 1,
+          chunksDone: 1,
+          chunksFailed: 0,
+          vttPath: "cache.vtt"
+        }
+      });
+      const transcriptAfterRenderIsNull = currentTranscript === null;
+      await applySubtitleCueTextEdit(0, "新译文");
+      return {
+        cueSource: subtitleCueSource,
+        transcriptAfterRenderIsNull,
+        sourceLength: currentTranscript.source.length,
+        translatedLength: currentTranscript.translated.length,
+        sourceText: currentTranscript.source[0]?.text,
+        translatedText: currentTranscript.translated[0]?.text
+      };
+    } finally {
+      chrome.runtime.sendMessage = originalSendMessage;
+      cacheCurrentSubtitles = originalCacheCurrentSubtitles;
+      attachCurrentSubtitlesToPage = originalAttachCurrentSubtitlesToPage;
+    }
+  })()
+`, context);
+
+assert.deepEqual(JSON.parse(JSON.stringify(vttRenderClearsStaleTranscriptState)), {
+  cueSource: "vtt",
+  transcriptAfterRenderIsNull: true,
+  sourceLength: 1,
+  translatedLength: 1,
+  sourceText: "",
+  translatedText: "新译文"
+});
 
 const subtitlePendingFailureClearsState = await vm.runInContext(`
   (async () => {

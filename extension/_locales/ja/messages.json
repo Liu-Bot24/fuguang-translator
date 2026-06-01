@@ -1,0 +1,18 @@
+{
+  "appName": {
+    "message": "Liusheng Subtitles - ASR/LLMでストリーミング動画字幕生成・翻訳",
+    "description": "Chrome Web Store のタイトルと拡張機能名。"
+  },
+  "appShortName": {
+    "message": "Liusheng Subtitles",
+    "description": "Chrome ツールバーなどの短い表示名。"
+  },
+  "appDescription": {
+    "message": "ASRとLLMでWeb動画の字幕を生成し翻訳します。",
+    "description": "Chrome Web Store と拡張機能管理画面に表示する短い説明。"
+  },
+  "actionTitle": {
+    "message": "Liusheng Subtitles",
+    "description": "拡張機能ボタンのツールチップ。"
+  }
+}

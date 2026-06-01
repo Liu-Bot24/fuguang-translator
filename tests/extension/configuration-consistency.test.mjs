@@ -7,6 +7,7 @@ const background = fs.readFileSync(new URL("../../extension/src/background/servi
 const backgroundProfiles = loadBackgroundModelProfiles();
 const sidepanelProfiles = loadSidepanelProfiles();
 const sidepanelHtml = fs.readFileSync(new URL("../../extension/src/sidepanel/sidepanel.html", import.meta.url), "utf8");
+const manifest = JSON.parse(fs.readFileSync(new URL("../../extension/manifest.json", import.meta.url), "utf8"));
 
 assert.equal(constNumber(sidepanel, "MODEL_SETTINGS_VERSION"), constNumber(background, "MODEL_SETTINGS_VERSION"));
 assert.equal(sidepanelProfiles.DEFAULT_ASR_PROFILE_ID, backgroundProfiles.DEFAULT_ASR_PROFILE_ID);
@@ -71,6 +72,10 @@ assert.equal(constExpression(background, "BROWSER_ASR_MAX_UPLOAD_CHUNK_SECONDS")
 assert.equal(constExpression(background, "BROWSER_ASR_MAX_UPLOAD_BYTES"), 25 * 1024 * 1024);
 assert.deepEqual(selectOptionValues(sidepanelHtml, "asrVadFilter"), ["auto", "on", "off"]);
 assert.deepEqual(selectOptionValues(sidepanelHtml, "webFfmpegPerformance"), ["auto", "stable", "fast"]);
+assert.ok(
+  cspSourceList(manifest.content_security_policy.extension_pages, "connect-src").includes("file:"),
+  "extension_pages connect-src must allow file: so local media files can be fetched after the user enables file URL access"
+);
 
 function constNumber(source, name) {
   const match = source.match(new RegExp(`const ${name} = (\\d+);`));
@@ -101,6 +106,15 @@ function selectOptionValues(html, id) {
   const selectMatch = html.match(new RegExp(`<select[^>]*id="${id}"[^>]*>([\\s\\S]*?)<\\/select>`));
   assert.ok(selectMatch, `${id} select missing`);
   return Array.from(selectMatch[1].matchAll(/<option\s+value="([^"]+)"/g), match => match[1]);
+}
+
+function cspSourceList(policy, directiveName) {
+  const directive = String(policy || "")
+    .split(";")
+    .map(part => part.trim())
+    .find(part => part.startsWith(`${directiveName} `));
+  assert.ok(directive, `${directiveName} directive missing`);
+  return directive.split(/\s+/).slice(1);
 }
 
 function loadBackgroundModelProfiles() {

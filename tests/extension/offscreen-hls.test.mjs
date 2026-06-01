@@ -267,6 +267,14 @@ audio-stream-inf.m3u8
 }
 
 {
+  assert.equal(context.isFetchableMediaSourceUrl("https://cdn.example.test/video.mp4"), true);
+  assert.equal(context.isFetchableMediaSourceUrl("http://127.0.0.1/video.mp4"), true);
+  assert.equal(context.isFetchableMediaSourceUrl("file:///Volumes/share/video-without-extension-whitelist.rm"), true);
+  assert.equal(context.isFetchableMediaSourceUrl("file://SERVER/Share/Video/local.flv"), true);
+  assert.equal(context.isFetchableMediaSourceUrl("ftp://media.example.test/video.mp4"), false);
+}
+
+{
   const originalFetch = context.fetch;
   const originalEnsureWebFfmpegFrame = context.ensureWebFfmpegFrame;
   const originalWarmWebFfmpegFrame = context.warmWebFfmpegFrame;
@@ -370,6 +378,94 @@ audio-stream-inf.m3u8
       ]
     );
     assert.equal(result.chunks.every(chunk => chunk.file.cacheUrl.includes("__fuguang_audio_cache")), true);
+  } finally {
+    context.fetch = originalFetch;
+    context.ensureWebFfmpegFrame = originalEnsureWebFfmpegFrame;
+    context.warmWebFfmpegFrame = originalWarmWebFfmpegFrame;
+    context.requestWebFfmpeg = originalRequestWebFfmpeg;
+    context.caches = originalCaches;
+    context.Response = originalResponse;
+  }
+}
+
+{
+  const originalFetch = context.fetch;
+  const originalEnsureWebFfmpegFrame = context.ensureWebFfmpegFrame;
+  const originalWarmWebFfmpegFrame = context.warmWebFfmpegFrame;
+  const originalRequestWebFfmpeg = context.requestWebFfmpeg;
+  const originalCaches = context.caches;
+  const originalResponse = context.Response;
+  const cache = new Map();
+  let fetchedUrl = "";
+  let captured = null;
+  context.Response = class {
+    constructor(body) {
+      this.body = body;
+    }
+
+    async arrayBuffer() {
+      return this.body;
+    }
+  };
+  context.caches = {
+    open: async () => ({
+      put: async (url, response) => cache.set(url, response),
+      match: async url => cache.get(url) || null,
+      delete: async url => cache.delete(url)
+    })
+  };
+  context.ensureWebFfmpegFrame = async () => {};
+  context.warmWebFfmpegFrame = () => {};
+  context.fetch = async url => {
+    fetchedUrl = String(url);
+    return {
+      ok: false,
+      status: 0,
+      headers: { get: name => String(name || "").toLowerCase() === "content-type" ? "video/x-flv" : "" },
+      arrayBuffer: async () => vm.runInContext("new Uint8Array([1, 2, 3, 4]).buffer", context)
+    };
+  };
+  context.requestWebFfmpeg = async (payload, transfer) => {
+    captured = { payload, transfer };
+    return {
+      chunks: [{
+        index: 0,
+        start: 0,
+        end: 10,
+        duration: 10,
+        coreStart: 0,
+        coreEnd: 10,
+        coreDuration: 10,
+        file: {
+          name: "local-000.mp3",
+          mime: "audio/mpeg",
+          buffer: vm.runInContext("new Uint8Array([9, 9]).buffer", context)
+        },
+        bytes: 2
+      }],
+      bytes: 2,
+      duration: 10,
+      sourceType: "direct"
+    };
+  };
+
+  try {
+    const localUrl = "file:///Volumes/share/video-without-extension-whitelist.flv";
+    const result = await context.extractAudioWithWebFfmpeg({
+      sourceUrl: localUrl,
+      fileName: "video-without-extension-whitelist.flv",
+      cacheNamespace: "local-file-direct-test",
+      asrChunkSeconds: 30,
+      duration: 10
+    });
+    assert.equal(fetchedUrl, localUrl);
+    assert.equal(captured.payload.file.name, "video-without-extension-whitelist.flv");
+    assert.equal(captured.payload.file.mime, "video/x-flv");
+    assert.equal(captured.payload.file.buffer.byteLength, 4);
+    assert.equal(captured.transfer.length, 1);
+    assert.equal(result.sourceType, "direct");
+    assert.equal(result.chunks.length, 1);
+    assert.equal(result.chunks[0].file.cacheUrl.includes("__fuguang_audio_cache"), true);
   } finally {
     context.fetch = originalFetch;
     context.ensureWebFfmpegFrame = originalEnsureWebFfmpegFrame;

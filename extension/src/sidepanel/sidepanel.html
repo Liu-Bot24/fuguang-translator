@@ -73,10 +73,13 @@
         <section id="jobStatus" class="job-panel"></section>
         <section class="subtitle-section">
           <div class="section-heading compact">
-            <h2 data-i18n="fullSubtitles">完整字幕</h2>
+            <div class="subtitle-title-row">
+              <h2 data-i18n="fullSubtitles">完整字幕</h2>
+              <button id="subtitleEditToggle" type="button" class="subtitle-edit-toggle" aria-pressed="false" data-i18n="editSubtitles">编辑</button>
+            </div>
             <div class="subtitle-actions">
               <button id="subtitleOverlayToggle" type="button" class="secondary small-button" aria-pressed="true">浮层开</button>
-              <button id="subtitleModeToggle" type="button" class="secondary small-button" aria-pressed="true">译文</button>
+              <button id="subtitleModeToggle" type="button" class="secondary small-button" data-mode="translated" data-active="true" aria-label="译文">译文</button>
               <button id="exportSubtitle" type="button" class="secondary small-button" data-i18n="exportSrt">导出SRT</button>
               <button id="importSubtitle" type="button" class="secondary small-button" data-i18n="importSubtitle">导入</button>
               <button id="clearSubtitleCache" type="button" class="secondary small-button" data-i18n="clearSubtitleCache">清字幕缓存</button>
@@ -84,7 +87,7 @@
             </div>
           </div>
           <input id="subtitleImportFile" type="file" accept="application/json,.json,.srt,text/vtt,.vtt,.ass,.ssa" hidden>
-          <div id="subtitleNotice" class="subtitle-notice" hidden></div>
+          <div id="subtitleNotice" class="subtitle-notice" role="status" aria-live="polite" hidden></div>
           <div id="subtitleList" class="subtitle-list" data-i18n="subtitlePlaceholder">字幕生成后会显示在这里。</div>
         </section>
         <p class="task-boundary-note" data-i18n="taskBoundaryNote">* 受 DRM 或平台策略保护影响，Netflix、YouTube 等部分媒体可能无法在浏览器插件内完成音频识别。请将流声字幕用于支持的内容，或期待本地版本。</p>

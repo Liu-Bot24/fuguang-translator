@@ -12,12 +12,20 @@ Liusheng Subtitles is a Chrome extension for generating and translating subtitle
 
 After opening a video page, Liusheng Subtitles shows available media sources in the side panel. Configure an ASR provider and an LLM translation provider, then generate original subtitles, translated subtitles, or bilingual subtitles and display them on the page.
 
+## 0.1.3 Updates
+
+- Supports local video files opened directly in Chrome: drag a local video into the browser, then let Liusheng Subtitles extract audio and generate subtitles from that local file source.
+- Adds per-cue subtitle correction in the side panel: edit translated text, adjust shared subtitle timing, and delete incorrect ASR-generated cues.
+- Improves HLS/DASH media parsing consistency across extraction paths.
+
 ## Features
 
 - Discover video sources on the current web page.
+- Support local video files opened directly in the browser.
 - Generate original subtitles and translate them into the selected target language.
 - Switch between translated text, original text, and bilingual display.
 - Show subtitles as a page overlay or in the side-panel subtitle list.
+- Edit translated cues, adjust subtitle timing, and delete incorrect subtitle segments.
 - Import SRT, VTT, ASS/SSA, and extension JSON subtitle files.
 - Export subtitles as SRT.
 - Cache subtitles locally so the same page can load existing subtitles later.

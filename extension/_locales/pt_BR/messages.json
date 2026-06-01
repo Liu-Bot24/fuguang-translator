@@ -1,0 +1,18 @@
+{
+  "appName": {
+    "message": "Liusheng Subtitles - Gere e traduza legendas de vídeo com ASR e LLM",
+    "description": "Título da Chrome Web Store e nome da extensão."
+  },
+  "appShortName": {
+    "message": "Liusheng Subtitles",
+    "description": "Nome curto usado na barra de ferramentas do Chrome."
+  },
+  "appDescription": {
+    "message": "Gere e traduza legendas de vídeos da web com serviços ASR e LLM.",
+    "description": "Descrição curta exibida na Chrome Web Store e no gerenciamento de extensões."
+  },
+  "actionTitle": {
+    "message": "Liusheng Subtitles",
+    "description": "Título da dica do botão da extensão."
+  }
+}

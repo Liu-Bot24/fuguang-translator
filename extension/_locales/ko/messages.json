@@ -1,0 +1,18 @@
+{
+  "appName": {
+    "message": "Liusheng Subtitles - ASR/LLM 기반 스트리밍 영상 자막 생성·번역",
+    "description": "Chrome 웹 스토어 제목과 확장 프로그램 이름."
+  },
+  "appShortName": {
+    "message": "Liusheng Subtitles",
+    "description": "Chrome 툴바와 간단한 표시 영역에서 쓰는 짧은 이름."
+  },
+  "appDescription": {
+    "message": "ASR과 LLM으로 웹 영상 자막을 생성하고 번역합니다.",
+    "description": "Chrome 웹 스토어와 확장 프로그램 관리 화면에 표시되는 짧은 설명."
+  },
+  "actionTitle": {
+    "message": "Liusheng Subtitles",
+    "description": "확장 프로그램 버튼 툴팁 제목."
+  }
+}

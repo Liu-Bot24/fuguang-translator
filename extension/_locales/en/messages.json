@@ -1,0 +1,18 @@
+{
+  "appName": {
+    "message": "Liusheng Subtitles - ASR & LLM Video Subtitle Generation & Translation",
+    "description": "Chrome Web Store title and extension name."
+  },
+  "appShortName": {
+    "message": "Liusheng Subtitles",
+    "description": "Short name used in Chrome toolbar and compact surfaces."
+  },
+  "appDescription": {
+    "message": "Generate and translate subtitles for web video with user-configured ASR and LLM services.",
+    "description": "Short description shown in Chrome Web Store and extension management."
+  },
+  "actionTitle": {
+    "message": "Liusheng Subtitles",
+    "description": "Extension action tooltip title."
+  }
+}

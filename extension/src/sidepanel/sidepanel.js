@@ -84,6 +84,14 @@ const I18N = {
     subtitleModeTranslated: "译文",
     subtitleModeSource: "原文",
     subtitleModeBilingual: "双语",
+    editSubtitles: "编辑",
+    doneEditingSubtitles: "退出",
+    editSubtitleText: "编辑译文",
+    editSubtitleTime: "校正时间",
+    deleteSubtitleCue: "删除本条",
+    subtitleEditSaved: "字幕已自动保存。",
+    subtitleCueDeleted: "已删除该字幕段。",
+    subtitleInvalidTime: "时间格式不正确，或结束时间早于开始时间。",
     exportSrt: "导出SRT",
     importSubtitle: "导入",
     clearSubtitleCache: "清字幕缓存",
@@ -360,6 +368,14 @@ const I18N = {
     subtitleModeTranslated: "Translation",
     subtitleModeSource: "Source",
     subtitleModeBilingual: "Bilingual",
+    editSubtitles: "Edit",
+    doneEditingSubtitles: "Exit",
+    editSubtitleText: "Edit translation",
+    editSubtitleTime: "Adjust timing",
+    deleteSubtitleCue: "Delete cue",
+    subtitleEditSaved: "Subtitle edits saved automatically.",
+    subtitleCueDeleted: "Deleted this subtitle cue.",
+    subtitleInvalidTime: "Invalid time format, or the end time is before the start time.",
     exportSrt: "Export SRT",
     importSubtitle: "Import",
     clearSubtitleCache: "Clear Subtitles",
@@ -651,6 +667,7 @@ const elements = {
   candidateList: document.querySelector("#candidateList"),
   jobStatus: document.querySelector("#jobStatus"),
   subtitleList: document.querySelector("#subtitleList"),
+  subtitleEditToggle: document.querySelector("#subtitleEditToggle"),
   subtitleOverlayToggle: document.querySelector("#subtitleOverlayToggle"),
   subtitleModeToggle: document.querySelector("#subtitleModeToggle"),
   exportSubtitle: document.querySelector("#exportSubtitle"),
@@ -721,6 +738,11 @@ let currentTranscript = null;
 let currentSubtitleCacheEntry = null;
 let subtitleDisplayMode = DEFAULTS.subtitleDisplayMode;
 let subtitleOverlayEnabled = DEFAULTS.subtitleOverlayEnabled;
+let subtitleEditMode = false;
+let subtitleEditingTextIndex = -1;
+let subtitleEditingTimeIndex = -1;
+let subtitleEditingTextDraft = "";
+let subtitleEditingTimeDraft = "";
 let attachedSubtitleTabId = 0;
 let attachedSubtitleSignature = "";
 let renderedSubtitleSignature = "";
@@ -750,6 +772,7 @@ setSubtitleOutputRuntimeStateProvider(() => ({
 }));
 
 document.addEventListener("DOMContentLoaded", init);
+document.addEventListener("pointerdown", event => handleSubtitleInlineEditPointerDown(event), true);
 elements.localeEnglish.addEventListener("click", () => setLocale("en"));
 elements.localeChinese.addEventListener("click", () => setLocale("zh"));
 elements.tabTask.addEventListener("click", () => showTab("task"));
@@ -764,6 +787,7 @@ elements.refresh.addEventListener("click", () => refreshStatus());
 elements.refreshCandidates.addEventListener("click", () => refreshCandidates());
 elements.subtitleOverlayToggle.addEventListener("click", () => toggleSubtitleOverlay());
 elements.subtitleModeToggle.addEventListener("click", () => toggleSubtitleMode());
+elements.subtitleEditToggle.addEventListener("click", () => toggleSubtitleEditMode());
 elements.exportSubtitle.addEventListener("click", () => exportCurrentSubtitle());
 elements.importSubtitle.addEventListener("click", () => elements.subtitleImportFile.click());
 elements.clearSubtitleCache.addEventListener("click", () => clearCurrentSubtitleCache());
@@ -893,6 +917,7 @@ function applyLocale() {
     elements.candidateSummary.textContent = t("readingSources");
   }
   renderSubtitleModeButton();
+  renderSubtitleEditButton();
   renderSubtitleOverlayButton();
   updateActionButtons(currentJob);
   updateTaskPanelFocus(currentJob);
@@ -1043,6 +1068,7 @@ function applyStoredSettings(data) {
   subtitleOverlayEnabled = data.subtitleOverlayEnabled !== false;
   subtitleDisplayMode = normalizeSubtitleDisplayMode(data.subtitleDisplayMode || DEFAULTS.subtitleDisplayMode);
   renderSubtitleModeButton();
+  renderSubtitleEditButton();
   renderSubtitleOverlayButton();
 }
 
@@ -2255,7 +2281,7 @@ async function renderSubtitles(jobId, job = null) {
   renderedSubtitleJobId = jobId || renderedSubtitleJobId;
   renderedSubtitleSignature = signature || "";
   subtitleCueSource = result.source;
-  currentTranscript = result.transcript || (result.source === "transcript" ? transcriptFromCues(cues) : currentTranscript);
+  currentTranscript = result.transcript || (result.source === "transcript" ? transcriptFromCues(cues) : null);
   subtitleCues = cues;
   activeCueIndex = -1;
   renderSubtitleCueList();
@@ -2294,7 +2320,9 @@ async function loadSubtitleCues(jobId) {
   return { cues: parseVtt(response.vtt), source: "vtt", transcript: null };
 }
 
-function renderSubtitleCueList() {
+function renderSubtitleCueList(options = {}) {
+  const preserveScroll = options.preserveScroll === true;
+  const scrollState = options.scrollState || (preserveScroll ? captureSubtitleScrollState() : null);
   elements.subtitleList.replaceChildren();
   const visibleCues = visibleSubtitleCueItems();
   if (!subtitleCues.length) {
@@ -2302,6 +2330,9 @@ function renderSubtitleCueList() {
     renderSubtitleNotice();
     updateTaskPanelFocus(currentJob);
     updateActionButtons(currentJob);
+    if (preserveScroll) {
+      restoreSubtitleScrollState(scrollState);
+    }
     return;
   }
   if (!visibleCues.length) {
@@ -2309,15 +2340,19 @@ function renderSubtitleCueList() {
     renderSubtitleNotice();
     updateTaskPanelFocus(currentJob);
     updateActionButtons(currentJob);
+    if (preserveScroll) {
+      restoreSubtitleScrollState(scrollState);
+    }
     return;
   }
   for (const { cue, index } of visibleCues) {
     const item = document.createElement("div");
     item.className = "cue";
+    if (subtitleEditMode) {
+      item.classList.add("cue-editable");
+    }
     item.dataset.index = String(index);
-    const time = document.createElement("div");
-    time.className = "time";
-    time.textContent = cue.time;
+    const timeRow = renderSubtitleCueTimeRow(cue, index);
     const textWrap = document.createElement("div");
     textWrap.className = "subtitle-lines";
     if (cue.speakerLabel) {
@@ -2326,33 +2361,216 @@ function renderSubtitleCueList() {
       speaker.textContent = cue.speakerLabel;
       textWrap.appendChild(speaker);
     }
-    if (subtitleDisplayMode === "bilingual" && cue.sourceText && cue.sourceText !== cue.text) {
+    if (subtitleDisplayMode === "bilingual" && cue.sourceText && (subtitleEditMode || cue.sourceText !== cue.text)) {
       const source = document.createElement("div");
       source.className = "subtitle-source";
       source.textContent = cue.sourceText;
       textWrap.appendChild(source);
     }
-    const text = document.createElement("div");
-    text.className = "subtitle-text";
-    text.textContent = subtitleCueTextLines(cue, subtitleDisplayMode).slice(-1)[0] || "";
-    textWrap.appendChild(text);
+    textWrap.appendChild(renderSubtitleCueTextRow(cue, index));
     item.title = t("cueJumpTitle");
     item.addEventListener("dblclick", () => seekToCue(cue.start, index));
-    item.append(time, textWrap);
+    item.append(timeRow, textWrap);
+    if (subtitleEditMode) {
+      item.appendChild(renderSubtitleCueDeleteButton(index));
+    }
     elements.subtitleList.appendChild(item);
   }
   if (activeCueIndex >= 0) {
-    setActiveCueIndex(activeCueIndex);
+    setActiveCueIndex(activeCueIndex, { suppressScroll: preserveScroll });
   } else {
     const firstVisible = visibleCues[0]?.index ?? -1;
     if (firstVisible >= 0) {
-      setActiveCueIndex(firstVisible);
+      setActiveCueIndex(firstVisible, { suppressScroll: preserveScroll });
     }
   }
   renderSubtitleModeButton();
+  renderSubtitleEditButton();
   renderSubtitleNotice();
   updateTaskPanelFocus(currentJob);
   updateActionButtons(currentJob);
+  if (preserveScroll) {
+    restoreSubtitleScrollState(scrollState);
+  }
+}
+
+function captureSubtitleScrollState() {
+  const pageScroller = document.scrollingElement || document.documentElement || document.body || null;
+  return {
+    subtitleTop: Number(elements.subtitleList.scrollTop) || 0,
+    subtitleLeft: Number(elements.subtitleList.scrollLeft) || 0,
+    pageTop: Number.isFinite(window.scrollY) ? window.scrollY : Number(pageScroller?.scrollTop) || 0,
+    pageLeft: Number.isFinite(window.scrollX) ? window.scrollX : Number(pageScroller?.scrollLeft) || 0
+  };
+}
+
+function restoreSubtitleScrollState(state) {
+  if (!state) {
+    return;
+  }
+  const apply = () => {
+    elements.subtitleList.scrollTop = state.subtitleTop;
+    elements.subtitleList.scrollLeft = state.subtitleLeft;
+    const pageScroller = document.scrollingElement || document.documentElement || document.body || null;
+    if (typeof window.scrollTo === "function") {
+      window.scrollTo(state.pageLeft, state.pageTop);
+    } else if (pageScroller) {
+      pageScroller.scrollTop = state.pageTop;
+      pageScroller.scrollLeft = state.pageLeft;
+    }
+  };
+  apply();
+  if (typeof window.requestAnimationFrame === "function") {
+    window.requestAnimationFrame(apply);
+  }
+  window.setTimeout?.(apply, 0);
+}
+
+function renderSubtitleCueTimeRow(cue, index) {
+  const row = document.createElement("div");
+  row.className = subtitleEditingTimeIndex === index ? "cue-time-row editing" : "cue-time-row";
+  if (subtitleEditMode && subtitleEditingTimeIndex === index) {
+    const timeInput = document.createElement("input");
+    timeInput.className = "subtitle-time-input";
+    timeInput.type = "text";
+    timeInput.value = cue.time || formatCueTime(cue.start, cue.end);
+    subtitleEditingTimeDraft = timeInput.value;
+    timeInput.inputMode = "decimal";
+    timeInput.setAttribute("aria-label", t("editSubtitleTime"));
+    const finish = () => finishSubtitleCueTimeEdit(index, subtitleEditingTimeDraft || timeInput.value);
+    timeInput.addEventListener("input", event => {
+      subtitleEditingTimeDraft = event.target.value;
+    });
+    timeInput.addEventListener("blur", () => deferSubtitleInlineFinish(finish));
+    timeInput.addEventListener("keydown", event => {
+      if (event.key === "Enter") {
+        event.preventDefault?.();
+        return finish();
+      } else if (event.key === "Escape") {
+        event.preventDefault?.();
+        return exitSubtitleCueInlineEdit({ timeIndex: index });
+      }
+      return undefined;
+    });
+    row.appendChild(timeInput);
+    window.setTimeout?.(() => timeInput.focus?.(), 0);
+    return row;
+  }
+  const time = document.createElement("div");
+  time.className = "time";
+  time.textContent = cue.time;
+  row.appendChild(time);
+  if (subtitleEditMode) {
+    row.appendChild(createCueEditButton({
+      className: "cue-edit-button cue-time-edit",
+      icon: "edit",
+      title: t("editSubtitleTime"),
+      onClick: () => {
+        subtitleEditingTimeIndex = subtitleEditingTimeIndex === index ? -1 : index;
+        subtitleEditingTextIndex = -1;
+        subtitleEditingTextDraft = "";
+        subtitleEditingTimeDraft = "";
+        renderSubtitleCueList({ preserveScroll: true });
+      }
+    }));
+  }
+  return row;
+}
+
+function renderSubtitleCueTextRow(cue, index) {
+  const row = document.createElement("div");
+  row.className = subtitleEditMode ? "subtitle-text-row editable" : "subtitle-text-row";
+  if (subtitleEditMode && subtitleEditingTextIndex === index) {
+    row.classList.add("editing");
+    const textarea = document.createElement("textarea");
+    textarea.className = "subtitle-edit-textarea";
+    textarea.value = editableSubtitleCueTranslationText(cue);
+    subtitleEditingTextDraft = textarea.value;
+    textarea.rows = 1;
+    textarea.setAttribute("aria-label", t("editSubtitleText"));
+    const resize = () => resizeSubtitleEditTextarea(textarea);
+    const finish = () => finishSubtitleCueTextEdit(index, subtitleEditingTextDraft);
+    textarea.addEventListener("input", event => {
+      subtitleEditingTextDraft = event.target.value;
+      resize();
+    });
+    textarea.addEventListener("blur", () => deferSubtitleInlineFinish(finish));
+    textarea.addEventListener("keydown", event => {
+      if (event.key === "Enter" && !event.shiftKey) {
+        event.preventDefault?.();
+        return finish();
+      } else if (event.key === "Escape") {
+        event.preventDefault?.();
+        return exitSubtitleCueInlineEdit({ textIndex: index });
+      }
+      return undefined;
+    });
+    row.appendChild(textarea);
+    window.setTimeout?.(() => {
+      resize();
+      textarea.focus?.();
+    }, 0);
+    return row;
+  }
+  const text = document.createElement("div");
+  text.className = "subtitle-text";
+  text.textContent = subtitleEditMode
+    ? editableSubtitleCueTranslationText(cue)
+    : subtitleCueTextLines(cue, subtitleDisplayMode).slice(-1)[0] || "";
+  row.appendChild(text);
+  if (subtitleEditMode) {
+    row.appendChild(createCueEditButton({
+      className: "cue-edit-button cue-text-edit",
+      icon: "edit",
+      title: t("editSubtitleText"),
+      onClick: () => {
+        subtitleEditingTextIndex = subtitleEditingTextIndex === index ? -1 : index;
+        subtitleEditingTimeIndex = -1;
+        subtitleEditingTextDraft = "";
+        subtitleEditingTimeDraft = "";
+        renderSubtitleCueList({ preserveScroll: true });
+      }
+    }));
+  }
+  return row;
+}
+
+function renderSubtitleCueDeleteButton(index) {
+  return createCueEditButton({
+    className: "cue-edit-button cue-delete",
+    icon: "delete",
+    title: t("deleteSubtitleCue"),
+    onClick: () => deleteSubtitleCueAtIndex(index)
+  });
+}
+
+function createCueEditButton({ className, label, icon, title, onClick }) {
+  const button = document.createElement("button");
+  button.type = "button";
+  button.className = className;
+  if (icon) {
+    button.innerHTML = cueEditIconSvg(icon);
+  } else {
+    button.textContent = label;
+  }
+  button.title = title;
+  button.setAttribute("aria-label", title);
+  button.addEventListener("pointerdown", event => {
+    event.preventDefault?.();
+  });
+  button.addEventListener("click", event => {
+    event?.preventDefault?.();
+    event?.stopPropagation?.();
+    return onClick?.();
+  });
+  return button;
+}
+
+function cueEditIconSvg(icon) {
+  if (icon === "delete") {
+    return '<svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M4.5 4.5l7 7M11.5 4.5l-7 7"/></svg>';
+  }
+  return '<svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M3 12.5l.6-2.6 7.6-7.6a1.5 1.5 0 0 1 2.1 2.1L5.7 12l-2.7.5z"/><path d="M10.2 3.3l2.5 2.5"/></svg>';
 }
 
 function clearSubtitles(text, jobId = "") {
@@ -2369,10 +2587,16 @@ function clearSubtitles(text, jobId = "") {
   currentSubtitleCacheEntry = null;
   cachedSubtitleLoadedKey = "";
   activeCueIndex = -1;
+  subtitleEditMode = false;
+  subtitleEditingTextIndex = -1;
+  subtitleEditingTimeIndex = -1;
+  subtitleEditingTextDraft = "";
+  subtitleEditingTimeDraft = "";
   taskDetailsExpanded = false;
   taskDetailsManuallyCollapsed = false;
   stopSubtitleFollow();
   renderSubtitleNotice("");
+  renderSubtitleEditButton();
   elements.subtitleList.replaceChildren();
   elements.subtitleList.textContent = text || t("subtitlePlaceholder");
   updateTaskPanelFocus(currentJob);
@@ -2422,7 +2646,7 @@ async function syncSubtitleHighlight() {
       && response.state?.synthetic !== true
       && Number.isFinite(time)
     ) {
-      setActiveCueIndex(findCueIndexForProgress(time));
+      setActiveCueIndex(findCueIndexForProgress(time), { suppressScroll: subtitleEditMode });
     }
   } finally {
     subtitleFollowBusy = false;
@@ -2504,6 +2728,9 @@ function releaseSubtitleListAutoFollow() {
 }
 
 function shouldScrollActiveCue(options = {}) {
+  if (options.suppressScroll) {
+    return false;
+  }
   if (options.forceScroll) {
     return true;
   }
@@ -2538,8 +2765,11 @@ function setActiveCueIndex(index, options = {}) {
 
 async function toggleSubtitleMode() {
   subtitleDisplayMode = nextSubtitleDisplayMode(subtitleDisplayMode);
+  if (subtitleEditMode && subtitleDisplayMode === "source") {
+    subtitleDisplayMode = "bilingual";
+  }
   await chrome.storage.sync.set({ subtitleDisplayMode }).catch(() => {});
-  renderSubtitleCueList();
+  renderSubtitleCueList({ preserveScroll: subtitleEditMode });
   if (subtitleDisplayModeRequiresTranscript(subtitleDisplayMode) && renderedSubtitleJobId && subtitleCueSource !== "transcript") {
     renderedSubtitleSignature = "";
     await renderSubtitles(renderedSubtitleJobId, currentJob);
@@ -2547,9 +2777,26 @@ async function toggleSubtitleMode() {
   if (activeCueIndex >= 0) {
     const index = activeCueIndex;
     activeCueIndex = -1;
-    setActiveCueIndex(index, { forceScroll: true });
+    setActiveCueIndex(index, subtitleEditMode ? { suppressScroll: true } : { forceScroll: true });
   }
   await attachCurrentSubtitlesToPage();
+}
+
+async function toggleSubtitleEditMode() {
+  if (!subtitleCues.length) {
+    return;
+  }
+  subtitleEditMode = !subtitleEditMode;
+  subtitleEditingTextIndex = -1;
+  subtitleEditingTimeIndex = -1;
+  subtitleEditingTextDraft = "";
+  subtitleEditingTimeDraft = "";
+  if (subtitleEditMode && subtitleDisplayMode === "source") {
+    subtitleDisplayMode = "bilingual";
+    await chrome.storage.sync.set({ subtitleDisplayMode }).catch(() => {});
+  }
+  renderSubtitleCueList({ preserveScroll: true });
+  renderSubtitleEditButton();
 }
 
 function nextSubtitleDisplayMode(mode) {
@@ -2591,12 +2838,300 @@ function renderSubtitleModeButton() {
     bilingual: "subtitleModeBilingual"
   }[mode];
   elements.subtitleModeToggle.textContent = t(labelKey);
-  elements.subtitleModeToggle.setAttribute("aria-pressed", String(mode !== "source"));
+  elements.subtitleModeToggle.dataset.mode = mode;
+  elements.subtitleModeToggle.dataset.active = String(mode !== "source");
+  elements.subtitleModeToggle.setAttribute("aria-label", t(labelKey));
+  elements.subtitleModeToggle.removeAttribute("aria-pressed");
+}
+
+function renderSubtitleEditButton() {
+  elements.subtitleEditToggle.textContent = subtitleEditMode ? t("doneEditingSubtitles") : t("editSubtitles");
+  elements.subtitleEditToggle.setAttribute("aria-pressed", String(subtitleEditMode));
+  elements.subtitleEditToggle.disabled = !subtitleCues.length;
 }
 
 function renderSubtitleOverlayButton() {
   elements.subtitleOverlayToggle.textContent = subtitleOverlayEnabled ? t("overlayOn") : t("overlayOff");
   elements.subtitleOverlayToggle.setAttribute("aria-pressed", String(subtitleOverlayEnabled));
+}
+
+function editableSubtitleCueTranslationText(cue) {
+  return cue?.sourceOnly ? "" : String(cue?.text || "");
+}
+
+function resizeSubtitleEditTextarea(textarea) {
+  if (!textarea?.style || !Number.isFinite(textarea.scrollHeight)) {
+    return;
+  }
+  textarea.style.height = "auto";
+  textarea.style.height = `${textarea.scrollHeight}px`;
+}
+
+function deferSubtitleInlineFinish(callback) {
+  if (typeof window.setTimeout === "function") {
+    window.setTimeout(callback, 0);
+    return undefined;
+  }
+  return callback();
+}
+
+async function handleSubtitleInlineEditPointerDown(event) {
+  if (!hasActiveSubtitleInlineEdit() || isSubtitleInlineEditTarget(event?.target)) {
+    return false;
+  }
+  return finishActiveSubtitleInlineEdit();
+}
+
+function hasActiveSubtitleInlineEdit() {
+  return subtitleEditingTextIndex >= 0 || subtitleEditingTimeIndex >= 0;
+}
+
+function isSubtitleInlineEditTarget(target) {
+  let node = target || null;
+  while (node) {
+    const className = typeof node.className === "string"
+      ? node.className
+      : String(node.className?.baseVal || "");
+    const classes = className.split(/\s+/);
+    if (classes.includes("subtitle-edit-textarea") || classes.includes("subtitle-time-input")) {
+      return true;
+    }
+    if (typeof node.matches === "function" && node.matches(".subtitle-edit-textarea, .subtitle-time-input")) {
+      return true;
+    }
+    node = node.parentElement || node.parentNode || null;
+  }
+  return false;
+}
+
+async function finishActiveSubtitleInlineEdit() {
+  if (subtitleEditingTextIndex >= 0) {
+    return finishSubtitleCueTextEdit(subtitleEditingTextIndex, subtitleEditingTextDraft);
+  }
+  if (subtitleEditingTimeIndex >= 0) {
+    return finishSubtitleCueTimeEdit(subtitleEditingTimeIndex, subtitleEditingTimeDraft);
+  }
+  return false;
+}
+
+async function finishSubtitleCueTextEdit(index, rawText) {
+  if (subtitleEditingTextIndex !== index) {
+    return false;
+  }
+  await applySubtitleCueTextEdit(index, rawText);
+  if (subtitleEditingTextIndex === index) {
+    subtitleEditingTextIndex = -1;
+    subtitleEditingTextDraft = "";
+    renderSubtitleCueList({ preserveScroll: true });
+  }
+  return true;
+}
+
+async function finishSubtitleCueTimeEdit(index, rawTime) {
+  if (subtitleEditingTimeIndex !== index) {
+    return false;
+  }
+  const saved = await applySubtitleCueTimeEdit(index, rawTime);
+  if (saved && subtitleEditingTimeIndex === index) {
+    subtitleEditingTimeIndex = -1;
+    subtitleEditingTimeDraft = "";
+    renderSubtitleCueList({ preserveScroll: true });
+  }
+  return saved;
+}
+
+function exitSubtitleCueInlineEdit({ textIndex = -1, timeIndex = -1 } = {}) {
+  if (subtitleEditingTextIndex === textIndex) {
+    subtitleEditingTextIndex = -1;
+    subtitleEditingTextDraft = "";
+  }
+  if (subtitleEditingTimeIndex === timeIndex) {
+    subtitleEditingTimeIndex = -1;
+    subtitleEditingTimeDraft = "";
+  }
+  renderSubtitleCueList({ preserveScroll: true });
+}
+
+async function applySubtitleCueTextEdit(index, rawText) {
+  const cue = subtitleCues[index];
+  if (!cue) {
+    return false;
+  }
+  ensureEditableTranscript();
+  const text = normalizeEditedSubtitleText(rawText);
+  const sourceText = subtitleCueSourceText(cue);
+  cue.text = text || sourceText;
+  cue.sourceText = sourceText;
+  cue.sourceOnly = !text && Boolean(sourceText);
+  upsertTranscriptSegment("translated", index, cue, text);
+  await persistSubtitleEdits();
+  return true;
+}
+
+async function applySubtitleCueTimeEdit(index, rawTime) {
+  const cue = subtitleCues[index];
+  if (!cue) {
+    return false;
+  }
+  const [startRaw, endRaw] = String(rawTime || "").split(/\s*-->\s*/);
+  const start = parseTimestamp(startRaw);
+  const end = parseTimestamp(endRaw);
+  if (!Number.isFinite(start) || !Number.isFinite(end) || end < start) {
+    renderSubtitleNotice(t("subtitleInvalidTime"));
+    return false;
+  }
+  ensureEditableTranscript();
+  cue.start = start;
+  cue.end = end;
+  cue.time = formatCueTime(start, end);
+  updateTranscriptSegmentTime("source", index, cue, start, end);
+  updateTranscriptSegmentTime("translated", index, cue, start, end);
+  await persistSubtitleEdits();
+  return true;
+}
+
+async function deleteSubtitleCueAtIndex(index) {
+  if (!subtitleCues[index]) {
+    return;
+  }
+  const scrollState = captureSubtitleScrollState();
+  ensureEditableTranscript();
+  removeTranscriptSegment("source", index, subtitleCues[index]);
+  removeTranscriptSegment("translated", index, subtitleCues[index]);
+  subtitleCues.splice(index, 1);
+  if (activeCueIndex === index) {
+    activeCueIndex = -1;
+  } else if (activeCueIndex > index) {
+    activeCueIndex -= 1;
+  }
+  subtitleEditingTextIndex = -1;
+  subtitleEditingTimeIndex = -1;
+  if (!subtitleCues.length) {
+    subtitleEditMode = false;
+  }
+  await persistSubtitleEdits();
+  renderSubtitleCueList({ preserveScroll: true, scrollState });
+}
+
+function ensureEditableTranscript() {
+  if (!currentTranscript || typeof currentTranscript !== "object") {
+    currentTranscript = transcriptFromCues(subtitleCues);
+  }
+  if (!Array.isArray(currentTranscript.source)) {
+    currentTranscript.source = [];
+  }
+  if (!Array.isArray(currentTranscript.translated)) {
+    currentTranscript.translated = [];
+  }
+  if (!Array.isArray(currentTranscript.chunkStatuses)) {
+    currentTranscript.chunkStatuses = [];
+  }
+}
+
+function normalizeEditedSubtitleText(value) {
+  return String(value || "").replace(/\s+/g, " ").trim();
+}
+
+function upsertTranscriptSegment(kind, index, cue, text) {
+  ensureEditableTranscript();
+  const list = currentTranscript[kind];
+  let segment = findTranscriptSegment(kind, index, cue);
+  if (!segment) {
+    segment = buildTranscriptSegmentFromCue(cue, text);
+    list.splice(Math.min(index, list.length), 0, segment);
+  }
+  segment.start = cue.start;
+  segment.end = cue.end;
+  segment.text = text;
+  if (cue.speakerLabel) {
+    segment.speakerLabel = cue.speakerLabel;
+  }
+}
+
+function updateTranscriptSegmentTime(kind, index, cue, start, end) {
+  const segment = findTranscriptSegment(kind, index, cue);
+  if (!segment) {
+    return;
+  }
+  segment.start = start;
+  segment.end = end;
+}
+
+function removeTranscriptSegment(kind, index, cue) {
+  ensureEditableTranscript();
+  const list = currentTranscript[kind];
+  const segmentIndex = findTranscriptSegmentIndex(kind, index, cue);
+  if (segmentIndex >= 0) {
+    list.splice(segmentIndex, 1);
+  }
+}
+
+function findTranscriptSegment(kind, index, cue) {
+  const list = currentTranscript?.[kind];
+  const segmentIndex = findTranscriptSegmentIndex(kind, index, cue);
+  return segmentIndex >= 0 && Array.isArray(list) ? list[segmentIndex] : null;
+}
+
+function findTranscriptSegmentIndex(kind, index, cue) {
+  const list = currentTranscript?.[kind];
+  if (!Array.isArray(list)) {
+    return -1;
+  }
+  const key = editableCueIdentityKey(cue);
+  if (key) {
+    const keyedIndex = list.findIndex(segment => segmentIdentityKey(segment) === key);
+    if (keyedIndex >= 0) {
+      return keyedIndex;
+    }
+  }
+  return list[index] ? index : -1;
+}
+
+function editableCueIdentityKey(cue) {
+  const chunkIndex = Number(cue?.chunkIndex);
+  const segmentIndex = Number(cue?.segmentIndex);
+  if (Number.isFinite(chunkIndex) && Number.isFinite(segmentIndex)) {
+    return `${chunkIndex}:${segmentIndex}`;
+  }
+  return "";
+}
+
+function buildTranscriptSegmentFromCue(cue, text) {
+  const segment = {
+    start: cue.start,
+    end: cue.end,
+    text
+  };
+  if (cue.speakerLabel) {
+    segment.speakerLabel = cue.speakerLabel;
+  }
+  const chunkIndex = Number(cue?.chunkIndex);
+  const segmentIndex = Number(cue?.segmentIndex);
+  if (Number.isFinite(chunkIndex) && Number.isFinite(segmentIndex)) {
+    segment.chunkIndex = chunkIndex;
+    segment.segmentIndex = segmentIndex;
+  }
+  return segment;
+}
+
+async function persistSubtitleEdits() {
+  renderedSubtitleSignature = `edited:${Date.now()}:${subtitleCues.length}`;
+  if (!subtitleCues.length) {
+    const ids = new Set([cachedSubtitleLoadedKey, currentSubtitleCacheEntry?.id].filter(Boolean));
+    const currentPageKey = await buildSubtitleCacheKeyForCurrentPage().catch(() => "");
+    if (currentPageKey) {
+      ids.add(currentPageKey);
+    }
+    if (ids.size) {
+      await deleteSubtitleCacheEntries([...ids]);
+    }
+    currentSubtitleCacheEntry = null;
+    cachedSubtitleLoadedKey = "";
+    await detachCurrentSubtitlesFromPage();
+    return;
+  }
+  await cacheCurrentSubtitles();
+  await attachCurrentSubtitlesToPage();
 }
 
 function renderSubtitleNotice(forcedText = null) {
@@ -3748,6 +4283,7 @@ function updateActionButtons(job) {
       ? t("clearAudioAgainTitle")
       : t("clearAudioTitle");
   elements.clearSubtitleCache.disabled = !canClearCurrentSubtitleCache(job);
+  elements.subtitleEditToggle.disabled = !subtitleCues.length;
 }
 
 function canClearCurrentSubtitleCache(job) {

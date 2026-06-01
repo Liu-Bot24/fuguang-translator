@@ -151,8 +151,8 @@ window.addEventListener("message", event => {
 
 async function extractAudioWithWebFfmpeg(message) {
   const sourceUrl = String(message.sourceUrl || "");
-  if (!/^https?:\/\//i.test(sourceUrl)) {
-    throw new Error("媒体源地址不是有效的 HTTP 地址。");
+  if (!isFetchableMediaSourceUrl(sourceUrl)) {
+    throw new Error("媒体源地址不是有效的 HTTP 或本地文件地址。");
   }
   reportWebFfmpegExtractionProgress(message, {
     phase: "loading",
@@ -175,8 +175,16 @@ async function extractAudioWithWebFfmpeg(message) {
     percent: 5,
     message: "正在下载媒体文件"
   });
-  const response = await fetch(sourceUrl, buildMediaFetchOptions(message));
-  if (!response.ok) {
+  let response;
+  try {
+    response = await fetch(sourceUrl, isLocalFileMediaSourceUrl(sourceUrl) ? {} : buildMediaFetchOptions(message));
+  } catch (error) {
+    if (isLocalFileMediaSourceUrl(sourceUrl)) {
+      throw new Error(`本地媒体文件读取失败：${error.message || String(error)}。请确认文件仍可访问，并在扩展详情中允许访问文件网址。`);
+    }
+    throw error;
+  }
+  if (!mediaFetchResponseLooksUsable(response, sourceUrl)) {
     throw new Error(`媒体文件下载失败：HTTP ${response.status}`);
   }
   const buffer = await response.arrayBuffer();
@@ -209,6 +217,32 @@ async function extractAudioWithWebFfmpeg(message) {
     });
   });
   return persistWebFfmpegAudioResult(result, message.cacheNamespace || id);
+}
+
+function isFetchableMediaSourceUrl(rawUrl = "") {
+  try {
+    const url = new URL(String(rawUrl || ""));
+    return url.protocol === "http:" || url.protocol === "https:" || url.protocol === "file:";
+  } catch {
+    return false;
+  }
+}
+
+function isLocalFileMediaSourceUrl(rawUrl = "") {
+  try {
+    return new URL(String(rawUrl || "")).protocol === "file:";
+  } catch {
+    return false;
+  }
+}
+
+function mediaFetchResponseLooksUsable(response, sourceUrl = "") {
+  if (response?.ok) {
+    return true;
+  }
+  return isLocalFileMediaSourceUrl(sourceUrl) &&
+    Number(response?.status || 0) === 0 &&
+    typeof response?.arrayBuffer === "function";
 }
 
 async function extractMseFragmentAudioWithWebFfmpeg(message) {

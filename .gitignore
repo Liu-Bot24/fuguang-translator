@@ -24,6 +24,9 @@ build/
 DEVELOPMENT_LOG.md
 .playwright-cli/
 
+# Local Chrome Web Store drafts, packages, and release-only snapshots.
+chrome-web-store/
+
 # Local project-internal planning and operator notes
 .project-internal/
 .worktrees/
