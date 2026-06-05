@@ -37,6 +37,7 @@ let webFfmpegReady = null;
 const webFfmpegPending = new Map();
 let dashManifestParserPromise = null;
 let hlsUrlHelpersPromise = null;
+let mediabunnyPromise = null;
 
 async function loadDashManifestParser() {
   if (globalThis.FuguangDashManifestParser) {
@@ -58,6 +59,16 @@ async function loadHlsUrlHelpers() {
       .then(module => module.FuguangHlsUrlHelpers);
   }
   return hlsUrlHelpersPromise;
+}
+
+async function loadMediabunny() {
+  if (globalThis.FuguangMediabunny) {
+    return globalThis.FuguangMediabunny;
+  }
+  if (!mediabunnyPromise) {
+    mediabunnyPromise = import(chrome.runtime.getURL("src/vendor/mediabunny/mediabunny.min.mjs"));
+  }
+  return mediabunnyPromise;
 }
 
 function getLoadedHlsUrlHelpers() {
@@ -170,6 +181,9 @@ async function extractAudioWithWebFfmpeg(message) {
   if (isMseFragmentSource(message)) {
     return extractMseFragmentAudioWithWebFfmpeg(message);
   }
+  if (shouldUseLocalMediaChunkedExtraction(message)) {
+    return extractLocalMediaAudioWithWebFfmpeg(message);
+  }
   reportWebFfmpegExtractionProgress(message, {
     phase: "download",
     percent: 5,
@@ -243,6 +257,163 @@ function mediaFetchResponseLooksUsable(response, sourceUrl = "") {
   return isLocalFileMediaSourceUrl(sourceUrl) &&
     Number(response?.status || 0) === 0 &&
     typeof response?.arrayBuffer === "function";
+}
+
+function getLocalMediaExtractor() {
+  if (!globalThis.FuguangLocalMediaExtractorInstance) {
+    const factory = globalThis.FuguangLocalMediaExtractor?.createLocalMediaExtractor;
+    if (typeof factory !== "function") {
+      throw new Error("本地媒体抽取模块未加载，请重新加载扩展后重试。");
+    }
+    globalThis.FuguangLocalMediaExtractorInstance = factory({
+      WEB_FFMPEG_ASR_CONTEXT_OVERLAP_SECONDS,
+      loadMediabunny: (...args) => globalThis.loadMediabunny(...args),
+      isLocalFileMediaSourceUrl,
+      isHlsSource,
+      isDashSource,
+      isMseFragmentSource,
+      isLongFileAsrMode,
+      reportWebFfmpegExtractionProgress: (...args) => globalThis.reportWebFfmpegExtractionProgress(...args),
+      normalizeHlsLogicalChunkSeconds,
+      pickFiniteNumber,
+      roundHlsSecond,
+      parseContentRangeHeader,
+      createHlsWebFfmpegRecyclePolicy,
+      reloadWebFfmpegFrame: (...args) => globalThis.reloadWebFfmpegFrame(...args),
+      requestWebFfmpeg: (...args) => globalThis.requestWebFfmpeg(...args),
+      persistWebFfmpegAudioResult: (...args) => globalThis.persistWebFfmpegAudioResult(...args),
+      offsetSpeechIntervals
+    });
+  }
+  return globalThis.FuguangLocalMediaExtractorInstance;
+}
+
+function shouldUseLocalMediaChunkedExtraction(...args) {
+  return getLocalMediaExtractor().shouldUseLocalMediaChunkedExtraction(...args);
+}
+
+function extractLocalMediaAudioWithWebFfmpeg(...args) {
+  return getLocalMediaExtractor().extractLocalMediaAudioWithWebFfmpeg(...args);
+}
+
+function createLocalMediaMediabunnyInput(...args) {
+  return getLocalMediaExtractor().createLocalMediaMediabunnyInput(...args);
+}
+
+function createStoredLocalMediaMediabunnyInput(...args) {
+  return getLocalMediaExtractor().createStoredLocalMediaMediabunnyInput(...args);
+}
+
+function localMediaInputProgressMessage(...args) {
+  return getLocalMediaExtractor().localMediaInputProgressMessage(...args);
+}
+
+function createLocalMediaMediabunnySource(...args) {
+  return getLocalMediaExtractor().createLocalMediaMediabunnySource(...args);
+}
+
+function createLocalMediaMediabunnyRangeSource(...args) {
+  return getLocalMediaExtractor().createLocalMediaMediabunnyRangeSource(...args);
+}
+
+function createLocalMediaMediabunnyStreamSource(...args) {
+  return getLocalMediaExtractor().createLocalMediaMediabunnyStreamSource(...args);
+}
+
+function getLocalMediaSourceSize(...args) {
+  return getLocalMediaExtractor().getLocalMediaSourceSize(...args);
+}
+
+function createLocalMediaSizeUnavailableError(...args) {
+  return getLocalMediaExtractor().createLocalMediaSizeUnavailableError(...args);
+}
+
+function isLocalMediaSizeUnavailableError(...args) {
+  return getLocalMediaExtractor().isLocalMediaSizeUnavailableError(...args);
+}
+
+function fetchLocalMediaRange(...args) {
+  return getLocalMediaExtractor().fetchLocalMediaRange(...args);
+}
+
+function localMediaRangeResponseLooksReadable(...args) {
+  return getLocalMediaExtractor().localMediaRangeResponseLooksReadable(...args);
+}
+
+function localMediaStreamResponseLooksReadable(...args) {
+  return getLocalMediaExtractor().localMediaStreamResponseLooksReadable(...args);
+}
+
+function readLocalMediaResponseWithLimit(...args) {
+  return getLocalMediaExtractor().readLocalMediaResponseWithLimit(...args);
+}
+
+function normalizeLocalMediaLogicalChunkSeconds(...args) {
+  return getLocalMediaExtractor().normalizeLocalMediaLogicalChunkSeconds(...args);
+}
+
+function resolveLocalMediaAudioDuration(...args) {
+  return getLocalMediaExtractor().resolveLocalMediaAudioDuration(...args);
+}
+
+function buildLocalMediaLogicalChunkSpecs(...args) {
+  return getLocalMediaExtractor().buildLocalMediaLogicalChunkSpecs(...args);
+}
+
+function selectLocalMediaAudioOutputSpec(...args) {
+  return getLocalMediaExtractor().selectLocalMediaAudioOutputSpec(...args);
+}
+
+function muxLocalMediaAudioWindow(...args) {
+  return getLocalMediaExtractor().muxLocalMediaAudioWindow(...args);
+}
+
+function extractLocalMediaAudioChunksByRange(...args) {
+  return getLocalMediaExtractor().extractLocalMediaAudioChunksByRange(...args);
+}
+
+function extractLocalMediaAudioChunksSequentially(...args) {
+  return getLocalMediaExtractor().extractLocalMediaAudioChunksSequentially(...args);
+}
+
+function createLocalMediaMuxSession(...args) {
+  return getLocalMediaExtractor().createLocalMediaMuxSession(...args);
+}
+
+function addPacketToLocalMediaMuxSession(...args) {
+  return getLocalMediaExtractor().addPacketToLocalMediaMuxSession(...args);
+}
+
+function finalizeLocalMediaMuxSession(...args) {
+  return getLocalMediaExtractor().finalizeLocalMediaMuxSession(...args);
+}
+
+function finalizeAndExtractLocalMediaMuxSession(...args) {
+  return getLocalMediaExtractor().finalizeAndExtractLocalMediaMuxSession(...args);
+}
+
+function extractLocalMediaAudioWindowWithWebFfmpegWithRetry(...args) {
+  return getLocalMediaExtractor().extractLocalMediaAudioWindowWithWebFfmpegWithRetry(...args);
+}
+
+function cloneLocalMediaEncodedPacket(...args) {
+  return getLocalMediaExtractor().cloneLocalMediaEncodedPacket(...args);
+}
+
+function extractLocalMediaAudioWindowWithWebFfmpeg(...args) {
+  return getLocalMediaExtractor().extractLocalMediaAudioWindowWithWebFfmpeg(...args);
+}
+
+function cloneArrayBuffer(...args) {
+  return getLocalMediaExtractor().cloneArrayBuffer(...args);
+}
+
+function localMediaExtractionPercent(...args) {
+  return getLocalMediaExtractor().localMediaExtractionPercent(...args);
+}
+
+function describeLocalMediaExtractionError(...args) {
+  return getLocalMediaExtractor().describeLocalMediaExtractionError(...args);
 }
 
 async function extractMseFragmentAudioWithWebFfmpeg(message) {
@@ -1600,7 +1771,7 @@ function applyFetchedByteRange(response, buffer, byteRange = null) {
 }
 
 function parseContentRangeHeader(value) {
-  const match = /^bytes\s+(\d+)-(\d+)\/(?:\d+|\*)$/i.exec(String(value || "").trim());
+  const match = /^bytes\s+(\d+)-(\d+)\/(\d+|\*)$/i.exec(String(value || "").trim());
   if (!match) {
     return null;
   }
@@ -1609,9 +1780,11 @@ function parseContentRangeHeader(value) {
   if (!Number.isFinite(offset) || !Number.isFinite(endInclusive) || endInclusive < offset) {
     return null;
   }
+  const total = match[3] === "*" ? 0 : Number.parseInt(match[3], 10);
   return {
     offset,
-    endExclusive: endInclusive + 1
+    endExclusive: endInclusive + 1,
+    total: Number.isFinite(total) && total > 0 ? total : 0
   };
 }
 

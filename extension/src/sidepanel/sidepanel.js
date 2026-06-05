@@ -152,6 +152,8 @@ const I18N = {
     sourcesSummary: "{count} 个来源，已选择第 {index} 个{hidden}。",
     sourcesHidden: "，另外 {count} 个已折叠在列表外",
     unnamedMedia: "未命名媒体",
+    localMediaPermissionPrompt: "请选择当前正在播放的本地文件：{name}",
+    localMediaPermissionReady: "已授权本地文件：{name}",
     submittingSource: "正在提交当前页面的媒体源...",
     taskSubmitted: "任务已提交。",
     waitingNewSubtitles: "正在等待新任务的字幕。",
@@ -436,6 +438,8 @@ const I18N = {
     sourcesSummary: "{count} source(s), selected #{index}{hidden}.",
     sourcesHidden: ", {count} more folded",
     unnamedMedia: "Untitled media",
+    localMediaPermissionPrompt: "Choose the local file currently playing: {name}",
+    localMediaPermissionReady: "Local file authorized: {name}",
     submittingSource: "Submitting the selected media source...",
     taskSubmitted: "Task submitted.",
     waitingNewSubtitles: "Waiting for subtitles from the new task.",
@@ -1598,35 +1602,63 @@ async function startPreloadFromSidePanel() {
   if (startRequestInFlight) {
     return;
   }
-  await refreshActiveTab();
-  candidates = [];
-  renderedCandidateSignature = "";
-  renderCandidates(candidates);
-  const refreshed = await refreshCandidates({ silent: true });
-  if (!refreshed) {
-    return;
-  }
-  const requestTabId = activeTab?.id;
-  const requestTabUrl = activeTab?.url || "";
-  const selected = getSelectedCandidate();
-  if (!selected) {
-    setMessage(t("noCandidates"));
-    return;
-  }
-  await saveSourceLanguageSetting();
   startRequestInFlight = true;
   updateActionButtons(currentJob);
-  setMessage(t("submittingSource"));
   try {
     await refreshActiveTab();
-    if (activeTab?.id !== requestTabId || (activeTab?.url || "") !== requestTabUrl) {
+    const requestContext = captureSidepanelRequestContext();
+    if (!requestContext.tabId) {
+      setMessage(t("noTab"));
+      return;
+    }
+    const initialSelected = getSelectedCandidate();
+    let preparedLocalCandidate = null;
+    if (isLocalFileCandidate(initialSelected)) {
+      preparedLocalCandidate = await prepareLocalMediaCandidateForStart(toPreloadCandidate(initialSelected));
+      if (!(await sidepanelRequestStillCurrent(requestContext))) {
+        setMessage(t("tabChangedCancel"));
+        return;
+      }
+    }
+    if (!preparedLocalCandidate) {
+      candidates = [];
+      renderedCandidateSignature = "";
+      renderCandidates(candidates);
+      const refreshed = await refreshCandidates({ silent: true });
+      if (!refreshed) {
+        return;
+      }
+      if (!(await sidepanelRequestStillCurrent(requestContext))) {
+        setMessage(t("tabChangedCancel"));
+        return;
+      }
+    }
+    const selected = getSelectedCandidate();
+    if (!selected) {
+      setMessage(t("noCandidates"));
+      return;
+    }
+    await saveSourceLanguageSetting();
+    setMessage(t("submittingSource"));
+    if (!(await sidepanelRequestStillCurrent(requestContext))) {
       setMessage(t("tabChangedCancel"));
       return;
     }
+    let candidate = mergePreparedLocalMediaCandidate(
+      toPreloadCandidate(selected),
+      preparedLocalCandidate
+    );
+    if (isLocalFileCandidate(candidate) && !candidate.localMediaFileKey) {
+      candidate = await prepareLocalMediaCandidateForStart(candidate);
+      if (!(await sidepanelRequestStillCurrent(requestContext))) {
+        setMessage(t("tabChangedCancel"));
+        return;
+      }
+    }
     const response = await send({
       type: MESSAGE.START_PRELOAD_AUTO,
-      tabId: requestTabId,
-      candidate: toPreloadCandidate(selected)
+      tabId: requestContext.tabId,
+      candidate
     });
     if (!response.ok) {
       setMessage(response.error);
@@ -1637,8 +1669,7 @@ async function startPreloadFromSidePanel() {
       await refreshStatus();
       return;
     }
-    await refreshActiveTab();
-    if (activeTab?.id !== requestTabId || (activeTab?.url || "") !== requestTabUrl) {
+    if (!(await sidepanelRequestStillCurrent(requestContext))) {
       setMessage(t("tabChangedIgnore"));
       return;
     }
@@ -1651,6 +1682,59 @@ async function startPreloadFromSidePanel() {
     startRequestInFlight = false;
     updateActionButtons(currentJob);
   }
+}
+
+function isLocalFileCandidate(candidate = {}) {
+  return isLocalFileUrl(candidate?.url || candidate?.sourceUrl || "");
+}
+
+function isLocalFileUrl(rawUrl = "") {
+  try {
+    return new URL(String(rawUrl || "")).protocol === "file:";
+  } catch {
+    return false;
+  }
+}
+
+async function prepareLocalMediaCandidateForStart(candidate = {}) {
+  if (!isLocalFileCandidate(candidate)) {
+    return candidate;
+  }
+  const files = globalThis.FuguangLocalMediaFiles;
+  if (!files?.pickLocalMediaFileForSource) {
+    throw new Error("当前 Chrome 不支持本地文件授权，无法稳定读取本地 file:// 视频。");
+  }
+  const expectedName = files.localMediaFileNameFromUrl?.(candidate.url) ||
+    candidate.fileName ||
+    candidate.filename ||
+    candidate.title ||
+    t("unnamedMedia");
+  setMessage(t("localMediaPermissionPrompt", { name: expectedName }));
+  const fileRef = await files.pickLocalMediaFileForSource(candidate.url);
+  setMessage(t("localMediaPermissionReady", { name: fileRef.name || expectedName }));
+  return {
+    ...candidate,
+    localMediaFileKey: fileRef.key,
+    localMediaFileName: fileRef.name || expectedName,
+    localMediaFileSize: fileRef.size || 0,
+    localMediaFileLastModified: fileRef.lastModified || 0
+  };
+}
+
+function mergePreparedLocalMediaCandidate(candidate = {}, prepared = null) {
+  if (!prepared?.localMediaFileKey || !isLocalFileCandidate(candidate)) {
+    return candidate;
+  }
+  if (String(candidate.url || "") !== String(prepared.url || "")) {
+    return candidate;
+  }
+  return {
+    ...candidate,
+    localMediaFileKey: prepared.localMediaFileKey,
+    localMediaFileName: prepared.localMediaFileName,
+    localMediaFileSize: prepared.localMediaFileSize,
+    localMediaFileLastModified: prepared.localMediaFileLastModified
+  };
 }
 
 async function refreshCandidates(options = {}) {

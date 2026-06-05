@@ -68,6 +68,10 @@ function loadSharedModule(path, exportName) {
 loadSharedModule("../../extension/src/shared/dash-manifest-parser.js", "FuguangDashManifestParser");
 loadSharedModule("../../extension/src/shared/hls-url-helpers.js", "FuguangHlsUrlHelpers");
 
+const localMediaExtractorSource = fs.readFileSync(
+  new URL("../../extension/src/offscreen/local-media-extractor.js", import.meta.url),
+  "utf8"
+);
 const source = fs.readFileSync(new URL("../../extension/src/offscreen/offscreen.js", import.meta.url), "utf8");
 
 {
@@ -78,11 +82,351 @@ const source = fs.readFileSync(new URL("../../extension/src/offscreen/offscreen.
   assert.equal(source.includes("WebSocket"), false);
 }
 
+vm.runInContext(localMediaExtractorSource, context, { filename: "local-media-extractor.js" });
 vm.runInContext(source, context, { filename: "offscreen.js" });
+
+{
+  assert.equal(context.shouldUseLocalMediaChunkedExtraction({
+    sourceUrl: "file:///Volumes/share/movie.flv",
+    mime: "video/x-flv"
+  }), true);
+  assert.equal(context.shouldUseLocalMediaChunkedExtraction({
+    sourceUrl: "file:///Volumes/share/movie.mkv",
+    mime: "video/x-matroska"
+  }), true);
+  assert.equal(context.shouldUseLocalMediaChunkedExtraction({
+    sourceUrl: "https://cdn.example.test/movie.mp4",
+    mime: "video/mp4"
+  }), false);
+  assert.equal(context.shouldUseLocalMediaChunkedExtraction({
+    sourceUrl: "file:///Volumes/share/playlist.m3u8",
+    ext: "m3u8"
+  }), false);
+  assert.equal(context.shouldUseLocalMediaChunkedExtraction({
+    sourceUrl: "file:///Volumes/share/manifest.mpd",
+    ext: "mpd"
+  }), false);
+  assert.equal(context.shouldUseLocalMediaChunkedExtraction({
+    sourceUrl: "file:///Volumes/share/fragments.mp4",
+    kind: "mse-fragments"
+  }), false);
+}
+
+{
+  const mediabunny = await import("../../extension/src/vendor/mediabunny/mediabunny.min.mjs");
+  assert.equal(context.selectLocalMediaAudioOutputSpec(mediabunny, "aac").extension, "aac");
+  assert.equal(context.selectLocalMediaAudioOutputSpec(mediabunny, "mp3").extension, "mp3");
+  assert.equal(context.selectLocalMediaAudioOutputSpec(mediabunny, "vorbis").extension, "ogg");
+  assert.equal(context.selectLocalMediaAudioOutputSpec(mediabunny, "pcm-s16").extension, "wav");
+  assert.equal(context.selectLocalMediaAudioOutputSpec(mediabunny, "not-a-codec"), null);
+}
+
+{
+  const originalFetch = context.fetch;
+  const calls = [];
+  class CustomSource {
+    constructor(options) {
+      this.options = options;
+    }
+  }
+  class ReadableStreamSource {
+    constructor(stream, options) {
+      this.stream = stream;
+      this.options = options;
+    }
+  }
+  class Input {
+    constructor(options) {
+      this.options = options;
+    }
+  }
+  const fakeMediabunny = {
+    ALL_FORMATS: [],
+    CustomSource,
+    ReadableStreamSource,
+    Input
+  };
+  context.fetch = async (_url, options = {}) => {
+    calls.push(options?.headers?.Range || "");
+    if (options?.headers?.Range) {
+      return {
+        ok: true,
+        status: 0,
+        headers: { get: () => "" },
+        body: { cancel: async () => {} }
+      };
+    }
+    return {
+      ok: true,
+      status: 0,
+      headers: { get: () => "" },
+      body: { getReader: () => ({}) }
+    };
+  };
+  try {
+    const result = await context.createLocalMediaMediabunnyInput("file:///Volumes/share/movie.mkv", fakeMediabunny);
+    assert.equal(result.sourceMode, "stream");
+    assert.equal(result.size, 0);
+    assert.equal(result.input.options.source instanceof ReadableStreamSource, true);
+    assert.deepEqual(calls, ["bytes=0-0", ""]);
+  } finally {
+    context.fetch = originalFetch;
+  }
+}
+
+{
+  const originalFetch = context.fetch;
+  const calls = [];
+  class CustomSource {
+    constructor(options) {
+      this.options = options;
+    }
+  }
+  class ReadableStreamSource {
+    constructor(stream, options) {
+      this.stream = stream;
+      this.options = options;
+    }
+  }
+  class Input {
+    constructor(options) {
+      this.options = options;
+    }
+  }
+  const fakeMediabunny = {
+    ALL_FORMATS: [],
+    CustomSource,
+    ReadableStreamSource,
+    Input
+  };
+  context.fetch = async (_url, options = {}) => {
+    calls.push(options?.headers?.Range || "");
+    return {
+      ok: true,
+      status: 206,
+      headers: { get: name => String(name || "").toLowerCase() === "content-range" ? "bytes 0-0/12345" : "1" },
+      body: { cancel: async () => {} }
+    };
+  };
+  try {
+    const result = await context.createLocalMediaMediabunnyInput("file:///Volumes/share/movie.mkv", fakeMediabunny);
+    assert.equal(result.sourceMode, "range");
+    assert.equal(result.size, 12345);
+    assert.equal(result.input.options.source instanceof CustomSource, true);
+    assert.deepEqual(calls, ["bytes=0-0"]);
+  } finally {
+    context.fetch = originalFetch;
+  }
+}
+
+{
+  const originalFetch = context.fetch;
+  const originalLocalMediaFiles = context.FuguangLocalMediaFiles;
+  const calls = [];
+  class BlobSource {
+    constructor(file, options) {
+      this.file = file;
+      this.options = options;
+    }
+  }
+  class Input {
+    constructor(options) {
+      this.options = options;
+    }
+  }
+  const fakeFile = { name: "movie.mkv", size: 987654321, lastModified: 1 };
+  const fakeMediabunny = {
+    ALL_FORMATS: [],
+    BlobSource,
+    Input
+  };
+  context.fetch = async () => {
+    throw new Error("file:// fetch should not run when a stored local file handle is available");
+  };
+  context.FuguangLocalMediaFiles = {
+    getStoredLocalMediaFile: async key => {
+      calls.push(key);
+      return { file: fakeFile, key };
+    }
+  };
+  try {
+    const result = await context.createLocalMediaMediabunnyInput(
+      "file:///Volumes/share/movie.mkv",
+      fakeMediabunny,
+      { localMediaFileKey: "file:///Volumes/share/movie.mkv" }
+    );
+    assert.equal(result.sourceMode, "blob");
+    assert.equal(result.size, fakeFile.size);
+    assert.equal(result.input.options.source instanceof BlobSource, true);
+    assert.equal(result.input.options.source.file, fakeFile);
+    assert.deepEqual(calls, ["file:///Volumes/share/movie.mkv"]);
+  } finally {
+    context.fetch = originalFetch;
+    context.FuguangLocalMediaFiles = originalLocalMediaFiles;
+  }
+}
+
+{
+  const originalLocalMediaOverrides = context.FuguangLocalMediaExtractorOverrides;
+  const originalRequestWebFfmpeg = context.requestWebFfmpeg;
+  const originalReloadWebFfmpegFrame = context.reloadWebFfmpegFrame;
+  const originalCaches = context.caches;
+  const originalResponse = context.Response;
+  const requests = [];
+  const reloads = [];
+  const cache = new Map();
+  let failChunk42Once = true;
+
+  context.Response = class {
+    constructor(body) {
+      this.body = body;
+    }
+
+    async arrayBuffer() {
+      return this.body;
+    }
+  };
+  context.caches = {
+    open: async () => ({
+      put: async (url, response) => {
+        cache.set(url, response);
+      },
+      match: async url => cache.get(url) || null,
+      delete: async url => cache.delete(url)
+    })
+  };
+  context.FuguangLocalMediaExtractorOverrides = {
+    muxLocalMediaAudioWindow: async (_mediabunny, _sink, _codec, _decoderConfig, outputSpec, spec) => ({
+      name: `local-media-${String(spec.index + 1).padStart(3, "0")}.${outputSpec.extension}`,
+      mime: outputSpec.mime,
+      buffer: vm.runInContext(`new Uint8Array([${spec.index & 0xff}, 2, 3]).buffer`, context),
+      packetCount: 1,
+      spec
+    })
+  };
+  context.reloadWebFfmpegFrame = async url => {
+    reloads.push({ url, requestsSeen: requests.length });
+  };
+  context.requestWebFfmpeg = async payload => {
+    requests.push({
+      outputName: payload.outputName,
+      buffer: payload.file.buffer
+    });
+    if (payload.outputName === "local-media-042.mp3" && failChunk42Once) {
+      failChunk42Once = false;
+      throw new Error("simulated local FFmpeg aging");
+    }
+    return {
+      file: {
+        name: payload.outputName,
+        mime: "audio/mpeg",
+        buffer: vm.runInContext("new Uint8Array([0xff, 0xfb, 0x90, 0x64, 1, 2, 3]).buffer", context)
+      },
+      bytes: 7
+    };
+  };
+
+  try {
+    const specs = Array.from({ length: 45 }, (_unused, index) => ({
+      index,
+      start: index * 30,
+      end: (index + 1) * 30,
+      duration: 30,
+      coreStart: index * 30,
+      coreEnd: (index + 1) * 30,
+      coreDuration: 30
+    }));
+    const result = await context.extractLocalMediaAudioChunksByRange(
+      {
+        tabId: 3,
+        jobId: "local-media-recycle-retry-test",
+        cacheNamespace: "local-media-recycle-retry-test",
+        webFfmpegUrl: "chrome-extension://fuguang-test/web-ffmpeg/index.html"
+      },
+      {},
+      {},
+      "aac",
+      null,
+      { extension: "aac", mime: "audio/aac" },
+      specs
+    );
+    const chunk41RequestIndex = requests.findIndex(request => request.outputName === "local-media-041.mp3");
+    const chunk42Requests = requests.filter(request => request.outputName === "local-media-042.mp3");
+
+    assert.equal(result.length, specs.length);
+    assert.equal(chunk42Requests.length, 2);
+    assert.notEqual(chunk42Requests[0].buffer, chunk42Requests[1].buffer);
+    assert.ok(
+      reloads.some(reload => reload.requestsSeen <= chunk41RequestIndex),
+      "local media Web FFmpeg should be recycled before an aging worker handles many chunks"
+    );
+    assert.ok(
+      reloads.some(reload => reload.requestsSeen >= requests.findIndex(request => request.outputName === "local-media-042.mp3")),
+      "local media Web FFmpeg should reload before retrying a failed chunk"
+    );
+  } finally {
+    context.FuguangLocalMediaExtractorOverrides = originalLocalMediaOverrides;
+    context.requestWebFfmpeg = originalRequestWebFfmpeg;
+    context.reloadWebFfmpegFrame = originalReloadWebFfmpegFrame;
+    context.caches = originalCaches;
+    context.Response = originalResponse;
+  }
+}
 
 {
   assert.equal(context.normalizeHlsLogicalChunkSeconds(7200), 1800);
   assert.equal(context.normalizeHlsLogicalChunkSeconds(7200, { longFile: true }), 7200);
+}
+
+{
+  let metadataRequested = false;
+  const duration = await context.resolveLocalMediaAudioDuration({
+    getDurationFromMetadata: async () => {
+      metadataRequested = true;
+      return 120;
+    },
+    computeDuration: async () => {
+      throw new Error("duration fallback should avoid stream probing");
+    }
+  }, {}, { duration: 42 });
+  assert.equal(duration, 42);
+  assert.equal(metadataRequested, false);
+}
+
+{
+  let metadataRequested = false;
+  await assert.rejects(
+    () => context.resolveLocalMediaAudioDuration({
+      getDurationFromMetadata: async () => {
+        metadataRequested = true;
+        return 300;
+      },
+      computeDuration: async () => {
+        throw new Error("duration mismatch should be detected from metadata");
+      }
+    }, {}, {
+      duration: 120,
+      localMediaFileKey: "file:///Volumes/share/Movie.mp4"
+    }),
+    /本地媒体.*时长.*不一致/
+  );
+  assert.equal(metadataRequested, true);
+}
+
+{
+  let computedDurationRequested = false;
+  const duration = await context.resolveLocalMediaAudioDuration({
+    getDurationFromMetadata: async () => 120.8,
+    computeDuration: async () => {
+      computedDurationRequested = true;
+      throw new Error("matching metadata should avoid duration probing");
+    }
+  }, {}, {
+    duration: 120,
+    localMediaFileKey: "file:///Volumes/share/Movie.mp4"
+  });
+  assert.equal(duration, 120);
+  assert.equal(computedDurationRequested, false);
 }
 
 {
@@ -392,12 +736,11 @@ audio-stream-inf.m3u8
   const originalFetch = context.fetch;
   const originalEnsureWebFfmpegFrame = context.ensureWebFfmpegFrame;
   const originalWarmWebFfmpegFrame = context.warmWebFfmpegFrame;
-  const originalRequestWebFfmpeg = context.requestWebFfmpeg;
+  const originalExtractLocalMediaAudioWithWebFfmpeg = context.extractLocalMediaAudioWithWebFfmpeg;
   const originalCaches = context.caches;
   const originalResponse = context.Response;
   const cache = new Map();
-  let fetchedUrl = "";
-  let captured = null;
+  let localExtractorCalled = false;
   context.Response = class {
     constructor(body) {
       this.body = body;
@@ -417,16 +760,11 @@ audio-stream-inf.m3u8
   context.ensureWebFfmpegFrame = async () => {};
   context.warmWebFfmpegFrame = () => {};
   context.fetch = async url => {
-    fetchedUrl = String(url);
-    return {
-      ok: false,
-      status: 0,
-      headers: { get: name => String(name || "").toLowerCase() === "content-type" ? "video/x-flv" : "" },
-      arrayBuffer: async () => vm.runInContext("new Uint8Array([1, 2, 3, 4]).buffer", context)
-    };
+    throw new Error(`local media should not use whole-file fetch: ${url}`);
   };
-  context.requestWebFfmpeg = async (payload, transfer) => {
-    captured = { payload, transfer };
+  context.extractLocalMediaAudioWithWebFfmpeg = async message => {
+    localExtractorCalled = true;
+    assert.equal(message.sourceUrl, "file:///Volumes/share/video-without-extension-whitelist.flv");
     return {
       chunks: [{
         index: 0,
@@ -445,7 +783,7 @@ audio-stream-inf.m3u8
       }],
       bytes: 2,
       duration: 10,
-      sourceType: "direct"
+      sourceType: "local-media"
     };
   };
 
@@ -458,19 +796,14 @@ audio-stream-inf.m3u8
       asrChunkSeconds: 30,
       duration: 10
     });
-    assert.equal(fetchedUrl, localUrl);
-    assert.equal(captured.payload.file.name, "video-without-extension-whitelist.flv");
-    assert.equal(captured.payload.file.mime, "video/x-flv");
-    assert.equal(captured.payload.file.buffer.byteLength, 4);
-    assert.equal(captured.transfer.length, 1);
-    assert.equal(result.sourceType, "direct");
+    assert.equal(localExtractorCalled, true);
+    assert.equal(result.sourceType, "local-media");
     assert.equal(result.chunks.length, 1);
-    assert.equal(result.chunks[0].file.cacheUrl.includes("__fuguang_audio_cache"), true);
   } finally {
     context.fetch = originalFetch;
     context.ensureWebFfmpegFrame = originalEnsureWebFfmpegFrame;
     context.warmWebFfmpegFrame = originalWarmWebFfmpegFrame;
-    context.requestWebFfmpeg = originalRequestWebFfmpeg;
+    context.extractLocalMediaAudioWithWebFfmpeg = originalExtractLocalMediaAudioWithWebFfmpeg;
     context.caches = originalCaches;
     context.Response = originalResponse;
   }
@@ -594,6 +927,55 @@ audio-stream-inf.m3u8
     assert.deepEqual(requests, [{ Authorization: "Bearer media-token", Range: "bytes=2-4" }]);
   } finally {
     context.fetch = originalFetch;
+  }
+}
+
+{
+  const originalFetch = context.fetch;
+  const originalExtractLocalMediaAudioWithWebFfmpeg = context.extractLocalMediaAudioWithWebFfmpeg;
+  const originalEnsureWebFfmpegFrame = context.ensureWebFfmpegFrame;
+  const originalWarmWebFfmpegFrame = context.warmWebFfmpegFrame;
+  let localExtractorCalled = false;
+  context.ensureWebFfmpegFrame = async () => {};
+  context.warmWebFfmpegFrame = () => {};
+  context.extractLocalMediaAudioWithWebFfmpeg = async message => {
+    localExtractorCalled = true;
+    assert.equal(message.sourceUrl, "file:///Volumes/local-large.mkv");
+    return {
+      sourceType: "local-media",
+      duration: 120,
+      chunkSeconds: 60,
+      chunks: [{
+        index: 0,
+        start: 0,
+        end: 60,
+        duration: 60,
+        file: { name: "local-large-000.mp3", mime: "audio/mpeg", buffer: Uint8Array.from([1, 2, 3]).buffer },
+        bytes: 3
+      }]
+    };
+  };
+  context.fetch = async () => {
+    throw new Error("local media must not use the whole-file fetch path");
+  };
+
+  try {
+    const result = await context.extractAudioWithWebFfmpeg({
+      sourceUrl: "file:///Volumes/local-large.mkv",
+      mime: "video/x-matroska",
+      fileName: "local-large.mkv",
+      duration: 120,
+      asrChunkSeconds: 60,
+      webFfmpegUrl: "chrome-extension://fuguang-test/web-ffmpeg/index.html"
+    });
+    assert.equal(localExtractorCalled, true);
+    assert.equal(result.sourceType, "local-media");
+    assert.equal(result.chunks.length, 1);
+  } finally {
+    context.fetch = originalFetch;
+    context.extractLocalMediaAudioWithWebFfmpeg = originalExtractLocalMediaAudioWithWebFfmpeg;
+    context.ensureWebFfmpegFrame = originalEnsureWebFfmpegFrame;
+    context.warmWebFfmpegFrame = originalWarmWebFfmpegFrame;
   }
 }
 

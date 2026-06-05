@@ -4732,6 +4732,42 @@ function add(tabId, candidate) {
 }
 
 {
+  const tabId = 109;
+  const sourceUrl = "file:///Volumes/Acer%20SSD%20N5000/MILK-148.mp4";
+  seedPage(tabId, { title: "MILK-148.mp4", url: sourceUrl, duration: 7162, currentSrc: sourceUrl });
+  add(tabId, {
+    url: sourceUrl,
+    kind: "video",
+    ext: "mp4",
+    contentType: "video/mp4",
+    duration: 7162,
+    source: "media-element",
+    sourcePlan: {
+      kind: "muxed-media",
+      primaryUrl: sourceUrl,
+      ffmpegInput: { type: "direct", url: sourceUrl }
+    }
+  });
+
+  const [candidate] = context.getDisplayCandidates(tabId);
+  const internalCandidate = context.resolvePreloadCandidateForStart(context.getState(tabId), {
+    ...candidate,
+    localMediaFileKey: sourceUrl,
+    localMediaFileName: "MILK-148.mp4",
+    localMediaFileSize: 5135208353,
+    sourcePlan: {
+      kind: "muxed-media",
+      primaryUrl: "file:///tmp/wrong.mp4",
+      ffmpegInput: { type: "direct", url: "file:///tmp/wrong.mp4" }
+    }
+  });
+  assert.equal(internalCandidate.localMediaFileKey, sourceUrl);
+  assert.equal(internalCandidate.localMediaFileName, "MILK-148.mp4");
+  assert.equal(internalCandidate.localMediaFileSize, 5135208353);
+  assert.equal(internalCandidate.sourcePlan?.ffmpegInput?.url, sourceUrl);
+}
+
+{
   const rules = context.buildMediaHeaderRules(
     "https://cdn.example.test/media/audio.m4a",
     "https://example.test/watch/1"

@@ -5396,6 +5396,74 @@ assert.equal(startPreloadCancelsIfTabChangesState.messages.includes("FUGUANG_STA
 assert.equal(startPreloadCancelsIfTabChangesState.message, "当前标签页已经变化，已取消提交。请确认媒体源后再开始。");
 assert.equal(startPreloadCancelsIfTabChangesState.activeUrl, "https://example.test/watch/new");
 
+const localStartPreloadCancelsIfTabChangesDuringFilePickState = await vm.runInContext(`
+  (async () => {
+    const originalTabsQuery = chrome.tabs.query;
+    const originalSendMessage = chrome.runtime.sendMessage;
+    const originalLocalMediaFiles = globalThis.FuguangLocalMediaFiles;
+    const originalSetMessage = setMessage;
+    const messages = [];
+    let tabChanged = false;
+    activeTab = { id: 1, title: "Old local video", url: "file:///Volumes/old/Movie.mp4" };
+    currentJobId = "";
+    currentJob = null;
+    startRequestInFlight = false;
+    candidates = [
+      { kind: "media", role: "audio", url: "file:///Volumes/old/Movie.mp4", title: "Movie.mp4" }
+    ];
+    selectedCandidateKey = candidateKey(candidates[0], 0);
+    selectedCandidatePinned = false;
+    renderedCandidateSignature = "old-local-signature";
+    chrome.tabs.query = async () => [tabChanged
+      ? { id: 2, title: "New local video", url: "file:///Volumes/new/Other.mp4" }
+      : { id: 1, title: "Old local video", url: "file:///Volumes/old/Movie.mp4" }
+    ];
+    globalThis.FuguangLocalMediaFiles = {
+      localMediaFileNameFromUrl: () => "Movie.mp4",
+      pickLocalMediaFileForSource: async sourceUrl => {
+        tabChanged = true;
+        return {
+          key: sourceUrl,
+          name: "Movie.mp4",
+          size: 123,
+          lastModified: 456
+        };
+      }
+    };
+    chrome.runtime.sendMessage = async message => {
+      messages.push(message.type);
+      if (message.type === MESSAGE.START_PRELOAD_AUTO) {
+        throw new Error("START_PRELOAD_AUTO should not run after local file picker changes the active tab");
+      }
+      return { ok: true };
+    };
+    setMessage = text => {
+      globalThis.localStartCancelledMessage = text;
+    };
+    try {
+      await startPreloadFromSidePanel();
+      return {
+        messages,
+        message: globalThis.localStartCancelledMessage || "",
+        activeTabId: activeTab?.id || 0,
+        activeUrl: activeTab?.url || ""
+      };
+    } finally {
+      chrome.tabs.query = originalTabsQuery;
+      chrome.runtime.sendMessage = originalSendMessage;
+      globalThis.FuguangLocalMediaFiles = originalLocalMediaFiles;
+      setMessage = originalSetMessage;
+      startRequestInFlight = false;
+      updateElapsedTicker(null);
+      delete globalThis.localStartCancelledMessage;
+    }
+  })()
+`, context);
+
+assert.equal(localStartPreloadCancelsIfTabChangesDuringFilePickState.messages.includes("FUGUANG_START_PRELOAD_AUTO"), false);
+assert.equal(localStartPreloadCancelsIfTabChangesDuringFilePickState.message, "当前标签页已经变化，已取消提交。请确认媒体源后再开始。");
+assert.equal(localStartPreloadCancelsIfTabChangesDuringFilePickState.activeTabId, 2);
+
 const unchangedSubtitleReattachState = await vm.runInContext(`
   (async () => {
     let attachCount = 0;

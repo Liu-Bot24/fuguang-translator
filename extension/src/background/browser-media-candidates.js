@@ -243,10 +243,34 @@ export const FuguangBrowserMediaCandidates = (() => {
     const safeInternalCandidate = stripCandidateRequestHeaders(internalCandidate);
     return {
       ...safeInternalCandidate,
+      ...localMediaFileStartFields(candidate),
       requestHeaders: internalCandidate.requestHeaders || null,
       responseHeaders: internalCandidate.responseHeaders || {},
       sourcePlanTrusted: Boolean(internalCandidate.sourcePlan)
     };
+  }
+
+  function localMediaFileStartFields(candidate = {}) {
+    const key = String(candidate?.localMediaFileKey || "").trim();
+    if (!key || !isFileUrl(key) || !isFileUrl(candidate?.url || "")) {
+      return {};
+    }
+    const size = Number(candidate.localMediaFileSize || 0) || 0;
+    const lastModified = Number(candidate.localMediaFileLastModified || 0) || 0;
+    return {
+      localMediaFileKey: key,
+      localMediaFileName: String(candidate.localMediaFileName || ""),
+      localMediaFileSize: Number.isFinite(size) && size > 0 ? size : 0,
+      localMediaFileLastModified: Number.isFinite(lastModified) && lastModified > 0 ? lastModified : 0
+    };
+  }
+
+  function isFileUrl(rawUrl = "") {
+    try {
+      return new URL(String(rawUrl || "")).protocol === "file:";
+    } catch {
+      return false;
+    }
   }
   
   function candidatesReferToSamePreloadTarget(left, right) {
