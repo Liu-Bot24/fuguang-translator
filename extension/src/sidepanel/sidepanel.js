@@ -752,6 +752,7 @@ let attachedSubtitleSignature = "";
 let renderedSubtitleSignature = "";
 let subtitleCueSource = "";
 let activeCueIndex = -1;
+let manualSubtitleOverride = null;
 let subtitleListPointerInside = false;
 let subtitleListUserControlUntil = 0;
 let subtitleFollowTimer = 0;
@@ -2065,6 +2066,7 @@ function renderJob(job) {
       taskDetailsExpanded = false;
       taskDetailsManuallyCollapsed = false;
       renderedSubtitleSignature = "";
+      manualSubtitleOverride = null;
       activeCueIndex = -1;
       currentTranscript = null;
       currentSubtitleCacheEntry = null;
@@ -2329,6 +2331,15 @@ function candidateDiagnosticText(item) {
 
 async function renderSubtitles(jobId, job = null) {
   if (job?.subtitleCleared || isSubtitleJobCleared(jobId)) {
+    return;
+  }
+  if (manualSubtitleOverrideMatches(jobId)) {
+    renderedSubtitleJobId = jobId || renderedSubtitleJobId;
+    renderedSubtitleSignature = manualSubtitleOverride.signature || renderedSubtitleSignature || `manual:${subtitleCues.length}`;
+    if (subtitleCues.length) {
+      startSubtitleFollow();
+      await attachCurrentSubtitlesToPage();
+    }
     return;
   }
   const requestTabKey = activeTabKey(activeTab);
@@ -2663,6 +2674,7 @@ function clearSubtitles(text, jobId = "") {
   pendingSubtitleSignature = "";
   renderedSubtitleJobId = jobId || "";
   renderedSubtitleSignature = "";
+  manualSubtitleOverride = null;
   attachedSubtitleTabId = 0;
   attachedSubtitleSignature = "";
   subtitleCues = [];
@@ -2931,7 +2943,11 @@ function renderSubtitleModeButton() {
 function renderSubtitleEditButton() {
   elements.subtitleEditToggle.textContent = subtitleEditMode ? t("doneEditingSubtitles") : t("editSubtitles");
   elements.subtitleEditToggle.setAttribute("aria-pressed", String(subtitleEditMode));
-  elements.subtitleEditToggle.disabled = !subtitleCues.length;
+  elements.subtitleEditToggle.disabled = subtitleEditButtonShouldBeDisabled();
+}
+
+function subtitleEditButtonShouldBeDisabled(job = currentJob) {
+  return !subtitleCues.length || isRunningJob(job);
 }
 
 function renderSubtitleOverlayButton() {
@@ -3060,7 +3076,7 @@ async function applySubtitleCueTimeEdit(index, rawTime) {
   const [startRaw, endRaw] = String(rawTime || "").split(/\s*-->\s*/);
   const start = parseTimestamp(startRaw);
   const end = parseTimestamp(endRaw);
-  if (!Number.isFinite(start) || !Number.isFinite(end) || end < start) {
+  if (!Number.isFinite(start) || !Number.isFinite(end) || end <= start || !subtitleCueTimeRangeCanBeSaved(index, start, end)) {
     renderSubtitleNotice(t("subtitleInvalidTime"));
     return false;
   }
@@ -3071,6 +3087,19 @@ async function applySubtitleCueTimeEdit(index, rawTime) {
   updateTranscriptSegmentTime("source", index, cue, start, end);
   updateTranscriptSegmentTime("translated", index, cue, start, end);
   await persistSubtitleEdits();
+  return true;
+}
+
+function subtitleCueTimeRangeCanBeSaved(index, start, end) {
+  const previous = subtitleCues[index - 1];
+  const next = subtitleCues[index + 1];
+  const tolerance = 0.001;
+  if (previous && Number(previous.end || 0) - start > tolerance) {
+    return false;
+  }
+  if (next && end - Number(next.start || 0) > tolerance) {
+    return false;
+  }
   return true;
 }
 
@@ -3200,6 +3229,7 @@ function buildTranscriptSegmentFromCue(cue, text) {
 
 async function persistSubtitleEdits() {
   renderedSubtitleSignature = `edited:${Date.now()}:${subtitleCues.length}`;
+  markManualSubtitleOverride(renderedSubtitleSignature);
   if (!subtitleCues.length) {
     const ids = new Set([cachedSubtitleLoadedKey, currentSubtitleCacheEntry?.id].filter(Boolean));
     const currentPageKey = await buildSubtitleCacheKeyForCurrentPage().catch(() => "");
@@ -3216,6 +3246,29 @@ async function persistSubtitleEdits() {
   }
   await cacheCurrentSubtitles();
   await attachCurrentSubtitlesToPage();
+}
+
+function markManualSubtitleOverride(signature = "") {
+  const jobId = currentJobId || renderedSubtitleJobId || currentSubtitleCacheEntry?.jobId || "";
+  if (!jobId) {
+    return;
+  }
+  subtitleLoadRequestId += 1;
+  pendingSubtitlePromise = null;
+  pendingSubtitleSignature = "";
+  manualSubtitleOverride = {
+    jobId: String(jobId),
+    tabKey: activeTabKey(activeTab),
+    signature: signature || `manual:${Date.now()}:${subtitleCues.length}`
+  };
+}
+
+function manualSubtitleOverrideMatches(jobId) {
+  if (!jobId || !manualSubtitleOverride) {
+    return false;
+  }
+  return manualSubtitleOverride.jobId === String(jobId) &&
+    manualSubtitleOverride.tabKey === activeTabKey(activeTab);
 }
 
 function renderSubtitleNotice(forcedText = null) {
@@ -3712,6 +3765,7 @@ async function importSubtitleFile() {
     subtitleCueSource = "transcript";
     renderedSubtitleJobId = entry.jobId || `imported-${Date.now()}`;
     renderedSubtitleSignature = `${entry.id}:${cues.length}`;
+    markManualSubtitleOverride(renderedSubtitleSignature);
     activeCueIndex = -1;
     renderSubtitleCueList();
     await attachCurrentSubtitlesToPage();
@@ -4018,26 +4072,34 @@ async function findSubtitleCacheEntryByPageContext(context) {
 
 async function getSubtitleCacheEntriesMatchingPageContext(context, { includeUnsafeForClear = false } = {}) {
   const currentPage = normalizeCacheUrl(context.pageUrl);
-  if (!canUsePageOnlySubtitleCacheFallback(currentPage)) {
+  if (!currentPage) {
     return [];
   }
   return (await getAllSubtitleCacheEntries())
     .filter(entry => includeUnsafeForClear
       ? subtitleCacheEntryMatchesPageForClear(entry, currentPage)
-      : subtitleCacheEntryMatchesPageFallback(entry, currentPage, context))
+      : subtitleCacheEntryMatchesPageIdentity(entry, currentPage))
     .sort((left, right) => subtitleCacheEntryTime(right) - subtitleCacheEntryTime(left));
 }
 
-function subtitleCacheEntryMatchesPageFallback(entry, normalizedPage, context) {
+function subtitleCacheEntryMatchesPageIdentity(entry, normalizedPage) {
   return Boolean(
     entry?.id &&
     entry?.transcript &&
     subtitleCacheEntryHasCurrentSchema(entry) &&
     normalizedPage &&
     normalizeCacheUrl(entry.pageUrl) === normalizedPage &&
-    subtitleCacheEntryHasSameMediaIdentity(entry, context) &&
-    subtitleCacheEntryMetadataMatchesContext(entry, context)
+    subtitleCacheEntryMetadataPageMatches(entry, normalizedPage)
   );
+}
+
+function subtitleCacheEntryMetadataPageMatches(entry, normalizedPage) {
+  const metadata = entry?.transcript?.metadata;
+  if (!metadata || typeof metadata !== "object") {
+    return true;
+  }
+  const metadataPage = normalizeCacheUrl(metadata.pageUrl || metadata.url || "");
+  return !metadataPage || metadataPage === normalizedPage;
 }
 
 function subtitleCacheEntryHasDisplayableCues(entry) {
@@ -4367,7 +4429,7 @@ function updateActionButtons(job) {
       ? t("clearAudioAgainTitle")
       : t("clearAudioTitle");
   elements.clearSubtitleCache.disabled = !canClearCurrentSubtitleCache(job);
-  elements.subtitleEditToggle.disabled = !subtitleCues.length;
+  elements.subtitleEditToggle.disabled = subtitleEditButtonShouldBeDisabled(job);
 }
 
 function canClearCurrentSubtitleCache(job) {

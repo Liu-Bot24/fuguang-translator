@@ -145,6 +145,7 @@
           (typeof Blob === "function" && !(file instanceof Blob))) {
         throw new Error("本地媒体文件授权结果无效，请点击重新抽取并重新选择当前文件。");
       }
+      validateStoredLocalMediaFile(message, file);
       return {
         input: new mediabunny.Input({
           formats: mediabunny.ALL_FORMATS,
@@ -157,6 +158,23 @@
         size: file.size || Number(message.localMediaFileSize || 0) || 0,
         fileName: file.name || message.localMediaFileName || ""
       };
+    }
+
+    function validateStoredLocalMediaFile(message = {}, file) {
+      const expectedName = String(message.localMediaFileName || "").trim();
+      const actualName = String(file?.name || "").trim();
+      if (expectedName && actualName && expectedName !== actualName) {
+        throw new Error("本地媒体文件授权结果与当前播放器不一致，请重新选择当前文件。");
+      }
+      const expectedSize = Number(message.localMediaFileSize || 0) || 0;
+      if (expectedSize > 0 && Number(file?.size || 0) !== expectedSize) {
+        throw new Error("本地媒体文件授权结果与当前播放器不一致，请重新选择当前文件。");
+      }
+      const expectedLastModified = Number(message.localMediaFileLastModified || 0) || 0;
+      const actualLastModified = Number(file?.lastModified || 0) || 0;
+      if (expectedLastModified > 0 && actualLastModified > 0 && actualLastModified !== expectedLastModified) {
+        throw new Error("本地媒体文件授权结果与当前播放器不一致，请重新选择当前文件。");
+      }
     }
 
     function localMediaInputProgressMessage(inputInfo = {}) {
@@ -213,12 +231,8 @@
         if (contentRange?.total && Number.isFinite(contentRange.total)) {
           return contentRange.total;
         }
-        const contentLength = Number.parseInt(
-          response.headers?.get?.("content-length") || response.headers?.get?.("Content-Length") || "",
-          10
-        );
-        if (Number.isFinite(contentLength) && contentLength > 0) {
-          return contentLength;
+        if (Number(response?.status || 0) !== 206) {
+          throw createLocalMediaSizeUnavailableError();
         }
         throw createLocalMediaSizeUnavailableError();
       } finally {

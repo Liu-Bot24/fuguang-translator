@@ -1280,7 +1280,8 @@ async function extractCandidateAudioInBrowser(record) {
     mseFragments: candidate.mseFragments || candidate.sourcePlan?.ffmpegInput?.fragments || [],
     dashFragments: candidate.dashFragments || [],
     chunkSeconds: record.modelConfig.chunkSeconds,
-    asrChunkSeconds: record.browserAsrChunkSeconds || browserAsrUploadChunkSeconds(record.modelConfig),
+    extractChunkSeconds: record.modelConfig.chunkSeconds,
+    asrChunkSeconds: offscreenAsrChunkSecondsForCandidate(record, candidate),
     asrMode: (record.pipeline === "funasr" || record.job?.pipeline === "funasr") ? "long-file" : "",
     webFfmpegPerformance: record.modelConfig.webFfmpegPerformance || DEFAULT_MODEL_SETTINGS.webFfmpegPerformance,
     cacheNamespace: record.job.id,
@@ -1290,6 +1291,14 @@ async function extractCandidateAudioInBrowser(record) {
     throw new Error(response?.error || "Web FFmpeg 音频提取失败。");
   }
   return response.result || {};
+}
+
+function offscreenAsrChunkSecondsForCandidate(record = {}) {
+  const configured = record.browserAsrChunkSeconds || record.modelConfig?.asrUploadChunkSeconds || record.modelConfig?.chunkSeconds;
+  if (record.pipeline === "funasr" || record.job?.pipeline === "funasr") {
+    return Math.max(10, Math.floor(Number(configured || 0) || dashScopeFunAsrChunkSeconds(record.metadata)));
+  }
+  return normalizeBrowserAsrUploadChunkSeconds(configured);
 }
 
 function applyOffscreenWebFfmpegProgress(message) {

@@ -201,6 +201,112 @@ vm.runInContext(source, context, { filename: "offscreen.js" });
   };
   context.fetch = async (_url, options = {}) => {
     calls.push(options?.headers?.Range || "");
+    if (options?.headers?.Range) {
+      return {
+        ok: true,
+        status: 206,
+        headers: { get: name => String(name || "").toLowerCase() === "content-length" ? "1" : "" },
+        body: { cancel: async () => {} }
+      };
+    }
+    return {
+      ok: true,
+      status: 0,
+      headers: { get: () => "" },
+      body: { getReader: () => ({}) }
+    };
+  };
+  try {
+    const result = await context.createLocalMediaMediabunnyInput("file:///Volumes/share/movie.mkv", fakeMediabunny);
+    assert.equal(result.sourceMode, "stream");
+    assert.equal(result.size, 0);
+    assert.equal(result.input.options.source instanceof ReadableStreamSource, true);
+    assert.deepEqual(calls, ["bytes=0-0", ""]);
+  } finally {
+    context.fetch = originalFetch;
+  }
+}
+
+{
+  const originalFetch = context.fetch;
+  const calls = [];
+  class CustomSource {
+    constructor(options) {
+      this.options = options;
+    }
+  }
+  class ReadableStreamSource {
+    constructor(stream, options) {
+      this.stream = stream;
+      this.options = options;
+    }
+  }
+  class Input {
+    constructor(options) {
+      this.options = options;
+    }
+  }
+  const fakeMediabunny = {
+    ALL_FORMATS: [],
+    CustomSource,
+    ReadableStreamSource,
+    Input
+  };
+  context.fetch = async (_url, options = {}) => {
+    calls.push(options?.headers?.Range || "");
+    if (options?.headers?.Range) {
+      return {
+        ok: true,
+        status: 200,
+        headers: { get: name => String(name || "").toLowerCase() === "content-length" ? "987654321" : "" },
+        body: { cancel: async () => {} }
+      };
+    }
+    return {
+      ok: true,
+      status: 0,
+      headers: { get: () => "" },
+      body: { getReader: () => ({}) }
+    };
+  };
+  try {
+    const result = await context.createLocalMediaMediabunnyInput("file:///Volumes/share/movie.mkv", fakeMediabunny);
+    assert.equal(result.sourceMode, "stream");
+    assert.equal(result.size, 0);
+    assert.equal(result.input.options.source instanceof ReadableStreamSource, true);
+    assert.deepEqual(calls, ["bytes=0-0", ""]);
+  } finally {
+    context.fetch = originalFetch;
+  }
+}
+
+{
+  const originalFetch = context.fetch;
+  const calls = [];
+  class CustomSource {
+    constructor(options) {
+      this.options = options;
+    }
+  }
+  class ReadableStreamSource {
+    constructor(stream, options) {
+      this.stream = stream;
+      this.options = options;
+    }
+  }
+  class Input {
+    constructor(options) {
+      this.options = options;
+    }
+  }
+  const fakeMediabunny = {
+    ALL_FORMATS: [],
+    CustomSource,
+    ReadableStreamSource,
+    Input
+  };
+  context.fetch = async (_url, options = {}) => {
+    calls.push(options?.headers?.Range || "");
     return {
       ok: true,
       status: 206,
@@ -253,13 +359,36 @@ vm.runInContext(source, context, { filename: "offscreen.js" });
     const result = await context.createLocalMediaMediabunnyInput(
       "file:///Volumes/share/movie.mkv",
       fakeMediabunny,
-      { localMediaFileKey: "file:///Volumes/share/movie.mkv" }
+      {
+        localMediaFileKey: "file:///Volumes/share/movie.mkv",
+        localMediaFileName: "movie.mkv",
+        localMediaFileSize: fakeFile.size,
+        localMediaFileLastModified: fakeFile.lastModified
+      }
     );
     assert.equal(result.sourceMode, "blob");
     assert.equal(result.size, fakeFile.size);
     assert.equal(result.input.options.source instanceof BlobSource, true);
     assert.equal(result.input.options.source.file, fakeFile);
     assert.deepEqual(calls, ["file:///Volumes/share/movie.mkv"]);
+    await assert.rejects(
+      () => context.createStoredLocalMediaMediabunnyInput({
+        localMediaFileKey: "file:///Volumes/share/movie.mkv",
+        localMediaFileName: "movie.mkv",
+        localMediaFileSize: fakeFile.size + 1,
+        localMediaFileLastModified: fakeFile.lastModified
+      }, fakeMediabunny),
+      /授权结果与当前播放器不一致/
+    );
+    await assert.rejects(
+      () => context.createStoredLocalMediaMediabunnyInput({
+        localMediaFileKey: "file:///Volumes/share/movie.mkv",
+        localMediaFileName: "movie.mkv",
+        localMediaFileSize: fakeFile.size,
+        localMediaFileLastModified: fakeFile.lastModified + 1
+      }, fakeMediabunny),
+      /授权结果与当前播放器不一致/
+    );
   } finally {
     context.fetch = originalFetch;
     context.FuguangLocalMediaFiles = originalLocalMediaFiles;
@@ -1742,15 +1871,16 @@ seg-000.cmfa
   const internalGroups = context.buildHlsInternalExtractionGroups({
     mapUrl: "",
     segments
-  }, 30);
+  }, 30, { extractChunkSeconds: 1200 });
+  assert.equal(internalGroups.length, 4);
   assert.equal(
-    internalGroups.every(group => group.coreEnd - group.coreStart <= 30),
+    internalGroups.some(group => group.coreEnd - group.coreStart > 30),
     true,
-    "30 秒 ASR 窗口应参与 HLS 内部提取分组，避免先生成长中间 MP3 再二次切窗"
+    "30 秒 ASR 上传窗口不能把 HLS 内部抽取分组也压成 30 秒"
   );
   assert.equal(internalGroups[0].coreStart, 0);
-  assert.equal(internalGroups[0].coreEnd <= 30, true);
-  assert.equal(internalGroups[1].coreStart < 30, true);
+  assert.equal(internalGroups[0].coreEnd, 180);
+  assert.equal(internalGroups[1].coreStart, 180);
 }
 
 {

@@ -640,6 +640,7 @@ async function extractHlsAudioWithWebFfmpeg(message) {
   const logicalChunkSeconds = normalizeHlsLogicalChunkSeconds(message.asrChunkSeconds || message.chunkSeconds || 900, {
     longFile: isLongFileAsrMode(message)
   });
+  const extractChunkSeconds = normalizeHlsInternalExtractChunkSeconds(message.extractChunkSeconds || message.chunkSeconds);
   let playlistUrl = message.sourceUrl;
   let playlistText = "";
   const initialPlaylist = await resolveInitialHlsPlaylist(message, fetchOptions, hlsUrlHelpers);
@@ -670,7 +671,8 @@ async function extractHlsAudioWithWebFfmpeg(message) {
     throw new Error("HLS 播放列表里没有可下载的媒体切片。");
   }
   const groups = buildHlsInternalExtractionGroups(media, logicalChunkSeconds, {
-    longFile: isLongFileAsrMode(message)
+    longFile: isLongFileAsrMode(message),
+    extractChunkSeconds
   });
   reportWebFfmpegExtractionProgress(message, {
     phase: "playlist",
@@ -973,7 +975,7 @@ async function extractHlsAudioWithWebFfmpeg(message) {
     duration: media.duration,
     chunkSeconds: logicalChunkSeconds,
     asrChunkSeconds: logicalChunkSeconds,
-    extractChunkSeconds: WEB_FFMPEG_HLS_EXTRACT_CHUNK_SECONDS,
+    extractChunkSeconds,
     internalChunkCount: internalChunks.length,
     sourceType: "hls"
   };
@@ -1216,9 +1218,18 @@ function buildHlsInternalExtractionGroups(media, logicalChunkSeconds, options = 
 }
 
 function hlsInternalExtractChunkSeconds(logicalChunkSeconds, options = {}) {
-  return Math.min(
-    WEB_FFMPEG_HLS_EXTRACT_CHUNK_SECONDS,
-    normalizeHlsLogicalChunkSeconds(logicalChunkSeconds, options)
+  const configured = options.extractChunkSeconds ?? options.internalChunkSeconds ?? logicalChunkSeconds;
+  return normalizeHlsInternalExtractChunkSeconds(configured);
+}
+
+function normalizeHlsInternalExtractChunkSeconds(value) {
+  const seconds = Number(value || WEB_FFMPEG_HLS_EXTRACT_CHUNK_SECONDS);
+  const normalized = Number.isFinite(seconds) && seconds > 0
+    ? seconds
+    : WEB_FFMPEG_HLS_EXTRACT_CHUNK_SECONDS;
+  return Math.max(
+    WEB_FFMPEG_ASR_LOGICAL_CHUNK_MIN_SECONDS,
+    Math.min(WEB_FFMPEG_HLS_EXTRACT_CHUNK_SECONDS, Math.floor(normalized))
   );
 }
 

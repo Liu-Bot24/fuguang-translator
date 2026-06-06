@@ -1,9 +1,6 @@
 (function(global) {
   function subtitleCacheSeed(normalizedPage, normalizedSource) {
-    if (normalizedPage && normalizedSource) {
-      return `page:${normalizedPage}\nsource:${normalizedSource}`;
-    }
-    if (normalizedPage && !isBilibiliVideoCachePage(normalizedPage)) {
+    if (normalizedPage) {
       return `page:${normalizedPage}`;
     }
     if (normalizedSource) {
@@ -23,16 +20,16 @@
     const entrySource = normalizeMediaCacheUrl(entry.sourceUrl);
     const currentPage = normalizeCacheUrl(context.pageUrl);
     const entryPage = normalizeCacheUrl(entry.pageUrl);
+    if (currentPage && entryPage) {
+      return currentPage === entryPage;
+    }
     if (currentSource) {
       if (!(entrySource && entrySource === currentSource)) {
         return false;
       }
-      if (currentPage && entryPage) {
-        return currentPage === entryPage;
-      }
       return true;
     }
-    return Boolean(currentPage && entryPage === currentPage);
+    return false;
   }
 
   function subtitleCacheEntryMatchesPageForClear(entry, normalizedPage) {
@@ -68,7 +65,7 @@
     const currentSource = normalizeMediaCacheUrl(context.sourceUrl);
     const entrySource = normalizeMediaCacheUrl(entry.sourceUrl);
     const metadataSource = normalizeMediaCacheUrl(metadata.sourceUrl || metadata.mediaUrl || metadata.sourceUrlOriginal || "");
-    if (metadataSource) {
+    if (metadataSource && !currentPage) {
       if (currentSource && metadataSource !== currentSource) {
         return false;
       }

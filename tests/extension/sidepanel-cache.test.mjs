@@ -1158,6 +1158,30 @@ assert.deepEqual(JSON.parse(JSON.stringify(clearSubtitleButtonState)), {
   jobPayload: false
 });
 
+const subtitleEditButtonRunningState = await vm.runInContext(`
+  (() => {
+    subtitleCues = [{ start: 1, end: 2, text: "译文" }];
+    updateActionButtons({
+      id: "browser-running-edit",
+      status: "running",
+      translation: { chunkStatuses: [], chunksFailed: 0 }
+    });
+    const runningDisabled = elements.subtitleEditToggle.disabled;
+    updateActionButtons({
+      id: "browser-completed-edit",
+      status: "completed",
+      translation: { chunkStatuses: [], chunksFailed: 0 }
+    });
+    const completedDisabled = elements.subtitleEditToggle.disabled;
+    return { runningDisabled, completedDisabled };
+  })()
+`, context);
+
+assert.deepEqual(JSON.parse(JSON.stringify(subtitleEditButtonRunningState)), {
+  runningDisabled: true,
+  completedDisabled: false
+});
+
 const continueTaskButtonRouteState = await vm.runInContext(`
   (async () => {
     const sent = [];
@@ -2223,10 +2247,10 @@ const samePageDifferentMediaCacheKeyState = await vm.runInContext(`
   })()
 `, context);
 
-assert.notEqual(
+assert.equal(
   samePageDifferentMediaCacheKeyState.first,
   samePageDifferentMediaCacheKeyState.second,
-  "same page with different media sources must not share a subtitle cache key"
+  "same normalized page should share one subtitle cache key even when media sources differ"
 );
 assert.equal(
   samePageDifferentMediaCacheKeyState.first,
@@ -2238,10 +2262,10 @@ assert.equal(
   samePageDifferentMediaCacheKeyState.queryIdentityARotatedToken,
   "rotating media tokens should not change a query-identified media cache key"
 );
-assert.notEqual(
+assert.equal(
   samePageDifferentMediaCacheKeyState.queryIdentityA,
   samePageDifferentMediaCacheKeyState.queryIdentityB,
-  "media identity query parameters must prevent subtitle cache collisions"
+  "media identity query parameters should not split subtitle cache when the page identity is the same"
 );
 
 const subtitleCacheEntrySanitizesUrlsState = await vm.runInContext(`
@@ -2542,8 +2566,8 @@ assert.notEqual(
 );
 assert.equal(
   bilibiliReloadCacheKeyState.bilibiliPageOnlyKey,
-  "",
-  "Bilibili cache keys must not be page-only while media identity is still unknown"
+  bilibiliReloadCacheKeyState.reloadedKey,
+  "Bilibili video pages should use the page identity as the subtitle cache key"
 );
 assert.notEqual(
   bilibiliReloadCacheKeyState.genericNoSlash,
@@ -2997,11 +3021,12 @@ const bilibiliReloadCacheSourceDriftState = await vm.runInContext(`
 `, context);
 
 assert.deepEqual(JSON.parse(JSON.stringify(bilibiliReloadCacheSourceDriftState)), {
-  loadedText: "",
-  cachedSubtitleLoadedKey: "",
-  attached: false,
-  follow: false
+  loadedText: "same page source drift cue",
+  cachedSubtitleLoadedKey: bilibiliReloadCacheSourceDriftState.cachedSubtitleLoadedKey,
+  attached: true,
+  follow: true
 });
+assert.match(bilibiliReloadCacheSourceDriftState.cachedSubtitleLoadedKey, /^subtitle:v/);
 
 const bilibiliBadExactCacheFallsBackState = await vm.runInContext(`
   (async () => {
@@ -3079,11 +3104,11 @@ const bilibiliBadExactCacheFallsBackState = await vm.runInContext(`
 `, context);
 
 assert.deepEqual(JSON.parse(JSON.stringify(bilibiliBadExactCacheFallsBackState)), {
-  loadedText: "",
-  cachedSubtitleLoadedKey: "",
+  loadedText: "fallback after bad exact cache",
+  cachedSubtitleLoadedKey: bilibiliBadExactCacheFallsBackState.expectedKey,
   expectedKey: bilibiliBadExactCacheFallsBackState.expectedKey,
-  attached: false,
-  follow: false
+  attached: true,
+  follow: true
 });
 
 const bilibiliSourceOnlyExactCacheFallsBackState = await vm.runInContext(`
@@ -3173,7 +3198,7 @@ assert.deepEqual(JSON.parse(JSON.stringify(bilibiliSourceOnlyExactCacheFallsBack
   follow: true
 });
 
-const ordinaryPageBadExactDoesNotPageFallbackState = await vm.runInContext(`
+const ordinaryPageBadExactUsesPageFallbackState = await vm.runInContext(`
   (async () => {
     const originalGetSubtitleCacheEntry = getSubtitleCacheEntry;
     const originalGetAllSubtitleCacheEntries = getAllSubtitleCacheEntries;
@@ -3246,11 +3271,11 @@ const ordinaryPageBadExactDoesNotPageFallbackState = await vm.runInContext(`
   })()
 `, context);
 
-assert.deepEqual(JSON.parse(JSON.stringify(ordinaryPageBadExactDoesNotPageFallbackState)), {
-  loadedText: "",
-  cachedSubtitleLoadedKey: "",
-  attached: false,
-  follow: false
+assert.deepEqual(JSON.parse(JSON.stringify(ordinaryPageBadExactUsesPageFallbackState)), {
+  loadedText: "must not cross-media fallback",
+  cachedSubtitleLoadedKey: ordinaryPageBadExactUsesPageFallbackState.cachedSubtitleLoadedKey,
+  attached: true,
+  follow: true
 });
 
 const bilibiliSourceDriftPrefersNewestCacheState = await vm.runInContext(`
@@ -3331,11 +3356,11 @@ const bilibiliSourceDriftPrefersNewestCacheState = await vm.runInContext(`
 `, context);
 
 assert.deepEqual(JSON.parse(JSON.stringify(bilibiliSourceDriftPrefersNewestCacheState)), {
-  loadedText: "",
-  cachedSubtitleLoadedKey: "",
+  loadedText: "newer same page cue",
+  cachedSubtitleLoadedKey: bilibiliSourceDriftPrefersNewestCacheState.expectedKey,
   expectedKey: bilibiliSourceDriftPrefersNewestCacheState.expectedKey,
-  attached: false,
-  follow: false
+  attached: true,
+  follow: true
 });
 
 const bilibiliSourceDriftClearCacheState = await vm.runInContext(`
@@ -3397,7 +3422,7 @@ const bilibiliSourceDriftClearCacheState = await vm.runInContext(`
       await clearCurrentSubtitleCache();
       return {
         deletedIds,
-        expectedDeletedIds: [currentKey, entryA.id, entryB.id].sort(),
+        expectedDeletedIds: [...new Set([currentKey, entryA.id, entryB.id])].sort(),
         detached: Boolean(globalThis.bilibiliSourceDriftDetached),
         cuesLength: subtitleCues.length,
         currentSubtitleCacheEntry,
@@ -3602,10 +3627,79 @@ const genericPageSourceDriftCacheMissState = await vm.runInContext(`
 `, context);
 
 assert.deepEqual(JSON.parse(JSON.stringify(genericPageSourceDriftCacheMissState)), {
-  cuesLength: 0,
-  cachedSubtitleLoadedKey: "",
-  attached: false
+  cuesLength: 1,
+  cachedSubtitleLoadedKey: genericPageSourceDriftCacheMissState.cachedSubtitleLoadedKey,
+  attached: true
 });
+assert.match(genericPageSourceDriftCacheMissState.cachedSubtitleLoadedKey, /^subtitle:v/);
+
+const copiedTabLoadsPageCacheBeforeCandidatesState = await vm.runInContext(`
+  (async () => {
+    const originalGetSubtitleCacheEntry = getSubtitleCacheEntry;
+    const originalGetAllSubtitleCacheEntries = getAllSubtitleCacheEntries;
+    const originalEnsureCurrentSubtitlesAttachedToPage = ensureCurrentSubtitlesAttachedToPage;
+    const originalStartSubtitleFollow = startSubtitleFollow;
+    const originalPruneSubtitleCache = pruneSubtitleCache;
+    const page = "https://example.test/watch/1?utm_source=shared";
+    const savedSource = "https://media.example.test/hls/720p/video.m3u8?token=old";
+    const savedEntry = {
+      id: await buildSubtitleCacheKey({ pageUrl: page, sourceUrl: savedSource }),
+      pageUrl: page,
+      sourceUrl: savedSource,
+      title: "Copied tab video",
+      updatedAt: "2026-05-24T00:00:00.000Z",
+      transcript: {
+        source: [{ start: 1, end: 2, text: "source cue" }],
+        translated: [{ start: 1, end: 2, text: "copied tab cached cue" }]
+      }
+    };
+    activeTab = { id: 2, title: "Copied tab video", url: page };
+    currentJobId = "";
+    currentJob = null;
+    candidates = [];
+    selectedCandidateKey = "";
+    subtitleCues = [];
+    currentTranscript = null;
+    currentSubtitleCacheEntry = null;
+    cachedSubtitleLoadedKey = "";
+    cacheAutoLoadInFlight = false;
+    getSubtitleCacheEntry = async () => null;
+    getAllSubtitleCacheEntries = async () => [savedEntry];
+    ensureCurrentSubtitlesAttachedToPage = async () => {
+      globalThis.copiedTabPageCacheAttached = true;
+    };
+    startSubtitleFollow = () => {
+      globalThis.copiedTabPageCacheFollow = true;
+    };
+    pruneSubtitleCache = async () => {};
+
+    try {
+      await tryLoadCachedSubtitleForCurrentPage();
+      return {
+        loadedText: subtitleCues[0]?.text || "",
+        cachedSubtitleLoadedKey,
+        attached: Boolean(globalThis.copiedTabPageCacheAttached),
+        follow: Boolean(globalThis.copiedTabPageCacheFollow)
+      };
+    } finally {
+      getSubtitleCacheEntry = originalGetSubtitleCacheEntry;
+      getAllSubtitleCacheEntries = originalGetAllSubtitleCacheEntries;
+      ensureCurrentSubtitlesAttachedToPage = originalEnsureCurrentSubtitlesAttachedToPage;
+      startSubtitleFollow = originalStartSubtitleFollow;
+      pruneSubtitleCache = originalPruneSubtitleCache;
+      delete globalThis.copiedTabPageCacheAttached;
+      delete globalThis.copiedTabPageCacheFollow;
+    }
+  })()
+`, context);
+
+assert.deepEqual(JSON.parse(JSON.stringify(copiedTabLoadsPageCacheBeforeCandidatesState)), {
+  loadedText: "copied tab cached cue",
+  cachedSubtitleLoadedKey: copiedTabLoadsPageCacheBeforeCandidatesState.cachedSubtitleLoadedKey,
+  attached: true,
+  follow: true
+});
+assert.match(copiedTabLoadsPageCacheBeforeCandidatesState.cachedSubtitleLoadedKey, /^subtitle:v/);
 
 const legacySubtitleCacheMatchState = await vm.runInContext(`
   (async () => {
@@ -3739,10 +3833,11 @@ const legacySubtitleCacheMismatchState = await vm.runInContext(`
 `, context);
 
 assert.deepEqual(JSON.parse(JSON.stringify(legacySubtitleCacheMismatchState)), {
-  cuesLength: 0,
-  cachedSubtitleLoadedKey: "",
-  attached: false
+  cuesLength: 1,
+  cachedSubtitleLoadedKey: legacySubtitleCacheMismatchState.cachedSubtitleLoadedKey,
+  attached: true
 });
+assert.match(legacySubtitleCacheMismatchState.cachedSubtitleLoadedKey, /^subtitle:v3:/);
 
 const funAsrProfileUiState = await vm.runInContext(`
   (() => {
@@ -5547,6 +5642,276 @@ const sameCountUpdatedSubtitleState = await vm.runInContext(`
 
 assert.equal(sameCountUpdatedSubtitleState.cueText, "new text");
 assert.match(sameCountUpdatedSubtitleState.attachedVtt, /new text/);
+
+const manualSubtitleEditSurvivesRefreshState = await vm.runInContext(`
+  (async () => {
+    const originalSendMessage = chrome.runtime.sendMessage;
+    const originalCacheCurrentSubtitles = cacheCurrentSubtitles;
+    const originalAttachCurrentSubtitlesToPage = attachCurrentSubtitlesToPage;
+    let preloadVttRequests = 0;
+    let attachCount = 0;
+    cacheCurrentSubtitles = async () => {};
+    attachCurrentSubtitlesToPage = async () => {
+      attachCount += 1;
+    };
+    try {
+      activeTab = { id: 1, url: "https://example.test/manual-edit" };
+      currentJobId = "job-manual-edit";
+      renderedSubtitleJobId = "job-manual-edit";
+      renderedSubtitleSignature = "job-manual-edit:1:1:0";
+      manualSubtitleOverride = null;
+      subtitleCueSource = "transcript";
+      subtitleCues = [
+        { start: 0, end: 1, time: "00:00:00.000 --> 00:00:01.000", text: "旧译文", sourceText: "原文", chunkIndex: 0, segmentIndex: 0 }
+      ];
+      currentTranscript = {
+        source: [{ start: 0, end: 1, text: "原文", chunkIndex: 0, segmentIndex: 0 }],
+        translated: [{ start: 0, end: 1, text: "旧译文", chunkIndex: 0, segmentIndex: 0 }],
+        chunkStatuses: []
+      };
+      chrome.runtime.sendMessage = async message => {
+        if (message.type === "FUGUANG_GET_PRELOAD_VTT") {
+          preloadVttRequests += 1;
+          return { ok: true, vtt: "WEBVTT\\n\\n00:00:00.000 --> 00:00:01.000\\n后台旧字幕\\n" };
+        }
+        return { ok: true };
+      };
+      await applySubtitleCueTextEdit(0, "手动新译文");
+      await renderSubtitles("job-manual-edit", {
+        translation: {
+          segmentCount: 1,
+          chunksDone: 1,
+          chunksFailed: 0,
+          vttPath: "browser-memory"
+        }
+      });
+      stopSubtitleFollow();
+      return {
+        cueText: subtitleCues[0]?.text,
+        translatedText: currentTranscript.translated[0]?.text,
+        preloadVttRequests,
+        attachCount,
+        overrideJobId: manualSubtitleOverride?.jobId || ""
+      };
+    } finally {
+      chrome.runtime.sendMessage = originalSendMessage;
+      cacheCurrentSubtitles = originalCacheCurrentSubtitles;
+      attachCurrentSubtitlesToPage = originalAttachCurrentSubtitlesToPage;
+      manualSubtitleOverride = null;
+    }
+  })()
+`, context);
+
+assert.deepEqual(JSON.parse(JSON.stringify(manualSubtitleEditSurvivesRefreshState)), {
+  cueText: "手动新译文",
+  translatedText: "手动新译文",
+  preloadVttRequests: 0,
+  attachCount: 2,
+  overrideJobId: "job-manual-edit"
+});
+
+const manualSubtitleEditCancelsInFlightRenderState = await vm.runInContext(`
+  (async () => {
+    const originalLoadSubtitleCues = loadSubtitleCues;
+    const originalCacheCurrentSubtitles = cacheCurrentSubtitles;
+    const originalAttachCurrentSubtitlesToPage = attachCurrentSubtitlesToPage;
+    let resolveLoad;
+    let attachCount = 0;
+    cacheCurrentSubtitles = async () => {};
+    attachCurrentSubtitlesToPage = async () => {
+      attachCount += 1;
+    };
+    loadSubtitleCues = async () => new Promise(resolve => {
+      resolveLoad = resolve;
+    });
+    try {
+      activeTab = { id: 1, url: "https://example.test/manual-race" };
+      currentJobId = "job-manual-race";
+      renderedSubtitleJobId = "job-manual-race";
+      renderedSubtitleSignature = "";
+      manualSubtitleOverride = null;
+      subtitleCueSource = "transcript";
+      subtitleCues = [
+        { start: 0, end: 1, time: "00:00:00.000 --> 00:00:01.000", text: "旧译文", sourceText: "原文", chunkIndex: 0, segmentIndex: 0 }
+      ];
+      currentTranscript = {
+        source: [{ start: 0, end: 1, text: "原文", chunkIndex: 0, segmentIndex: 0 }],
+        translated: [{ start: 0, end: 1, text: "旧译文", chunkIndex: 0, segmentIndex: 0 }],
+        chunkStatuses: []
+      };
+      const renderPromise = renderSubtitles("job-manual-race", {
+        translation: {
+          segmentCount: 1,
+          chunksDone: 1,
+          chunksFailed: 0,
+          vttPath: "browser-memory"
+        }
+      });
+      await Promise.resolve();
+      await applySubtitleCueTextEdit(0, "竞态手动译文");
+      resolveLoad({
+        cues: [{ start: 0, end: 1, time: "00:00:00.000 --> 00:00:01.000", text: "在途旧字幕" }],
+        source: "vtt",
+        transcript: null
+      });
+      await renderPromise;
+      stopSubtitleFollow();
+      return {
+        cueText: subtitleCues[0]?.text,
+        transcriptText: currentTranscript.translated[0]?.text,
+        attachCount,
+        overrideJobId: manualSubtitleOverride?.jobId || ""
+      };
+    } finally {
+      loadSubtitleCues = originalLoadSubtitleCues;
+      cacheCurrentSubtitles = originalCacheCurrentSubtitles;
+      attachCurrentSubtitlesToPage = originalAttachCurrentSubtitlesToPage;
+      manualSubtitleOverride = null;
+    }
+  })()
+`, context);
+
+assert.deepEqual(JSON.parse(JSON.stringify(manualSubtitleEditCancelsInFlightRenderState)), {
+  cueText: "竞态手动译文",
+  transcriptText: "竞态手动译文",
+  attachCount: 1,
+  overrideJobId: "job-manual-race"
+});
+
+const importedSubtitleSurvivesRefreshState = await vm.runInContext(`
+  (async () => {
+    const originalParseSubtitleImportText = FuguangSubtitleFormat.parseSubtitleImportText;
+    const originalPutSubtitleCacheEntry = putSubtitleCacheEntry;
+    const originalAttachCurrentSubtitlesToPage = attachCurrentSubtitlesToPage;
+    const originalLoadSubtitleCues = loadSubtitleCues;
+    let putEntryId = "";
+    let loadCalls = 0;
+    putSubtitleCacheEntry = async entry => {
+      putEntryId = entry.id;
+    };
+    attachCurrentSubtitlesToPage = async () => {};
+    loadSubtitleCues = async () => {
+      loadCalls += 1;
+      return {
+        cues: [{ start: 0, end: 1, time: "00:00:00.000 --> 00:00:01.000", text: "后台旧字幕" }],
+        source: "vtt",
+        transcript: null
+      };
+    };
+    FuguangSubtitleFormat.parseSubtitleImportText = () => ({
+      transcript: {
+        source: [{ start: 0, end: 1, text: "导入原文" }],
+        translated: [{ start: 0, end: 1, text: "导入译文" }],
+        chunkStatuses: [],
+        metadata: {
+          pageUrl: "https://example.test/import",
+          sourceUrl: "https://cdn.example.test/import.mp4",
+          jobId: "job-import"
+        }
+      },
+      metadata: {
+        pageUrl: "https://example.test/import",
+        sourceUrl: "https://cdn.example.test/import.mp4",
+        jobId: "job-import"
+      },
+      format: "srt"
+    });
+    try {
+      activeTab = { id: 1, url: "https://example.test/import", title: "Import page" };
+      currentJobId = "job-import";
+      renderedSubtitleJobId = "job-import";
+      renderedSubtitleSignature = "";
+      manualSubtitleOverride = null;
+      subtitleCues = [];
+      currentTranscript = null;
+      elements.subtitleImportFile.files = [{
+        name: "manual.srt",
+        type: "application/x-subrip",
+        text: async () => "1\\n00:00:00,000 --> 00:00:01,000\\n导入译文\\n"
+      }];
+      await importSubtitleFile();
+      await renderSubtitles("job-import", {
+        translation: {
+          segmentCount: 1,
+          chunksDone: 1,
+          chunksFailed: 0,
+          vttPath: "browser-memory"
+        }
+      });
+      stopSubtitleFollow();
+      return {
+        cueText: subtitleCues[0]?.text,
+        transcriptText: currentTranscript.translated[0]?.text,
+        cueSource: subtitleCueSource,
+        overrideJobId: manualSubtitleOverride?.jobId || "",
+        loadCalls,
+        hasCacheEntry: Boolean(putEntryId)
+      };
+    } finally {
+      FuguangSubtitleFormat.parseSubtitleImportText = originalParseSubtitleImportText;
+      putSubtitleCacheEntry = originalPutSubtitleCacheEntry;
+      attachCurrentSubtitlesToPage = originalAttachCurrentSubtitlesToPage;
+      loadSubtitleCues = originalLoadSubtitleCues;
+      manualSubtitleOverride = null;
+      elements.subtitleImportFile.files = [];
+    }
+  })()
+`, context);
+
+assert.deepEqual(JSON.parse(JSON.stringify(importedSubtitleSurvivesRefreshState)), {
+  cueText: "导入译文",
+  transcriptText: "导入译文",
+  cueSource: "transcript",
+  overrideJobId: "job-import",
+  loadCalls: 0,
+  hasCacheEntry: true
+});
+
+const subtitleTimeEditValidationState = await vm.runInContext(`
+  (async () => {
+    const originalPersistSubtitleEdits = persistSubtitleEdits;
+    persistSubtitleEdits = async () => {};
+    try {
+      subtitleCues = [
+        { start: 0, end: 2, time: "00:00:00.000 --> 00:00:02.000", text: "A" },
+        { start: 3, end: 5, time: "00:00:03.000 --> 00:00:05.000", text: "B" },
+        { start: 6, end: 8, time: "00:00:06.000 --> 00:00:08.000", text: "C" }
+      ];
+      currentTranscript = {
+        source: subtitleCues.map(cue => ({ start: cue.start, end: cue.end, text: cue.text })),
+        translated: subtitleCues.map(cue => ({ start: cue.start, end: cue.end, text: cue.text })),
+        chunkStatuses: []
+      };
+      const zeroSaved = await applySubtitleCueTimeEdit(1, "00:00:04.000 --> 00:00:04.000");
+      const overlapPreviousSaved = await applySubtitleCueTimeEdit(1, "00:00:01.500 --> 00:00:04.000");
+      const overlapNextSaved = await applySubtitleCueTimeEdit(1, "00:00:04.000 --> 00:00:06.500");
+      const validSaved = await applySubtitleCueTimeEdit(1, "00:00:02.000 --> 00:00:06.000");
+      return {
+        zeroSaved,
+        overlapPreviousSaved,
+        overlapNextSaved,
+        validSaved,
+        cueStart: subtitleCues[1].start,
+        cueEnd: subtitleCues[1].end,
+        sourceStart: currentTranscript.source[1].start,
+        translatedEnd: currentTranscript.translated[1].end
+      };
+    } finally {
+      persistSubtitleEdits = originalPersistSubtitleEdits;
+    }
+  })()
+`, context);
+
+assert.deepEqual(JSON.parse(JSON.stringify(subtitleTimeEditValidationState)), {
+  zeroSaved: false,
+  overlapPreviousSaved: false,
+  overlapNextSaved: false,
+  validSaved: true,
+  cueStart: 2,
+  cueEnd: 6,
+  sourceStart: 2,
+  translatedEnd: 6
+});
 
 const vttRenderClearsStaleTranscriptState = await vm.runInContext(`
   (async () => {

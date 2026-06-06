@@ -1406,14 +1406,95 @@ vm.runInContext(source, context, { filename: "service-worker.js" });
       },
       metadata: { duration: 120, pageUrl: "https://example.test/watch" },
       modelConfig: {
-        chunkSeconds: 900,
+        chunkSeconds: 1200,
         webFfmpegPerformance: "stable"
       },
-      browserAsrChunkSeconds: 900,
+      browserAsrChunkSeconds: 30,
       job: { id: "job-web-ffmpeg-performance" }
     });
     assert.deepEqual(result, { chunks: [] });
     assert.equal(offscreenMessage?.webFfmpegPerformance, "stable");
+    assert.equal(offscreenMessage?.chunkSeconds, 1200);
+    assert.equal(offscreenMessage?.extractChunkSeconds, 1200);
+    assert.equal(
+      offscreenMessage?.asrChunkSeconds,
+      30,
+      "兼容短窗 ASR 只能缩短上传窗口，不能污染媒体抽取分组"
+    );
+
+    offscreenMessage = null;
+    await context.extractCandidateAudioInBrowser({
+      tabId: 9,
+      candidate: {
+        url: "https://cdn.example.test/video.mp4",
+        kind: "video",
+        ext: "mp4",
+        duration: 120,
+        pageUrl: "https://example.test/watch"
+      },
+      metadata: { duration: 120, pageUrl: "https://example.test/watch" },
+      modelConfig: {
+        chunkSeconds: 1200,
+        webFfmpegPerformance: "stable"
+      },
+      browserAsrChunkSeconds: 1200,
+      job: { id: "job-web-ffmpeg-direct" }
+    });
+    assert.equal(
+      offscreenMessage?.asrChunkSeconds,
+      1200,
+      "已经由能力检测确认可用的普通 HTTPS 直连视频应保留长上传窗口"
+    );
+
+    offscreenMessage = null;
+    await context.extractCandidateAudioInBrowser({
+      tabId: 9,
+      candidate: {
+        url: "file:///Users/test/video.mp4",
+        kind: "video",
+        ext: "mp4",
+        duration: 120,
+        pageUrl: "file:///Users/test/video.mp4",
+        localMediaFileKey: "local-video-key"
+      },
+      metadata: { duration: 120, pageUrl: "file:///Users/test/video.mp4" },
+      modelConfig: {
+        chunkSeconds: 1200,
+        webFfmpegPerformance: "stable"
+      },
+      browserAsrChunkSeconds: 1200,
+      job: { id: "job-web-ffmpeg-local" }
+    });
+    assert.equal(
+      offscreenMessage?.asrChunkSeconds,
+      1200,
+      "已经由能力检测确认可用的本地视频应保留长上传窗口"
+    );
+
+    offscreenMessage = null;
+    await context.extractCandidateAudioInBrowser({
+      tabId: 9,
+      candidate: {
+        url: "https://cdn.example.test/video.m3u8",
+        kind: "hls",
+        ext: "m3u8",
+        duration: 120,
+        pageUrl: "https://example.test/watch"
+      },
+      metadata: { duration: 120, pageUrl: "https://example.test/watch" },
+      modelConfig: {
+        chunkSeconds: 1200,
+        webFfmpegPerformance: "stable"
+      },
+      browserAsrChunkSeconds: 1200,
+      pipeline: "funasr",
+      job: { id: "job-web-ffmpeg-funasr", pipeline: "funasr" }
+    });
+    assert.equal(
+      offscreenMessage?.asrChunkSeconds,
+      1200,
+      "Fun-ASR 长文件模式应保留长上传窗口"
+    );
   } finally {
     context.ensureOffscreenDocument = originalEnsureOffscreenDocument;
     context.getWebFfmpegConfig = originalGetWebFfmpegConfig;
@@ -4755,6 +4836,7 @@ function add(tabId, candidate) {
     localMediaFileKey: sourceUrl,
     localMediaFileName: "MILK-148.mp4",
     localMediaFileSize: 5135208353,
+    localMediaFileLastModified: 1780000000000,
     sourcePlan: {
       kind: "muxed-media",
       primaryUrl: "file:///tmp/wrong.mp4",
@@ -4764,7 +4846,22 @@ function add(tabId, candidate) {
   assert.equal(internalCandidate.localMediaFileKey, sourceUrl);
   assert.equal(internalCandidate.localMediaFileName, "MILK-148.mp4");
   assert.equal(internalCandidate.localMediaFileSize, 5135208353);
+  assert.equal(internalCandidate.localMediaFileLastModified, 1780000000000);
   assert.equal(internalCandidate.sourcePlan?.ffmpegInput?.url, sourceUrl);
+
+  const mismatchedLocalFile = context.resolvePreloadCandidateForStart(context.getState(tabId), {
+    ...candidate,
+    localMediaFileKey: "file:///Volumes/Other/MILK-148.mp4",
+    localMediaFileName: "MILK-148.mp4",
+    localMediaFileSize: 5135208353
+  });
+  assert.equal(mismatchedLocalFile.localMediaFileKey, undefined);
+
+  assert.notEqual(
+    context.candidateFingerprint({ url: "file:///Volumes/A/720p/movie.mp4", kind: "video" }),
+    context.candidateFingerprint({ url: "file:///Volumes/A/1080p/movie.mp4", kind: "video" }),
+    "本地 file:// 候选不能沿用在线清晰度路径归一化，否则不同路径可能合并"
+  );
 }
 
 {

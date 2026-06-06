@@ -252,7 +252,9 @@ export const FuguangBrowserMediaCandidates = (() => {
 
   function localMediaFileStartFields(candidate = {}) {
     const key = String(candidate?.localMediaFileKey || "").trim();
-    if (!key || !isFileUrl(key) || !isFileUrl(candidate?.url || "")) {
+    const keyUrl = normalizeExactFileUrl(key);
+    const candidateUrl = normalizeExactFileUrl(candidate?.url || "");
+    if (!keyUrl || !candidateUrl || keyUrl !== candidateUrl) {
       return {};
     }
     const size = Number(candidate.localMediaFileSize || 0) || 0;
@@ -270,6 +272,15 @@ export const FuguangBrowserMediaCandidates = (() => {
       return new URL(String(rawUrl || "")).protocol === "file:";
     } catch {
       return false;
+    }
+  }
+
+  function normalizeExactFileUrl(rawUrl = "") {
+    try {
+      const url = new URL(String(rawUrl || "").trim());
+      return url.protocol === "file:" ? url.href : "";
+    } catch {
+      return "";
     }
   }
   
@@ -1345,6 +1356,9 @@ export const FuguangBrowserMediaCandidates = (() => {
   function canonicalStreamUrl(rawUrl) {
     try {
       const url = new URL(rawUrl);
+      if (url.protocol === "file:") {
+        return url.href;
+      }
       return `${url.host}${canonicalPathname(url.pathname)}`;
     } catch {
       return rawUrl || "";
