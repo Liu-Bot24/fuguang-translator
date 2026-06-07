@@ -233,6 +233,14 @@
     if (displayMode === "source") {
       return Boolean(subtitleCueSourceText(cue));
     }
+    if (
+      displayMode === "bilingual" &&
+      cue.sourceOnly &&
+      subtitleOutputRuntimeState().isRunning &&
+      options.allowRunningSourcePreview === false
+    ) {
+      return false;
+    }
     if (displayMode !== "translated" || !cue.sourceOnly) {
       return true;
     }

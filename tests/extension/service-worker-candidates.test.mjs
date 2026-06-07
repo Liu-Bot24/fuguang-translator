@@ -6202,16 +6202,21 @@ function add(tabId, candidate) {
   seedPage(tabId, { duration: 600 });
   context.getState(tabId).subtitleOverlayInjectedAt = Date.now();
   const sentVtts = [];
+  let attachedSignature = "";
   const originalSendMessage = chrome.tabs.sendMessage;
   chrome.tabs.sendMessage = async (_tabId, message) => {
+    if (message.type === "FUGUANG_GET_VIDEO_STATE") {
+      return { ok: true, state: { currentTime: 0, duration: 600, subtitleSignature: attachedSignature } };
+    }
     if (message.type === "FUGUANG_ATTACH_VTT") {
       sentVtts.push(message.vtt);
+      attachedSignature = message.signature;
       return { ok: true };
     }
     return null;
   };
 
-  await context.attachBrowserJobVttIfReady({
+  const record = {
     tabId,
     metadata: { pageUrl: context.getState(tabId).page.url },
     job: {
@@ -6242,12 +6247,21 @@ function add(tabId, candidate) {
         }
       }
     }
-  });
+  };
+
+  await context.attachBrowserJobVttIfReady(record);
+  record.job.translation.segmentCount = 3;
+  record.job.translation.chunksDone = 1;
+  record.job.translation.transcript.source.push(
+    { start: 6, end: 8, text: "source third", chunkIndex: 0, segmentIndex: 2 }
+  );
+  await context.attachBrowserJobVttIfReady(record);
 
   assert.equal(sentVtts.length, 1);
-  assert.match(sentVtts[0], /source first/);
   assert.match(sentVtts[0], /translated second/);
-  assert.doesNotMatch(sentVtts[0], /source second\ntranslated second/);
+  assert.doesNotMatch(sentVtts[0], /source first/);
+  assert.doesNotMatch(sentVtts[0], /source second/);
+  assert.doesNotMatch(sentVtts[0], /source third/);
   chrome.tabs.sendMessage = originalSendMessage;
 }
 
@@ -6284,9 +6298,7 @@ function add(tabId, candidate) {
     }
   });
 
-  assert.deepEqual(sentVtts, [
-    "WEBVTT\n\n00:00:00.000 --> 00:00:02.000\nsource only while running\n"
-  ]);
+  assert.deepEqual(sentVtts, []);
   chrome.tabs.sendMessage = originalSendMessage;
 }
 

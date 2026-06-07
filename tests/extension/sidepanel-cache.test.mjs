@@ -4287,8 +4287,44 @@ const sourceOnlyRunningTranslatedPreviewState = await vm.runInContext(`
   })()
 `, context);
 
-assert.deepEqual(JSON.parse(JSON.stringify(sourceOnlyRunningTranslatedPreviewState.types)), ["FUGUANG_ATTACH_VTT_TEXT"]);
-assert.match(sourceOnlyRunningTranslatedPreviewState.attachedVtt, /source only while running/);
+assert.deepEqual(JSON.parse(JSON.stringify(sourceOnlyRunningTranslatedPreviewState.types)), ["FUGUANG_DETACH_PRELOAD_VTT"]);
+assert.equal(sourceOnlyRunningTranslatedPreviewState.attachedVtt, "");
+
+const runningPartialTranslatedAttachState = await vm.runInContext(`
+  (async () => {
+    const messages = [];
+    activeTab = { id: 1 };
+    currentJob = { id: "running-partial-translated", status: "running", stage: "translation" };
+    subtitleOverlayEnabled = true;
+    subtitleDisplayMode = "translated";
+    subtitleCueSource = "transcript";
+    currentTranscript = {
+      source: [
+        { start: 0, end: 2, text: "source first", chunkIndex: 0, segmentIndex: 0 },
+        { start: 3, end: 5, text: "source second", chunkIndex: 0, segmentIndex: 1 }
+      ],
+      translated: [
+        { start: 3, end: 5, text: "translated second", chunkIndex: 0, segmentIndex: 1 }
+      ]
+    };
+    subtitleCues = cuesFromTranscript(currentTranscript);
+    chrome.runtime.sendMessage = async message => {
+      messages.push(message);
+      return { ok: true };
+    };
+    await attachCurrentSubtitlesToPage();
+    const attachMessage = messages.find(message => message.type === "FUGUANG_ATTACH_VTT_TEXT");
+    return {
+      types: messages.map(message => message.type),
+      attachedVtt: attachMessage?.vtt || ""
+    };
+  })()
+`, context);
+
+assert.deepEqual(JSON.parse(JSON.stringify(runningPartialTranslatedAttachState.types)), ["FUGUANG_ATTACH_VTT_TEXT"]);
+assert.match(runningPartialTranslatedAttachState.attachedVtt, /translated second/);
+assert.doesNotMatch(runningPartialTranslatedAttachState.attachedVtt, /source first/);
+assert.doesNotMatch(runningPartialTranslatedAttachState.attachedVtt, /source second/);
 
 const sourceOnlyRunningTranslatedListState = await vm.runInContext(`
   (() => {

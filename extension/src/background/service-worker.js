@@ -4308,7 +4308,7 @@ async function attachBrowserJobVttIfReady(record) {
 async function buildBrowserVttAttachment(job) {
   const mode = await getSubtitleDisplayMode();
   const transcript = job.translation?.transcript;
-  const allowSourcePreview = browserJobAllowsSourcePreview(job);
+  const allowSourceFallback = browserJobAllowsOverlaySourceFallback(job);
   if (mode === "source") {
     const source = transcriptToSourceVtt(transcript);
     if (source) {
@@ -4317,27 +4317,25 @@ async function buildBrowserVttAttachment(job) {
     return { mode, vtt: "" };
   }
   if (mode === "bilingual") {
-    const bilingual = transcriptToBilingualVtt(transcript, { allowSourcePreview });
+    const bilingual = transcriptToBilingualVtt(transcript, { allowSourcePreview: allowSourceFallback });
     if (bilingual) {
       return { mode, vtt: bilingual };
     }
   }
-  const translated = transcriptToTranslatedVtt(transcript, { allowSourcePreview });
+  const translated = transcriptToTranslatedVtt(transcript, { allowSourcePreview: allowSourceFallback });
   if (translated) {
     return { mode: "translated", vtt: translated };
   }
   return { mode: "translated", vtt: transcript ? "" : (job.translation?.vttText || "") };
 }
 
-function browserJobAllowsSourcePreview(job) {
-  return !["done", "completed", "error", "failed", "cancelled"].includes(String(job?.status || ""));
+function browserJobAllowsOverlaySourceFallback(job) {
+  return ["done", "completed"].includes(String(job?.status || ""));
 }
 
 function browserVttAttachmentSignature(job, attachment) {
   return [
     job.id,
-    job.translation?.segmentCount || 0,
-    job.translation?.chunksDone || 0,
     attachment.mode,
     vttContentSignature(attachment.vtt)
   ].join(":");
@@ -5829,7 +5827,7 @@ async function isSubtitleOverlayEnabled() {
 function transcriptToTranslatedVtt(transcript, options = {}) {
   const source = Array.isArray(transcript?.source) ? transcript.source : [];
   const translated = Array.isArray(transcript?.translated) ? transcript.translated : [];
-  if (source.length) {
+  if (source.length && options.allowSourcePreview !== false) {
     return segmentsToVtt(mergeTranslatedDisplaySegments(source, translated));
   }
   if (translated.length) {
@@ -5853,6 +5851,9 @@ function transcriptToBilingualVtt(transcript, options = {}) {
     const translatedText = cleanVttText(translatedSegment.text);
     const sourceText = cleanVttText(sourceSegment.text);
     const displayText = translatedText || sourceText;
+    if (!translatedText && options.allowSourcePreview === false) {
+      continue;
+    }
     if (!Number.isFinite(start) || !Number.isFinite(end) || !displayText) {
       continue;
     }

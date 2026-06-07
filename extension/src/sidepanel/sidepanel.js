@@ -3590,7 +3590,7 @@ async function attachCurrentSubtitlesToPage() {
     await detachCurrentSubtitlesFromPage();
     return;
   }
-  const vtt = cuesToVtt(subtitleCues);
+  const vtt = cuesToOverlayVtt();
   if (!hasDisplayableSubtitleVtt(vtt)) {
     await detachCurrentSubtitlesFromPage();
     renderSubtitleNotice();
@@ -3620,7 +3620,7 @@ async function ensureCurrentSubtitlesAttachedToPage() {
     await detachCurrentSubtitlesFromPage();
     return;
   }
-  const vtt = cuesToVtt(subtitleCues);
+  const vtt = cuesToOverlayVtt();
   if (!hasDisplayableSubtitleVtt(vtt)) {
     await detachCurrentSubtitlesFromPage();
     return;
@@ -3667,6 +3667,12 @@ function subtitleAttachSignature(tabId, vtt) {
 
 function hasDisplayableSubtitleVtt(vtt) {
   return /-->/.test(String(vtt || ""));
+}
+
+function cuesToOverlayVtt() {
+  return cuesToVtt(subtitleCues, subtitleDisplayMode, {
+    allowRunningSourcePreview: false
+  });
 }
 
 function vttContentSignature(vtt) {
