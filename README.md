@@ -51,6 +51,16 @@ Languages: [简体中文](README.md) · [English](README-en.md)
 
 ## 安装
 
+### 从 Chrome Web Store 安装
+
+推荐直接从 Chrome Web Store 安装：
+
+[安装流声字幕](https://chromewebstore.google.com/detail/ipcmkanhjahdpnacnjabkmlhggekkegm)
+
+安装后打开网页视频页面，即可在浏览器侧边栏使用流声字幕。
+
+### 从源码加载
+
 1. 打开 Chrome 的 `chrome://extensions`。
 2. 开启“开发者模式”。
 3. 点击“加载已解压的扩展程序”。

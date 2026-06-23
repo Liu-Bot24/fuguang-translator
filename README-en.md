@@ -51,6 +51,16 @@ After opening a video page, Liusheng Subtitles shows available media sources in 
 
 ## Installation
 
+### Install From Chrome Web Store
+
+The recommended installation method is the Chrome Web Store:
+
+[Install Liusheng Subtitles](https://chromewebstore.google.com/detail/ipcmkanhjahdpnacnjabkmlhggekkegm)
+
+After installation, open a web video page and use Liusheng Subtitles from the browser side panel.
+
+### Load From Source
+
 1. Open `chrome://extensions` in Chrome.
 2. Turn on **Developer mode**.
 3. Click **Load unpacked**.
