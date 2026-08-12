@@ -1,4 +1,16 @@
 (() => {
+  const PAGE_SNIFFER_REVISION = "20260813-safe-hooks";
+  if (
+    window.__fuguangPageSnifferRevision === PAGE_SNIFFER_REVISION &&
+    typeof window.__fuguangPageSnifferRescan === "function"
+  ) {
+    try {
+      window.__fuguangPageSnifferRescan();
+    } catch {
+      // Page inspection must never affect the host page.
+    }
+    return;
+  }
   if (typeof window.__fuguangPageSnifferCleanup === "function") {
     window.__fuguangPageSnifferCleanup();
   }
@@ -99,63 +111,99 @@
   reportPageContext();
   scheduleInitialScan();
   window.__fuguangPageSnifferCleanup = cleanup;
+  window.__fuguangPageSnifferRescan = scheduleInitialScan;
+  window.__fuguangPageSnifferRevision = PAGE_SNIFFER_REVISION;
 
-  window.fetch = function fuguangFetch(input, init) {
-    inspectUrl(typeof input === "string" ? input : input?.url, "fetch-url");
-    inspectHeaders(init?.headers);
+  const fuguangFetch = function fuguangFetch(input, init) {
+    safelyInspect(() => {
+      inspectUrl(typeof input === "string" ? input : input?.url, "fetch-url");
+      inspectHeaders(init?.headers);
+    });
     const promise = originalFetch.apply(this, arguments);
-    promise.then(
-      response => inspectResponse(response),
-      () => {}
-    );
+    safelyInspect(() => {
+      promise?.then?.(
+        response => safelyInspect(() => inspectResponse(response)),
+        () => {}
+      );
+    });
     return promise;
   };
-  window.fetch.toString = () => originalFetch.toString();
+  fuguangFetch.toString = () => originalFetch.toString();
+  window.fetch = fuguangFetch;
 
-  XMLHttpRequest.prototype.open = function fuguangXhrOpen(method, url) {
-    this.__fuguangUrl = url;
+  const fuguangXhrOpen = function fuguangXhrOpen(method, url) {
+    safelyInspect(() => {
+      this.__fuguangUrl = url;
+    });
     return originalXhrOpen.apply(this, arguments);
   };
-  XMLHttpRequest.prototype.open.toString = () => originalXhrOpen.toString();
+  fuguangXhrOpen.toString = () => originalXhrOpen.toString();
+  XMLHttpRequest.prototype.open = fuguangXhrOpen;
 
-  XMLHttpRequest.prototype.send = function fuguangXhrSend() {
+  const fuguangXhrSend = function fuguangXhrSend() {
     this.addEventListener("load", () => {
-      const url = this.responseURL || this.__fuguangUrl;
-      inspectUrl(url, "xhr-url");
-      if (typeof this.response === "string") {
-        inspectText(this.response, url, "xhr-body");
-      } else if (this.response && typeof this.response === "object") {
-        if (this.response instanceof ArrayBuffer) {
-          inspectBinaryResponse(this.response, url, "xhr-body", this.getResponseHeader?.("content-type") || "", this.getResponseHeader?.("content-length") || "");
-        } else if (typeof this.response.arrayBuffer === "function") {
-          this.response.arrayBuffer()
-            .then(buffer => inspectBinaryResponse(buffer, url, "xhr-body", this.getResponseHeader?.("content-type") || "", this.getResponseHeader?.("content-length") || ""))
-            .catch(() => {});
-        } else {
-          inspectObject(this.response, "xhr-object");
+      safelyInspect(() => {
+        const url = this.responseURL || this.__fuguangUrl;
+        inspectUrl(url, "xhr-url");
+        if (typeof this.response === "string") {
+          inspectText(this.response, url, "xhr-body");
+        } else if (this.response && typeof this.response === "object") {
+          if (this.response instanceof ArrayBuffer) {
+            inspectBinaryResponse(this.response, url, "xhr-body", this.getResponseHeader?.("content-type") || "", this.getResponseHeader?.("content-length") || "");
+          } else if (typeof this.response.arrayBuffer === "function") {
+            this.response.arrayBuffer()
+              .then(buffer => safelyInspect(() => inspectBinaryResponse(buffer, url, "xhr-body", this.getResponseHeader?.("content-type") || "", this.getResponseHeader?.("content-length") || "")))
+              .catch(() => {});
+          } else {
+            inspectObject(this.response, "xhr-object");
+          }
         }
-      }
+      });
     });
     return originalXhrSend.apply(this, arguments);
   };
-  XMLHttpRequest.prototype.send.toString = () => originalXhrSend.toString();
+  fuguangXhrSend.toString = () => originalXhrSend.toString();
+  XMLHttpRequest.prototype.send = fuguangXhrSend;
 
-  JSON.parse = function fuguangJsonParse(text, reviver) {
+  const fuguangJsonParse = function fuguangJsonParse(text, reviver) {
     const result = originalJsonParse.apply(this, arguments);
-    inspectObject(result, "json-parse");
+    safelyInspect(() => inspectObject(result, "json-parse"));
     return result;
   };
-  JSON.parse.toString = () => originalJsonParse.toString();
+  fuguangJsonParse.toString = () => originalJsonParse.toString();
+  JSON.parse = fuguangJsonParse;
+
+  function safelyInspect(task) {
+    try {
+      return task();
+    } catch {
+      return undefined;
+    }
+  }
 
   function cleanup() {
-    window.fetch = originalFetch;
-    XMLHttpRequest.prototype.open = originalXhrOpen;
-    XMLHttpRequest.prototype.send = originalXhrSend;
-    JSON.parse = originalJsonParse;
+    if (window.fetch === fuguangFetch) {
+      window.fetch = originalFetch;
+    }
+    if (XMLHttpRequest.prototype.open === fuguangXhrOpen) {
+      XMLHttpRequest.prototype.open = originalXhrOpen;
+    }
+    if (XMLHttpRequest.prototype.send === fuguangXhrSend) {
+      XMLHttpRequest.prototype.send = originalXhrSend;
+    }
+    if (JSON.parse === fuguangJsonParse) {
+      JSON.parse = originalJsonParse;
+    }
     timers.forEach(timer => clearTimeout(timer));
     timers.length = 0;
     if (window.__fuguangPageSnifferCleanup === cleanup) {
       delete window.__fuguangPageSnifferCleanup;
+    }
+    if (window.__fuguangPageSnifferRescan === scheduleInitialScan) {
+      delete window.__fuguangPageSnifferRescan;
+    }
+    if (window.__fuguangPageSnifferRevision === PAGE_SNIFFER_REVISION) {
+      delete window.__fuguangPageSnifferRevision;
     }
   }
 

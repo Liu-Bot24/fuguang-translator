@@ -168,7 +168,7 @@
       return approxBytes;
     }
     try {
-      return JSON.stringify(entry || {}).length;
+      return new TextEncoder().encode(JSON.stringify(entry || {})).byteLength;
     } catch {
       return 0;
     }

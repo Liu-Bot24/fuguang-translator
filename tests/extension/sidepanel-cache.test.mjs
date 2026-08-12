@@ -2278,12 +2278,21 @@ const subtitleCacheEntrySanitizesUrlsState = await vm.runInContext(`
         title: "Tokenized page"
       }
     );
+    const utf8Transcript = {
+      source: [{ start: 0, end: 1, text: "中文字幕" }],
+      translated: []
+    };
+    const utf8Entry = await buildSubtitleCacheEntry(utf8Transcript, {
+      pageUrl: "https://example.test/watch/utf8"
+    });
     const malformed = normalizeMediaCacheUrl("not-a-url?token=bad-token&Policy=bad-policy&id=clip-a");
     return {
       pageUrl: entry.pageUrl,
       sourceUrl: entry.sourceUrl,
       malformed,
-      serialized: JSON.stringify(entry)
+      serialized: JSON.stringify(entry),
+      utf8Bytes: utf8Entry.approxBytes,
+      expectedUtf8Bytes: new TextEncoder().encode(JSON.stringify(utf8Transcript)).byteLength
     };
   })()
 `, context);
@@ -2297,6 +2306,7 @@ assert.equal(subtitleCacheEntrySanitizesUrlsState.serialized.includes("aws-key")
 assert.equal(subtitleCacheEntrySanitizesUrlsState.pageUrl, "https://example.test/watch/1");
 assert.equal(subtitleCacheEntrySanitizesUrlsState.sourceUrl, "https://media.example.test/playback?id=clip-a");
 assert.equal(subtitleCacheEntrySanitizesUrlsState.malformed, "not-a-url?id=clip-a");
+assert.equal(subtitleCacheEntrySanitizesUrlsState.utf8Bytes, subtitleCacheEntrySanitizesUrlsState.expectedUtf8Bytes);
 
 const subtitleCacheIndexedDbStorageState = await vm.runInContext(`
   (async () => {

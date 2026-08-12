@@ -71,6 +71,37 @@ function makeMp3Bytes(seed = 0) {
 }
 
 {
+  const order = [];
+  let releaseFirst;
+  const firstGate = new Promise(resolve => {
+    releaseFirst = resolve;
+  });
+  const first = context.enqueueFfmpegOperation(async () => {
+    order.push("first-start");
+    await firstGate;
+    order.push("first-end");
+    return "first";
+  });
+  const second = context.enqueueFfmpegOperation(async () => {
+    order.push("second-start");
+    return "second";
+  });
+  await Promise.resolve();
+  assert.deepEqual(order, ["first-start"]);
+  releaseFirst();
+  assert.deepEqual(await Promise.all([first, second]), ["first", "second"]);
+  assert.deepEqual(order, ["first-start", "first-end", "second-start"]);
+
+  await assert.rejects(
+    context.enqueueFfmpegOperation(async () => {
+      throw new Error("expected queue failure");
+    }),
+    /expected queue failure/
+  );
+  assert.equal(await context.enqueueFfmpegOperation(async () => "after-failure"), "after-failure");
+}
+
+{
   const specs = context.buildOverlappedSegmentSpecs("episode-%03d.mp3", 30, 65, 2);
   assert.deepEqual(JSON.parse(JSON.stringify(specs)), [
     {

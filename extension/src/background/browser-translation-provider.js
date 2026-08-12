@@ -235,7 +235,7 @@ export const FuguangBrowserTranslationProvider = (() => {
   }
 
   function browserTranslationErrorIsContentPolicy(message) {
-    return /(content (?:policy|safety|filter|moderation)|safety policy|policy violation|moderation|moderated|violat(?:e|ion)|sensitive content|blocked content|内容.{0,8}(?:安全|审核|审查|违规|过滤)|审核|审查|违规|敏感内容|内容安全|内容过滤)/.test(String(message || ""));
+    return /(content (?:policy|safety|filter|moderation)|safety policy|policy violation|moderation|moderated|violat(?:e|ion)|sensitive content|blocked content|内容.{0,8}(?:安全|审核|审查|违规|过滤)|审核|审查|违规|敏感内容|内容安全|内容过滤)/.test(String(message || "").toLowerCase());
   }
 
   function parseModelJson(content) {

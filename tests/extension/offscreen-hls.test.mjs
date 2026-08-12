@@ -86,6 +86,83 @@ vm.runInContext(localMediaExtractorSource, context, { filename: "local-media-ext
 vm.runInContext(source, context, { filename: "offscreen.js" });
 
 {
+  const order = [];
+  let releaseFirst;
+  const firstGate = new Promise(resolve => {
+    releaseFirst = resolve;
+  });
+  const first = context.enqueueWebFfmpegOperation(async () => {
+    order.push("first-start");
+    await firstGate;
+    order.push("first-end");
+    return "first";
+  });
+  const second = context.enqueueWebFfmpegOperation(async () => {
+    order.push("second-start");
+    return "second";
+  });
+  await Promise.resolve();
+  assert.deepEqual(order, ["first-start"]);
+  releaseFirst();
+  assert.deepEqual(await Promise.all([first, second]), ["first", "second"]);
+  assert.deepEqual(order, ["first-start", "first-end", "second-start"]);
+
+  await assert.rejects(
+    context.enqueueWebFfmpegOperation(async () => {
+      throw new Error("operation failure");
+    }),
+    /operation failure/
+  );
+  assert.equal(
+    await context.enqueueWebFfmpegOperation(async () => "recovered"),
+    "recovered",
+    "单次 FFmpeg 操作失败后不能阻塞后续操作"
+  );
+}
+
+{
+  const originalFetch = context.fetch;
+  const requests = [];
+  context.fetch = async (url, options = {}) => {
+    requests.push({ url: String(url), headers: { ...(options.headers || {}) } });
+    return {
+      ok: true,
+      text: async () => "#EXTM3U",
+      headers: { get: () => "application/vnd.apple.mpegurl" }
+    };
+  };
+  try {
+    const options = context.buildMediaFetchOptions({
+      sourceUrl: "https://audio-a.example.test/master.m3u8",
+      requestHeaders: { authorization: "Bearer origin-a" },
+      requestHeadersByOrigin: {
+        "https://audio-a.example.test": { authorization: "Bearer origin-a" },
+        "https://segment-b.example.test": { authorization: "Bearer origin-b" }
+      }
+    });
+    await context.fetchText("https://audio-a.example.test/master.m3u8", options);
+    await context.fetchText("https://segment-b.example.test/segment.m4s", options);
+    await context.fetchText("https://unobserved-c.example.test/key.bin", options);
+  } finally {
+    context.fetch = originalFetch;
+  }
+  assert.deepEqual(requests, [
+    {
+      url: "https://audio-a.example.test/master.m3u8",
+      headers: { authorization: "Bearer origin-a" }
+    },
+    {
+      url: "https://segment-b.example.test/segment.m4s",
+      headers: { authorization: "Bearer origin-b" }
+    },
+    {
+      url: "https://unobserved-c.example.test/key.bin",
+      headers: {}
+    }
+  ]);
+}
+
+{
   assert.equal(context.shouldUseLocalMediaChunkedExtraction({
     sourceUrl: "file:///Volumes/share/movie.flv",
     mime: "video/x-flv"
@@ -1195,6 +1272,30 @@ seg-000.ts
   );
   assert.match(local, /#EXT-X-KEY:METHOD=AES-128,URI="key-0\.key",IV=0x00000000000000000000000000000001/);
   assert.match(local, /seg-000\.ts/);
+}
+
+{
+  const playlist = `#EXTM3U
+#EXT-X-TARGETDURATION:6
+#EXT-X-MEDIA-SEQUENCE:42
+#EXT-X-KEY:METHOD=AES-128,URI="keys/audio.key"
+#EXTINF:5.000,
+seg-042.ts
+#EXTINF:5.000,
+seg-043.ts
+#EXT-X-ENDLIST`;
+  const media = context.parseHlsMediaPlaylist(playlist, "https://cdn.example.test/path/index.m3u8");
+  assert.equal(media.mediaSequence, 42);
+  assert.deepEqual(JSON.parse(JSON.stringify(media.segments.map(segment => segment.mediaSequence))), [42, 43]);
+
+  const secondSegmentOnly = context.buildLocalHlsPlaylist(
+    [{ ...media.segments[1], name: "seg-043.ts" }],
+    "",
+    new Map([[media.segments[1].key.id, "key-0.key"]])
+  );
+  assert.match(secondSegmentOnly, /#EXT-X-MEDIA-SEQUENCE:43/);
+  assert.match(secondSegmentOnly, /#EXT-X-KEY:METHOD=AES-128,URI="key-0\.key"(?:\r?\n)/);
+  assert.doesNotMatch(secondSegmentOnly, /#EXT-X-KEY:[^\n]*IV=/);
 }
 
 {

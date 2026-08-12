@@ -77,6 +77,50 @@ const source = fs.readFileSync(new URL("../../extension/src/content/page-sniffer
 }
 
 {
+  const harness = createHarness();
+  vm.runInContext(source, harness.context, { filename: "page-sniffer.js" });
+  const extensionFetch = harness.context.window.fetch;
+  const pageFetch = function pageFetch() {
+    return extensionFetch.apply(this, arguments);
+  };
+  harness.context.window.fetch = pageFetch;
+
+  vm.runInContext(source, harness.context, { filename: "page-sniffer.js" });
+  assert.equal(
+    harness.context.window.fetch,
+    pageFetch,
+    "re-activating the sniffer must not remove a page-installed fetch wrapper"
+  );
+  assert.equal(harness.context.window.__fuguangPageSnifferRevision, "20260813-safe-hooks");
+  assert.doesNotThrow(() => vm.runInContext(`
+    JSON.parse('{"value":1}', (_key, value) =>
+      value && value.value === 1
+        ? new Proxy(value, { ownKeys() { throw new Error("inspection-only failure"); } })
+        : value
+    )
+  `, harness.context));
+
+  harness.context.window.__fuguangPageSnifferCleanup();
+  assert.equal(
+    harness.context.window.fetch,
+    pageFetch,
+    "cleanup must not overwrite a fetch wrapper installed after the sniffer"
+  );
+}
+
+{
+  const harness = createHarness();
+  const pageFetchResult = { pageOwned: true };
+  harness.context.window.fetch = () => pageFetchResult;
+  vm.runInContext(source, harness.context, { filename: "page-sniffer.js" });
+  assert.equal(
+    harness.context.window.fetch("https://example.test/not-a-standard-fetch"),
+    pageFetchResult,
+    "inspection must preserve a page-owned fetch wrapper's non-Promise return value"
+  );
+}
+
+{
   const masterUrl = "https://video.twimg.com/amplify_video/2059183631126667264/pl/ujqQBpTjKwgRUz5h.m3u8?tag=14&v=cfc";
   const master = `#EXTM3U
 #EXT-X-VERSION:6

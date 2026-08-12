@@ -59,7 +59,7 @@ export const FuguangDashManifestParser = (() => {
     }
     const fragments = [];
     const initUrl = resolveDashUrl(
-      expandSegmentTemplateUrl(template.initialization, representation, template.startNumber),
+      expandSegmentTemplateUrl(template.initialization, representation, template.startNumber, 0),
       representation.baseUrl || ""
     );
     if (initUrl) {
@@ -99,7 +99,14 @@ export const FuguangDashManifestParser = (() => {
         }
         const repeat = normalizeTimelineRepeat(item.r, cursorUnits, durationUnits, timeline[index + 1], fallbackDuration, timescale);
         for (let offset = 0; offset <= repeat; offset += 1) {
-          segments.push(createMediaSegment(representation, template, number, cursorUnits / timescale, durationUnits / timescale));
+          segments.push(createMediaSegment(
+            representation,
+            template,
+            number,
+            cursorUnits,
+            cursorUnits / timescale,
+            durationUnits / timescale
+          ));
           number += 1;
           cursorUnits += durationUnits;
         }
@@ -116,7 +123,14 @@ export const FuguangDashManifestParser = (() => {
       const start = index * segmentDuration;
       const duration = Math.min(segmentDuration, Math.max(0, totalDuration - start));
       if (duration > 0) {
-        segments.push(createMediaSegment(representation, template, startNumber + index, start, duration));
+        segments.push(createMediaSegment(
+          representation,
+          template,
+          startNumber + index,
+          index * Number(template.duration || 0),
+          start,
+          duration
+        ));
       }
     }
     return segments;
@@ -138,10 +152,10 @@ export const FuguangDashManifestParser = (() => {
     return 0;
   }
 
-  function createMediaSegment(representation, template, number, start, duration) {
+  function createMediaSegment(representation, template, number, time, start, duration) {
     return {
       url: resolveDashUrl(
-        expandSegmentTemplateUrl(template.media, representation, number),
+        expandSegmentTemplateUrl(template.media, representation, number, time),
         representation.baseUrl || ""
       ),
       segmentType: "media",
@@ -152,15 +166,21 @@ export const FuguangDashManifestParser = (() => {
     };
   }
 
-  function expandSegmentTemplateUrl(value, representation = {}, number = 1) {
+  function expandSegmentTemplateUrl(value, representation = {}, number = 1, time = 0) {
+    const escapedDollar = "\u0000";
     return String(value || "")
+      .replace(/\$\$/g, escapedDollar)
       .replace(/\$RepresentationID\$/g, String(representation.id || ""))
       .replace(/\$Bandwidth\$/g, String(representation.bandwidth || ""))
-      .replace(/\$Number(?:%0(\d+)d)?\$/g, (_match, width) => {
-        const text = String(number);
-        const size = Number(width || 0) || 0;
-        return size > 0 ? text.padStart(size, "0") : text;
-      });
+      .replace(/\$Number(?:%0(\d+)d)?\$/g, (_match, width) => formatSegmentTemplateNumber(number, width))
+      .replace(/\$Time(?:%0(\d+)d)?\$/g, (_match, width) => formatSegmentTemplateNumber(time, width))
+      .replaceAll(escapedDollar, "$");
+  }
+
+  function formatSegmentTemplateNumber(value, width = 0) {
+    const text = String(Number(value) || 0);
+    const size = Number(width || 0) || 0;
+    return size > 0 ? text.padStart(size, "0") : text;
   }
 
   function parseSegmentTimeline(body) {

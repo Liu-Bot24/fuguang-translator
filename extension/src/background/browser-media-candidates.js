@@ -245,6 +245,7 @@ export const FuguangBrowserMediaCandidates = (() => {
       ...safeInternalCandidate,
       ...localMediaFileStartFields(candidate),
       requestHeaders: internalCandidate.requestHeaders || null,
+      requestHeadersByOrigin: sanitizeRequestHeadersByOrigin(internalCandidate.requestHeadersByOrigin),
       responseHeaders: internalCandidate.responseHeaders || {},
       sourcePlanTrusted: Boolean(internalCandidate.sourcePlan)
     };
@@ -303,7 +304,7 @@ export const FuguangBrowserMediaCandidates = (() => {
     if (!candidate || typeof candidate !== "object") {
       return candidate;
     }
-    const { requestHeaders, variants, mediaAsset, ...safeCandidate } = candidate;
+    const { requestHeaders, requestHeadersByOrigin, variants, mediaAsset, ...safeCandidate } = candidate;
     return {
       ...safeCandidate,
       mediaAsset: sanitizeMediaAssetForDisplay(mediaAsset),
@@ -598,7 +599,7 @@ export const FuguangBrowserMediaCandidates = (() => {
     const selected = variants[0];
     const hiddenCount = Math.max(variants.length - 1, 0);
     const variantStats = summarizeVariants(variants);
-    const mergedHeaders = mergeVariantHeaders(variants);
+    const mergedHeaders = mergeVariantHeaders(variants, selected);
     const resolvedSourcePlan = FuguangMediaSourceResolvers.resolveAudioSourcePlan({
       candidates: variants,
       duration: selected.duration || 0
@@ -609,6 +610,7 @@ export const FuguangBrowserMediaCandidates = (() => {
     return {
       ...selected,
       requestHeaders: mergedHeaders.requestHeaders,
+      requestHeadersByOrigin: mergedHeaders.requestHeadersByOrigin,
       responseHeaders: mergedHeaders.responseHeaders,
       variants: variants.map(summarizeVariant),
       hiddenCount,
@@ -708,20 +710,60 @@ export const FuguangBrowserMediaCandidates = (() => {
       }));
   }
   
-  function mergeVariantHeaders(variants) {
-    return variants.reduce(
-      (headers, candidate) => ({
-        requestHeaders: {
-          ...headers.requestHeaders,
-          ...sanitizeInternalRequestHeaders(candidate.requestHeaders)
-        },
-        responseHeaders: {
-          ...headers.responseHeaders,
-          ...(candidate.responseHeaders || {})
-        }
-      }),
-      { requestHeaders: {}, responseHeaders: {} }
+  function mergeVariantHeaders(variants, selected = variants?.[0] || {}) {
+    const requestHeadersByOrigin = buildVariantRequestHeadersByOrigin(variants);
+    const selectedOrigin = httpUrlOrigin(selected.url);
+    const requestHeaders = selectedOrigin
+      ? sanitizeInternalRequestHeaders(requestHeadersByOrigin[selectedOrigin])
+      : sanitizeInternalRequestHeaders(selected.requestHeaders);
+    const responseHeaders = variants.reduce((headers, candidate) => ({
+      ...headers,
+      ...(candidate.responseHeaders || {})
+    }), {});
+    return { requestHeaders, requestHeadersByOrigin, responseHeaders };
+  }
+
+  function buildVariantRequestHeadersByOrigin(variants = []) {
+    const output = {};
+    const oldestFirst = [...variants].sort((left, right) =>
+      (Number(left?.seenAt || 0) || 0) - (Number(right?.seenAt || 0) || 0)
     );
+    for (const candidate of oldestFirst) {
+      const origin = httpUrlOrigin(candidate?.url);
+      const headers = sanitizeInternalRequestHeaders(candidate?.requestHeaders);
+      if (!origin || !Object.keys(headers).length) {
+        continue;
+      }
+      output[origin] = {
+        ...(output[origin] || {}),
+        ...headers
+      };
+    }
+    return output;
+  }
+
+  function sanitizeRequestHeadersByOrigin(value = {}) {
+    const output = {};
+    if (!value || typeof value !== "object" || Array.isArray(value)) {
+      return output;
+    }
+    for (const [rawOrigin, rawHeaders] of Object.entries(value)) {
+      const origin = httpUrlOrigin(rawOrigin);
+      const headers = sanitizeInternalRequestHeaders(rawHeaders);
+      if (origin && origin === rawOrigin && Object.keys(headers).length) {
+        output[origin] = headers;
+      }
+    }
+    return output;
+  }
+
+  function httpUrlOrigin(rawUrl = "") {
+    try {
+      const url = new URL(String(rawUrl || ""));
+      return ["http:", "https:"].includes(url.protocol) ? url.origin : "";
+    } catch {
+      return "";
+    }
   }
   
   function summarizeVariants(variants) {
@@ -1602,6 +1644,7 @@ export const FuguangBrowserMediaCandidates = (() => {
     pruneCandidatesForRetention,
     resolvePreloadCandidateForStart,
     sanitizeInternalRequestHeaders,
+    sanitizeRequestHeadersByOrigin,
     stripCandidateRequestHeaders
   };
 })();

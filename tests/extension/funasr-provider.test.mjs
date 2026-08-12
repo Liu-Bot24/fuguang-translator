@@ -108,6 +108,40 @@ Object.assign(context, context.FuguangBrowserFunAsrProvider);
 }
 
 {
+  const segments = context.normalizeDashScopeFunAsrResult({
+    transcripts: [{
+      sentences: [
+        { begin_time: 0, end_time: 500, text: "subsecond" },
+        { begin_time: 500, end_time: 1500, text: "crosses one second" },
+        { start: 2.5, end: 3.25, text: "seconds fallback" },
+        {
+          begin_time: null,
+          start_time: 4,
+          end_time: null,
+          end: 5,
+          speaker_id: null,
+          text: "null fields use fallback"
+        }
+      ]
+    }]
+  }, {
+    start: 0,
+    end: 10,
+    coreStart: 0,
+    coreEnd: 10
+  }, {
+    labelSpeakers: true
+  });
+
+  assert.deepEqual(JSON.parse(JSON.stringify(segments)), [
+    { start: 0, end: 0.5, text: "subsecond" },
+    { start: 0.5, end: 1.5, text: "crosses one second" },
+    { start: 2.5, end: 3.25, text: "seconds fallback" },
+    { start: 4, end: 5, text: "null fields use fallback" }
+  ]);
+}
+
+{
   const calls = [];
   context.fetch = async (url, options = {}) => {
     calls.push({ url: String(url), options });

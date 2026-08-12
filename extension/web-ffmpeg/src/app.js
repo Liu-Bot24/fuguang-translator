@@ -28,9 +28,14 @@ const state = {
   log: document.querySelector("#log"),
   ffmpegLogs: []
 };
+let ffmpegOperationQueue = Promise.resolve();
 
 window.addEventListener("message", event => {
-  handleMessage(event).catch(error => {
+  const messageType = String(event.data?.type || "");
+  const operation = ["extract-audio", "concat-audio", "collect-speech-audio"].includes(messageType)
+    ? enqueueFfmpegOperation(() => handleMessage(event))
+    : handleMessage(event);
+  operation.catch(error => {
     post(event, {
       type: "error",
       id: event.data?.id || "",
@@ -38,6 +43,12 @@ window.addEventListener("message", event => {
     });
   });
 });
+
+function enqueueFfmpegOperation(task) {
+  const run = ffmpegOperationQueue.then(task, task);
+  ffmpegOperationQueue = run.catch(() => {});
+  return run;
+}
 
 postReady();
 
@@ -118,6 +129,13 @@ async function extractAudio(event, message) {
   if (!files.length) {
     throw new Error("没有收到可处理的媒体文件。");
   }
+  const requestedInputName = String(message.inputName || "");
+  const requestedFile = requestedInputName
+    ? files.find(file => file.name === requestedInputName || file.originalName === requestedInputName)
+    : null;
+  if (requestedInputName && !requestedFile) {
+    throw new Error(`指定的 FFmpeg 输入文件没有随请求发送：${requestedInputName}`);
+  }
 
   const requestId = beginFfmpegTask(event, message.id || "", "正在执行 FFmpeg 音频提取");
   let ffmpeg;
@@ -126,13 +144,6 @@ async function extractAudio(event, message) {
   } catch (error) {
     endFfmpegTask(requestId);
     throw error;
-  }
-  const requestedInputName = String(message.inputName || "");
-  const requestedFile = requestedInputName
-    ? files.find(file => file.name === requestedInputName || file.originalName === requestedInputName)
-    : null;
-  if (requestedInputName && !requestedFile) {
-    throw new Error(`指定的 FFmpeg 输入文件没有随请求发送：${requestedInputName}`);
   }
   const primaryFile = requestedFile || files[0];
   const inputExtension = extensionFromFile(primaryFile.name) || inferExtensionFromMime(primaryFile.mime);

@@ -4,7 +4,12 @@
   const OVERLAY_ID = "fuguang-caption-overlay-v2";
   const STYLE_ID = "fuguang-caption-style-v2";
   const OWNER_DATA_KEY = "fuguangCaptionOwner";
+  const NATIVE_CUE_CLASS = "fuguang-caption-native-cues";
   const INSTANCE_TOKEN = `${Date.now()}-${Math.random().toString(36).slice(2)}`;
+  const nativeTracksByMedia = window.__fuguangSubtitleNativeTracks instanceof WeakMap
+    ? window.__fuguangSubtitleNativeTracks
+    : new WeakMap();
+  window.__fuguangSubtitleNativeTracks = nativeTracksByMedia;
 
   if (typeof window.__fuguangSubtitleOverlayCleanup === "function") {
     window.__fuguangSubtitleOverlayCleanup();
@@ -343,8 +348,8 @@
         width: min(72%, 980px);
       }
 
-      video::cue,
-      audio::cue {
+      video.${NATIVE_CUE_CLASS}::cue,
+      audio.${NATIVE_CUE_CLASS}::cue {
         background-color: rgba(22, 22, 24, var(--fuguang-caption-bg-opacity, 0.78));
         color: #ffffff;
         font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", "PingFang SC", "Microsoft YaHei", sans-serif;
@@ -795,8 +800,9 @@
     if (controller.nativeTrackMedia !== media || !controller.nativeTrack) {
       disableNativeSubtitleTrack(controller);
       try {
-        controller.nativeTrack = media.addTextTrack("subtitles", controller.label || "流声字幕", "");
+        controller.nativeTrack = nativeTracksByMedia.get(media) || media.addTextTrack("subtitles", controller.label || "流声字幕", "");
         controller.nativeTrackMedia = media;
+        nativeTracksByMedia.set(media, controller.nativeTrack);
       } catch {
         controller.nativeTrack = null;
         controller.nativeTrackMedia = null;
@@ -820,11 +826,16 @@
     } catch {
       return false;
     }
-    return controller.nativeCues.length > 0;
+    const active = controller.nativeCues.length > 0;
+    if (active) {
+      media.classList.add(NATIVE_CUE_CLASS);
+    }
+    return active;
   }
 
   function disableNativeSubtitleTrack(controller) {
     const track = controller?.nativeTrack;
+    controller?.nativeTrackMedia?.classList?.remove(NATIVE_CUE_CLASS);
     if (!track) {
       return;
     }

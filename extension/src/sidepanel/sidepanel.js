@@ -3987,7 +3987,7 @@ async function buildSubtitleCacheEntry(transcript, importedPayload = {}) {
     createdAt: payload.createdAt || new Date().toISOString(),
     updatedAt: new Date().toISOString(),
     segmentCount: Math.max(transcript.source?.length || 0, transcript.translated?.length || 0),
-    approxBytes: JSON.stringify(transcript).length
+    approxBytes: new TextEncoder().encode(JSON.stringify(transcript)).byteLength
   };
 }
 

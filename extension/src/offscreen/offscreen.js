@@ -35,6 +35,8 @@ const WEB_FFMPEG_ABSOLUTE_TIMEOUT_MS = 30 * 60 * 1000;
 let webFfmpegFrame = null;
 let webFfmpegReady = null;
 const webFfmpegPending = new Map();
+const mediaFetchOptionsMetadata = new WeakMap();
+let webFfmpegOperationQueue = Promise.resolve();
 let dashManifestParserPromise = null;
 let hlsUrlHelpersPromise = null;
 let mediabunnyPromise = null;
@@ -121,6 +123,12 @@ chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
   }
   return false;
 });
+
+function enqueueWebFfmpegOperation(task) {
+  const run = webFfmpegOperationQueue.then(task, task);
+  webFfmpegOperationQueue = run.catch(() => {});
+  return run;
+}
 
 window.addEventListener("message", event => {
   const message = event.data || {};
@@ -1584,7 +1592,7 @@ function isLongFileAsrMode(message = {}) {
 
 async function fetchText(url, options, label = "HLS 播放列表下载失败") {
   return withMediaFetchRetry(label, async () => {
-    const response = await fetch(url, options);
+    const response = await fetch(url, mediaFetchOptionsForUrl(options, url));
     if (!response.ok) {
       throw createMediaFetchHttpError(response.status);
     }
@@ -1594,7 +1602,8 @@ async function fetchText(url, options, label = "HLS 播放列表下载失败") {
 
 async function fetchBinary(url, options, byteRange = null, label = "媒体切片下载失败") {
   return withMediaFetchRetry(label, async () => {
-    const response = await fetch(url, buildFetchOptionsWithByteRange(options, byteRange));
+    const targetOptions = mediaFetchOptionsForUrl(options, url);
+    const response = await fetch(url, buildFetchOptionsWithByteRange(targetOptions, byteRange));
     if (!response.ok) {
       throw createMediaFetchHttpError(response.status);
     }
@@ -2050,6 +2059,7 @@ function hlsMediaLooksFragmentedMp4(media = {}) {
 function parseHlsMediaPlaylist(text, baseUrl) {
   const lines = splitHlsLines(text);
   const segments = [];
+  let mediaSequence = 0;
   let mapUrl = "";
   let pendingDuration = 0;
   let currentKey = null;
@@ -2060,6 +2070,13 @@ function parseHlsMediaPlaylist(text, baseUrl) {
   let unsupportedEncryption = "";
   const byteRangeCursors = new Map();
   for (const line of lines) {
+    if (line.startsWith("#EXT-X-MEDIA-SEQUENCE:")) {
+      const value = Number.parseInt(line.slice("#EXT-X-MEDIA-SEQUENCE:".length), 10);
+      if (Number.isInteger(value) && value >= 0) {
+        mediaSequence = value;
+      }
+      continue;
+    }
     if (line.startsWith("#EXT-X-KEY:")) {
       const attrs = parseHlsAttributes(line.slice("#EXT-X-KEY:".length));
       const method = String(attrs.METHOD || "").toUpperCase();
@@ -2113,6 +2130,7 @@ function parseHlsMediaPlaylist(text, baseUrl) {
         }
         segments.push({
           originalIndex: segments.length,
+          mediaSequence: mediaSequence + segments.length,
           url,
           duration: pendingDuration || 0,
           key: currentKey,
@@ -2134,7 +2152,7 @@ function parseHlsMediaPlaylist(text, baseUrl) {
     cursor += segment.duration || 0;
     segment.end = cursor;
   }
-  return { segments, mapUrl, unsupportedEncryption, duration: cursor };
+  return { segments, mapUrl, mediaSequence, unsupportedEncryption, duration: cursor };
 }
 
 function clipHlsMediaToRequestedDuration(media, requestedDuration) {
@@ -2775,11 +2793,13 @@ function buildHlsFfmpegInput({ index, media, keyFiles, playlistSegments, segment
 
 function buildLocalHlsPlaylist(segments, initName, keyNames = new Map(), mapNames = new Map()) {
   const targetDuration = Math.max(1, Math.ceil(Math.max(...segments.map(segment => segment.duration || 0), 1)));
+  const firstMediaSequence = Number(segments[0]?.mediaSequence);
+  const mediaSequence = Number.isInteger(firstMediaSequence) && firstMediaSequence >= 0 ? firstMediaSequence : 0;
   const lines = [
     "#EXTM3U",
     "#EXT-X-VERSION:7",
     `#EXT-X-TARGETDURATION:${targetDuration}`,
-    "#EXT-X-MEDIA-SEQUENCE:0"
+    `#EXT-X-MEDIA-SEQUENCE:${mediaSequence}`
   ];
   if (initName) {
     lines.push(`#EXT-X-MAP:URI="${initName}"`);
@@ -2855,10 +2875,69 @@ function textToArrayBuffer(value) {
 
 function buildMediaFetchOptions(message) {
   const headers = normalizeRequestHeaders(message.requestHeaders);
-  return {
+  const options = {
     credentials: "include",
     headers
   };
+  mediaFetchOptionsMetadata.set(options, {
+    sourceOrigin: httpMediaOrigin(message.sourceUrl),
+    requestHeadersByOrigin: normalizeRequestHeadersByOrigin(message.requestHeadersByOrigin)
+  });
+  return options;
+}
+
+function mediaFetchOptionsForUrl(options, targetUrl) {
+  const metadata = options && typeof options === "object"
+    ? mediaFetchOptionsMetadata.get(options)
+    : null;
+  if (!metadata) {
+    return options;
+  }
+  const targetOrigin = httpMediaOrigin(targetUrl);
+  const baseHeaders = normalizeRequestHeaders(options.headers);
+  const headers = {};
+  for (const [name, value] of Object.entries(baseHeaders)) {
+    if (String(name).toLowerCase() !== "authorization") {
+      headers[name] = value;
+    }
+  }
+  const observedHeaders = targetOrigin
+    ? normalizeRequestHeaders(metadata.requestHeadersByOrigin[targetOrigin])
+    : {};
+  if (Object.keys(observedHeaders).length) {
+    Object.assign(headers, observedHeaders);
+  } else if (targetOrigin && targetOrigin === metadata.sourceOrigin) {
+    for (const [name, value] of Object.entries(baseHeaders)) {
+      if (String(name).toLowerCase() === "authorization") {
+        headers[name] = value;
+      }
+    }
+  }
+  return { ...options, headers };
+}
+
+function normalizeRequestHeadersByOrigin(value = {}) {
+  const output = {};
+  if (!value || typeof value !== "object" || Array.isArray(value)) {
+    return output;
+  }
+  for (const [rawOrigin, rawHeaders] of Object.entries(value)) {
+    const origin = httpMediaOrigin(rawOrigin);
+    const headers = normalizeRequestHeaders(rawHeaders);
+    if (origin && origin === rawOrigin && Object.keys(headers).length) {
+      output[origin] = headers;
+    }
+  }
+  return output;
+}
+
+function httpMediaOrigin(rawUrl = "") {
+  try {
+    const url = new URL(String(rawUrl || ""));
+    return ["http:", "https:"].includes(url.protocol) ? url.origin : "";
+  } catch {
+    return "";
+  }
 }
 
 async function ensureWebFfmpegFrame(rawUrl) {
@@ -2870,7 +2949,9 @@ async function ensureWebFfmpegFrame(rawUrl) {
   if (webFfmpegFrame?.url === url && webFfmpegReady) {
     return webFfmpegReady;
   }
-  webFfmpegFrame?.iframe?.remove();
+  if (webFfmpegFrame) {
+    resetWebFfmpegFrame(new Error("Web FFmpeg 页面正在重新初始化。"));
+  }
   const iframe = document.createElement("iframe");
   iframe.hidden = true;
   iframe.setAttribute("aria-hidden", "true");
@@ -2901,13 +2982,21 @@ async function ensureWebFfmpegFrame(rawUrl) {
   return webFfmpegReady;
 }
 
-async function reloadWebFfmpegFrame(rawUrl) {
-  resetWebFfmpegFrame();
+function reloadWebFfmpegFrame(rawUrl) {
+  return enqueueWebFfmpegOperation(() => reloadWebFfmpegFrameNow(rawUrl));
+}
+
+async function reloadWebFfmpegFrameNow(rawUrl) {
+  resetWebFfmpegFrame(new Error("Web FFmpeg 页面正在重新加载。"));
   await ensureWebFfmpegFrame(rawUrl);
   warmWebFfmpegFrame();
 }
 
 function requestWebFfmpeg(payload, transfer = [], onProgress = null) {
+  return enqueueWebFfmpegOperation(() => requestWebFfmpegNow(payload, transfer, onProgress));
+}
+
+function requestWebFfmpegNow(payload, transfer = [], onProgress = null) {
   return new Promise((resolve, reject) => {
     if (!webFfmpegFrame?.iframe?.contentWindow) {
       reject(new Error("Web FFmpeg 页面尚未就绪。"));
@@ -2931,7 +3020,7 @@ function requestWebFfmpeg(payload, transfer = [], onProgress = null) {
       }
       webFfmpegPending.delete(payload.id);
       clearTimers();
-      resetWebFfmpegFrame();
+      resetWebFfmpegFrame(error);
       reject(error);
     };
     const refreshIdleTimeout = () => {
@@ -2971,7 +3060,12 @@ function requestWebFfmpeg(payload, transfer = [], onProgress = null) {
   });
 }
 
-function resetWebFfmpegFrame() {
+function resetWebFfmpegFrame(error = new Error("Web FFmpeg 页面已重置。")) {
+  const pendingRequests = [...webFfmpegPending.values()];
+  webFfmpegPending.clear();
+  for (const pending of pendingRequests) {
+    pending.reject?.(error);
+  }
   webFfmpegFrame?.iframe?.remove?.();
   webFfmpegFrame = null;
   webFfmpegReady = null;

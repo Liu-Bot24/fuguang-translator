@@ -49,6 +49,7 @@ var pickFinite = FuguangBrowserMediaCandidates.pickFinite;
 var pruneCandidatesForRetention = FuguangBrowserMediaCandidates.pruneCandidatesForRetention;
 var resolvePreloadCandidateForStart = FuguangBrowserMediaCandidates.resolvePreloadCandidateForStart;
 var sanitizeInternalRequestHeaders = FuguangBrowserMediaCandidates.sanitizeInternalRequestHeaders;
+var sanitizeRequestHeadersByOrigin = FuguangBrowserMediaCandidates.sanitizeRequestHeadersByOrigin;
 var stripCandidateRequestHeaders = FuguangBrowserMediaCandidates.stripCandidateRequestHeaders;
 var DEFAULT_LLM_PROFILE_ID = FuguangBrowserModelProfiles.DEFAULT_LLM_PROFILE_ID;
 var compactProviderConfig = FuguangBrowserModelProfiles.compactProviderConfig;
@@ -134,6 +135,7 @@ const requestHeadersById = new Map();
 const browserPreloadJobs = new Map();
 let browserAudioCacheCleanupPromise = null;
 let browserAudioCacheLastCleanupAt = 0;
+let browserMediaExtractionQueue = Promise.resolve();
 
 const tabState = new Map();
 
@@ -678,8 +680,6 @@ function resolveAudioSourceExecutionCandidate(candidate = {}) {
         !mseFragments.some(fragment => fragment.segmentType !== "init")) {
       throw new Error("MSE/fMP4 媒体源缺少可执行的初始化片段或媒体片段。请刷新媒体源后重试。");
     }
-    const canReuseHeaders = canReuseCapturedHeaders(candidate.url, url) &&
-      mseFragments.every(fragment => canReuseCapturedHeaders(candidate.url, fragment.url));
     return {
       ...candidate,
       url,
@@ -689,7 +689,7 @@ function resolveAudioSourceExecutionCandidate(candidate = {}) {
       ext: "m4s",
       role: plan.primaryRole || "audio",
       contentType: "video/iso.segment",
-      requestHeaders: canReuseHeaders ? candidate.requestHeaders : null,
+      requestHeaders: capturedRequestHeadersForUrl(candidate, url),
       sourcePlanUsed: true,
       mseFragments,
       normalizeStrategy: normalizeExecutionStrategy(plan, inputType)
@@ -700,8 +700,6 @@ function resolveAudioSourceExecutionCandidate(candidate = {}) {
       throw new Error("媒体源执行计划已过期或未通过后台校验。请刷新媒体源后重试。");
     }
     const dashFragments = normalizeMseFfmpegFragments(input.fragments);
-    const canReuseHeaders = canReuseCapturedHeaders(candidate.url, url) &&
-      dashFragments.every(fragment => canReuseCapturedHeaders(candidate.url, fragment.url));
     return {
       ...candidate,
       url: url || candidate.url || "",
@@ -711,7 +709,7 @@ function resolveAudioSourceExecutionCandidate(candidate = {}) {
       ext: "mpd",
       role: plan.primaryRole || "audio",
       contentType: "application/dash+xml",
-      requestHeaders: canReuseHeaders ? candidate.requestHeaders : null,
+      requestHeaders: capturedRequestHeadersForUrl(candidate, url),
       sourcePlanUsed: true,
       dashFragments,
       normalizeStrategy: normalizeExecutionStrategy(plan, inputType)
@@ -727,7 +725,6 @@ function resolveAudioSourceExecutionCandidate(candidate = {}) {
     throw new Error("当前媒体源计划暂不支持浏览器内预加载执行。请选择 HLS 或直连音频源。");
   }
   const classified = classifyUrl(url) || {};
-  const canReuseHeaders = canReuseCapturedHeaders(candidate.url, url);
   const hlsAudioCandidateUrls = normalizeHttpUrlList(input.audioCandidateUrls);
   const executionFilename = filenameFromUrl(url);
   const ext = classified.ext || executionFilename.split(".").pop() || candidate.ext || "";
@@ -742,7 +739,7 @@ function resolveAudioSourceExecutionCandidate(candidate = {}) {
     ext,
     role: plan.primaryRole || candidate.role || "",
     contentType: executionCandidateContentType({ inputType, plan, classified, candidate, ext }),
-    requestHeaders: canReuseHeaders ? candidate.requestHeaders : null,
+    requestHeaders: capturedRequestHeadersForUrl(candidate, url),
     sourcePlanUsed: true,
     hlsAudioCandidateUrls,
     normalizeStrategy: normalizeExecutionStrategy(plan, inputType)
@@ -914,6 +911,25 @@ function canReuseCapturedHeaders(fromUrl, toUrl) {
   } catch {
     return false;
   }
+}
+
+function capturedRequestHeadersForUrl(candidate = {}, targetUrl = "") {
+  let origin = "";
+  try {
+    const url = new URL(String(targetUrl || ""));
+    origin = ["http:", "https:"].includes(url.protocol) ? url.origin : "";
+  } catch {
+    origin = "";
+  }
+  const mappedHeaders = origin
+    ? sanitizeInternalRequestHeaders(candidate.requestHeadersByOrigin?.[origin])
+    : {};
+  if (Object.keys(mappedHeaders).length) {
+    return mappedHeaders;
+  }
+  return canReuseCapturedHeaders(candidate.url, targetUrl)
+    ? sanitizeInternalRequestHeaders(candidate.requestHeaders)
+    : null;
 }
 
 function sourcePlanHasBlockingWarning(plan = {}) {
@@ -1247,7 +1263,22 @@ async function processBrowserFunAsrChunk(record, chunk, options = {}) {
   }
 }
 
-async function extractCandidateAudioInBrowser(record) {
+function enqueueBrowserMediaExtraction(task) {
+  const result = browserMediaExtractionQueue.then(() => task());
+  browserMediaExtractionQueue = result.catch(() => {});
+  return result;
+}
+
+function extractCandidateAudioInBrowser(record) {
+  return enqueueBrowserMediaExtraction(() => {
+    if (isBrowserJobCancelled(record)) {
+      return {};
+    }
+    return extractCandidateAudioInBrowserNow(record);
+  });
+}
+
+async function extractCandidateAudioInBrowserNow(record) {
   await ensureOffscreenDocument();
   const webFfmpeg = await getWebFfmpegConfig();
   const candidate = record.candidate;
@@ -1272,6 +1303,7 @@ async function extractCandidateAudioInBrowser(record) {
     kind: candidate.kind || "",
     ext: candidate.ext || "",
     requestHeaders: candidate.requestHeaders || null,
+    requestHeadersByOrigin: sanitizeRequestHeadersByOrigin(candidate.requestHeadersByOrigin),
     fileName: candidate.fileName || candidate.filename || filenameFromUrl(candidate.url),
     mime: candidate.contentType || candidate.mime || "",
     pageUrl,
@@ -6474,7 +6506,7 @@ function updateTabContext(tabId, context, frameId = 0) {
     language: isMainFrame ? context.language || current.language || "" : current.language || "",
     hasMedia: current.hasMedia || Boolean(context.hasMedia),
     duration: pickFinite(context.duration, current.duration),
-    currentTime: shouldUpdateTime ? pickFinite(context.currentTime, current.currentTime) : current.currentTime,
+    currentTime: shouldUpdateTime ? pickNonNegativeFinite(context.currentTime, current.currentTime) : current.currentTime,
     videoWidth: shouldReplaceMedia ? context.videoWidth || current.videoWidth || null : current.videoWidth || context.videoWidth || null,
     videoHeight: shouldReplaceMedia ? context.videoHeight || current.videoHeight || null : current.videoHeight || context.videoHeight || null,
     elementWidth: shouldReplaceMedia ? context.elementWidth || current.elementWidth || null : current.elementWidth || context.elementWidth || null,
@@ -6486,6 +6518,19 @@ function updateTabContext(tabId, context, frameId = 0) {
     frameId: shouldReplaceMedia ? incomingFrameId : current.frameId ?? incomingFrameId,
     seenAt: Date.now()
   };
+}
+
+function pickNonNegativeFinite(...values) {
+  for (const value of values) {
+    if (value === null || value === undefined || value === "" || typeof value === "boolean") {
+      continue;
+    }
+    const number = Number(value);
+    if (Number.isFinite(number) && number >= 0) {
+      return number;
+    }
+  }
+  return null;
 }
 
 function addPageMediaCandidate(tabId, media, frameId = 0) {
@@ -6553,7 +6598,8 @@ function addCandidate(tabId, candidate) {
 function sanitizeCandidateRequestHeaders(candidate = {}) {
   return {
     ...candidate,
-    requestHeaders: sanitizeInternalRequestHeaders(candidate.requestHeaders)
+    requestHeaders: sanitizeInternalRequestHeaders(candidate.requestHeaders),
+    requestHeadersByOrigin: sanitizeRequestHeadersByOrigin(candidate.requestHeadersByOrigin)
   };
 }
 

@@ -112,27 +112,57 @@ export const FuguangBrowserFunAsrProvider = (() => {
   }
 
   function normalizeFunAsrSentence(sentence = {}, baseStart = 0, chunkIndex = 0, labelSpeakers = false) {
-    const begin = finiteNumber(sentence.begin_time, sentence.start_time, sentence.start);
-    const end = finiteNumber(sentence.end_time, sentence.end_time_ms, sentence.end);
-    if (!Number.isFinite(begin) || !Number.isFinite(end)) {
+    const startSeconds = funAsrSentenceTimestampSeconds(
+      sentence,
+      ["begin_time", "start_time_ms"],
+      ["start_time", "start"]
+    );
+    const endSeconds = funAsrSentenceTimestampSeconds(
+      sentence,
+      ["end_time", "end_time_ms"],
+      ["end"]
+    );
+    if (!Number.isFinite(startSeconds) || !Number.isFinite(endSeconds)) {
       return null;
     }
-    const startSeconds = normalizeFunAsrTimestampSeconds(begin);
-    const endSeconds = normalizeFunAsrTimestampSeconds(end);
     const text = cleanFunAsrText(sentence.text || sentence.sentence || "");
     const segment = {
       start: roundSeconds(baseStart + startSeconds),
       end: roundSeconds(baseStart + endSeconds),
       text
     };
-    if (Number.isFinite(Number(sentence.speaker_id))) {
-      const speakerId = Number(sentence.speaker_id);
+    const speakerId = optionalFiniteNumber(sentence.speaker_id);
+    if (Number.isFinite(speakerId)) {
       segment.speakerId = speakerId;
       if (labelSpeakers) {
         segment.speakerLabel = `分段 ${Number(chunkIndex || 0) + 1} · 说话人 ${speakerId + 1}`;
       }
     }
     return segment;
+  }
+
+  function funAsrSentenceTimestampSeconds(sentence, millisecondFields, fallbackFields) {
+    for (const field of millisecondFields) {
+      const value = optionalFiniteNumber(sentence?.[field]);
+      if (Number.isFinite(value)) {
+        return value / 1000;
+      }
+    }
+    for (const field of fallbackFields) {
+      const value = optionalFiniteNumber(sentence?.[field]);
+      if (Number.isFinite(value)) {
+        return normalizeFunAsrTimestampSeconds(value);
+      }
+    }
+    return Number.NaN;
+  }
+
+  function optionalFiniteNumber(value) {
+    if (value === null || value === undefined || value === "" || typeof value === "boolean") {
+      return Number.NaN;
+    }
+    const number = Number(value);
+    return Number.isFinite(number) ? number : Number.NaN;
   }
 
   function normalizeFunAsrTimestampSeconds(value) {

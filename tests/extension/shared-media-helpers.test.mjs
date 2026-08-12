@@ -95,6 +95,33 @@ function fixture(name) {
 
 {
   const parsed = dashParser.parse(`<?xml version="1.0"?>
+<MPD mediaPresentationDuration="PT2S">
+  <Period>
+    <AdaptationSet mimeType="audio/mp4" contentType="audio" codecs="mp4a.40.2">
+      <Representation id="audio-time" bandwidth="128000">
+        <BaseURL>audio/</BaseURL>
+        <SegmentTemplate initialization="init-$RepresentationID$.mp4" media="chunk-$Time%05d$-$$-$Number%03d$.m4s" startNumber="7" timescale="1000">
+          <SegmentTimeline>
+            <S t="500" d="500" r="2" />
+          </SegmentTimeline>
+        </SegmentTemplate>
+      </Representation>
+    </AdaptationSet>
+  </Period>
+</MPD>`, "https://cdn.example.test/manifest/time.mpd");
+  const representation = parsed.adaptationSets[0].representations[0];
+  const fragments = dashParser.expandRepresentationFragments(representation, parsed.duration);
+  assert.deepEqual(JSON.parse(JSON.stringify(fragments.map(fragment => fragment.url))), [
+    "https://cdn.example.test/manifest/audio/init-audio-time.mp4",
+    "https://cdn.example.test/manifest/audio/chunk-00500-$-007.m4s",
+    "https://cdn.example.test/manifest/audio/chunk-01000-$-008.m4s",
+    "https://cdn.example.test/manifest/audio/chunk-01500-$-009.m4s"
+  ]);
+  assert.deepEqual(JSON.parse(JSON.stringify(fragments.slice(1).map(fragment => fragment.start))), [0.5, 1, 1.5]);
+}
+
+{
+  const parsed = dashParser.parse(`<?xml version="1.0"?>
 <MPD mediaPresentationDuration="PT10S">
   <Period>
     <AdaptationSet mimeType="audio/webm" contentType="audio" codecs="opus">

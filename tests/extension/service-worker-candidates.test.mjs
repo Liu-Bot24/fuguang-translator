@@ -1382,6 +1382,42 @@ vm.runInContext(source, context, { filename: "service-worker.js" });
 }
 
 {
+  const order = [];
+  let releaseFirst;
+  const first = context.enqueueBrowserMediaExtraction(async () => {
+    order.push("first:start");
+    await new Promise(resolve => {
+      releaseFirst = resolve;
+    });
+    order.push("first:end");
+    return "first";
+  });
+  const second = context.enqueueBrowserMediaExtraction(async () => {
+    order.push("second:start");
+    return "second";
+  });
+
+  await Promise.resolve();
+  await Promise.resolve();
+  assert.deepEqual(order, ["first:start"], "媒体提取必须覆盖请求头规则的完整生命周期串行执行");
+  releaseFirst();
+  assert.deepEqual(await Promise.all([first, second]), ["first", "second"]);
+  assert.deepEqual(order, ["first:start", "first:end", "second:start"]);
+
+  await assert.rejects(
+    context.enqueueBrowserMediaExtraction(async () => {
+      throw new Error("queue failure");
+    }),
+    /queue failure/
+  );
+  assert.equal(
+    await context.enqueueBrowserMediaExtraction(async () => "recovered"),
+    "recovered",
+    "单次媒体提取失败后不能阻塞后续任务"
+  );
+}
+
+{
   const originalEnsureOffscreenDocument = context.ensureOffscreenDocument;
   const originalGetWebFfmpegConfig = context.getWebFfmpegConfig;
   const originalWithMediaRequestHeaderRules = context.withMediaRequestHeaderRules;
@@ -1395,6 +1431,13 @@ vm.runInContext(source, context, { filename: "service-worker.js" });
     return { ok: true, result: { chunks: [] } };
   };
   try {
+    const cancelledResult = await context.extractCandidateAudioInBrowser({
+      cancelled: true,
+      job: { id: "job-cancelled-before-extraction", status: "cancelled" }
+    });
+    assert.equal(Object.keys(cancelledResult).length, 0);
+    assert.equal(offscreenMessage, null, "排队期间取消的任务不得再启动 offscreen 媒体提取");
+
     const result = await context.extractCandidateAudioInBrowser({
       tabId: 9,
       candidate: {
@@ -2782,6 +2825,8 @@ vm.runInContext(source, context, { filename: "service-worker.js" });
   assert.equal(context.browserTranslationFailures(translated).length, 60);
   assert.equal(context.browserTranslationErrorIsPermanent(new Error("Too many requests")), false);
   assert.equal(context.browserTranslationErrorIsPermanent(new Error("invalid api key")), true);
+  assert.equal(context.browserTranslationErrorIsContentPolicy("Content Policy Violation"), true);
+  assert.equal(context.browserTranslationErrorIsContentPolicy("CONTENT SAFETY FILTER"), true);
   context.fetch = originalFetch;
 }
 
@@ -3646,6 +3691,30 @@ function add(tabId, candidate) {
     seenAt: Date.now(),
     ...candidate
   });
+}
+
+{
+  const tabId = 701;
+  const state = seedPage(tabId, { duration: 600 });
+  state.context.currentTime = 18;
+  context.updateTabContext(tabId, {
+    hasMedia: true,
+    duration: 600,
+    currentTime: 0,
+    elementWidth: 640,
+    elementHeight: 360
+  }, 0);
+  assert.equal(state.context.currentTime, 0);
+
+  state.context.currentTime = 18;
+  context.updateTabContext(tabId, {
+    hasMedia: true,
+    duration: 600,
+    currentTime: null,
+    elementWidth: 640,
+    elementHeight: 360
+  }, 0);
+  assert.equal(state.context.currentTime, 18);
 }
 
 {
@@ -4810,6 +4879,42 @@ function add(tabId, candidate) {
   });
   assert.equal(JSON.stringify(internalCandidate.requestHeaders).includes("sid=display-secret"), false);
   assert.notEqual(internalCandidate.sourcePlan?.ffmpegInput?.url, "https://evil.example.test/steal.m3u8");
+}
+
+{
+  const tabId = 702;
+  seedPage(tabId, { title: "Cross-origin authorization provenance", duration: 600 });
+  add(tabId, {
+    url: "https://audio-a.example.test/media/audio-128k.m4a",
+    kind: "audio",
+    role: "audio",
+    ext: "m4a",
+    contentType: "audio/mp4",
+    duration: 600,
+    requestHeaders: { authorization: "Bearer origin-a" }
+  });
+  add(tabId, {
+    url: "https://video-b.example.test/media/video-720p.mp4",
+    kind: "video",
+    role: "video",
+    ext: "mp4",
+    contentType: "video/mp4",
+    duration: 600,
+    requestHeaders: { authorization: "Bearer origin-b" }
+  });
+
+  const [displayCandidate] = context.getDisplayCandidates(tabId);
+  assert.equal(displayCandidate.url, "https://audio-a.example.test/media/audio-128k.m4a");
+  assert.equal(JSON.stringify(displayCandidate).includes("origin-a"), false);
+  assert.equal(JSON.stringify(displayCandidate).includes("requestHeadersByOrigin"), false);
+  const internalCandidate = context.resolvePreloadCandidateForStart(context.getState(tabId), displayCandidate);
+  assert.deepEqual(JSON.parse(JSON.stringify(internalCandidate.requestHeaders)), {
+    authorization: "Bearer origin-a"
+  });
+  assert.deepEqual(JSON.parse(JSON.stringify(internalCandidate.requestHeadersByOrigin)), {
+    "https://audio-a.example.test": { authorization: "Bearer origin-a" },
+    "https://video-b.example.test": { authorization: "Bearer origin-b" }
+  });
 }
 
 {

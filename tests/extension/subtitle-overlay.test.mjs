@@ -482,18 +482,32 @@ function createHarness({ settings = {}, videos = [new FakeMedia()], legacyOverla
   assert.equal(video.textTracks[0].cues[0].position, 50);
   assert.equal(video.textTracks[0].cues[0].align, "center");
   assert.equal(video.textTracks[0].cues[0].size, 72);
+  assert.equal(video.classList.contains("fuguang-caption-native-cues"), true);
   assert.match(
     harness.context.document.getElementById("fuguang-caption-style-v2").textContent,
-    /video::cue/
+    /video\.fuguang-caption-native-cues::cue/
+  );
+  assert.doesNotMatch(
+    harness.context.document.getElementById("fuguang-caption-style-v2").textContent,
+    /(?:^|\s)video::cue/
   );
 
   harness.context.document.fullscreenElement = null;
   harness.context.document.dispatchEvent(new harness.context.Event("fullscreenchange"));
 
   assert.equal(video.textTracks[0].mode, "disabled");
+  assert.equal(video.classList.contains("fuguang-caption-native-cues"), false);
   assert.equal(harness.overlay().parentElement, harness.context.document.documentElement);
   assert.equal(harness.overlayHidden(), false);
   assert.equal(harness.overlayText(), "first cue");
+
+  harness.context.document.fullscreenElement = video;
+  harness.context.document.dispatchEvent(new harness.context.Event("fullscreenchange"));
+
+  assert.equal(video.textTracks.length, 1, "反复进出媒体全屏应复用同一条插件字幕轨");
+  assert.equal(video.textTracks[0].mode, "showing");
+  assert.equal(video.textTracks[0].cues.length, 2);
+  assert.equal(video.classList.contains("fuguang-caption-native-cues"), true);
 }
 
 {
