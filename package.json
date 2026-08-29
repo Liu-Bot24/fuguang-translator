@@ -1,0 +1,11 @@
+{
+  "name": "liusheng-subtitles",
+  "private": true,
+  "type": "module",
+  "engines": {
+    "node": ">=22"
+  },
+  "scripts": {
+    "test": "node --test \"tests/extension/*.test.mjs\""
+  }
+}

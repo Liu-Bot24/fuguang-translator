@@ -22,7 +22,8 @@
       reloadWebFfmpegFrame,
       requestWebFfmpeg,
       persistWebFfmpegAudioResult,
-      offsetSpeechIntervals
+      offsetSpeechIntervals,
+      createRemoteMediaMediabunnyInput
     } = deps;
 
     function localMediaOverride(name, fallback) {
@@ -31,7 +32,10 @@
     }
 
     function shouldUseLocalMediaChunkedExtraction(message) {
-      return isLocalFileMediaSourceUrl(message?.sourceUrl || "") &&
+      const sourceUrl = String(message?.sourceUrl || "");
+      const supportedSource = isLocalFileMediaSourceUrl(sourceUrl) ||
+        (message?.remoteRangeExtraction === true && /^https?:\/\//i.test(sourceUrl));
+      return supportedSource &&
         !isHlsSource(message) &&
         !isDashSource(message) &&
         !isMseFragmentSource(message);
@@ -39,12 +43,20 @@
 
     async function extractLocalMediaAudioWithWebFfmpeg(message) {
       const sourceUrl = String(message.sourceUrl || "");
-      if (!isLocalFileMediaSourceUrl(sourceUrl)) {
-        throw new Error("本地媒体分片抽取只支持 file:// 来源。");
+      if (!isLocalFileMediaSourceUrl(sourceUrl) && message.remoteRangeExtraction !== true) {
+        throw new Error("媒体分片抽取只支持已授权的本地文件或启用 Range 的直连媒体。");
       }
       const mediabunny = await loadMediabunny();
       const inputInfo = await createLocalMediaMediabunnyInput(sourceUrl, mediabunny, message);
       const input = inputInfo.input;
+      if (message.abortSignal?.aborted) {
+        input.dispose?.();
+        throw message.abortSignal.reason instanceof Error
+          ? message.abortSignal.reason
+          : new Error("任务已停止。");
+      }
+      const onAbort = () => input.dispose?.();
+      message.abortSignal?.addEventListener?.("abort", onAbort, { once: true });
       const logicalChunkSeconds = normalizeLocalMediaLogicalChunkSeconds(message.asrChunkSeconds || message.chunkSeconds, {
         longFile: isLongFileAsrMode(message)
       });
@@ -94,6 +106,7 @@
       } catch (error) {
         throw describeLocalMediaExtractionError(error);
       } finally {
+        message.abortSignal?.removeEventListener?.("abort", onAbort);
         input.dispose?.();
       }
     }
@@ -102,6 +115,12 @@
       const stored = await createStoredLocalMediaMediabunnyInput(message, mediabunny);
       if (stored) {
         return stored;
+      }
+      if (message.remoteRangeExtraction === true && /^https?:\/\//i.test(sourceUrl)) {
+        if (typeof createRemoteMediaMediabunnyInput !== "function") {
+          throw new Error("直连媒体 Range 读取模块不可用。");
+        }
+        return createRemoteMediaMediabunnyInput(sourceUrl, mediabunny, message);
       }
       const size = await getLocalMediaSourceSize(sourceUrl).catch(error => {
         if (isLocalMediaSizeUnavailableError(error)) {
@@ -183,6 +202,9 @@
       }
       if (inputInfo.sourceMode === "blob") {
         return "正在读取已授权本地媒体音轨";
+      }
+      if (inputInfo.sourceMode === "url-range") {
+        return "正在通过 Range 读取直连媒体音轨";
       }
       return "正在解析本地媒体音轨";
     }
@@ -702,6 +724,10 @@
             ? `正在转码本地音频分片 ${index + 1}/${groupCount}：${progress.message}`
             : `正在转码本地音频分片 ${index + 1}/${groupCount}`
         });
+      }, {
+        jobId: String(message?.jobId || ""),
+        runToken: String(message?.runToken || ""),
+        signal: message?.abortSignal
       });
       const persisted = await persistWebFfmpegAudioResult(result, `${message.cacheNamespace || "local-media"}-${index}`);
       const file = persisted.file || persisted.chunks?.[0]?.file;

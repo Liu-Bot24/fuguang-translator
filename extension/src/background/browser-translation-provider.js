@@ -1,4 +1,5 @@
 import { FuguangBrowserLanguage } from "./browser-language.js";
+import { FuguangRequestSemaphore } from "../shared/request-semaphore.js";
 
 export const FuguangBrowserTranslationProvider = (() => {
   const BROWSER_TRANSLATION_RESPONSE_FORMAT_UNSUPPORTED_KEYS = new Set();
@@ -34,16 +35,49 @@ export const FuguangBrowserTranslationProvider = (() => {
     const provider = normalizeProviderType(llmConfig.providerType);
     const messages = buildTranslationMessages(sourceSegments, translationContext.targetLanguage, translationContext.metadata);
     const timeoutMs = normalizeTimeoutMs(translationContext.options.timeoutMs);
-    const request = provider === "anthropic"
-      ? activeProviderFunction("requestAnthropicMessage", requestAnthropicMessage)(llmConfig, messages, translationContext.options)
-      : activeProviderFunction("requestOpenAiCompatibleChat", requestOpenAiCompatibleChat)(llmConfig, messages, translationContext.options);
-    const content = await withPromiseTimeout(request, timeoutMs, "翻译模型请求超时");
+    const requestController = new AbortController();
+    const unlink = linkTranslationAbortSignal(translationContext.options.signal, requestController);
+    const requestOptions = { ...translationContext.options, signal: requestController.signal };
+    let content;
+    try {
+      const request = requestTranslationWithConcurrency(llmConfig, requestOptions, () => (
+        provider === "anthropic"
+          ? activeProviderFunction("requestAnthropicMessage", requestAnthropicMessage)(llmConfig, messages, requestOptions)
+          : activeProviderFunction("requestOpenAiCompatibleChat", requestOpenAiCompatibleChat)(llmConfig, messages, requestOptions)
+      ));
+      content = await withPromiseTimeout(
+        request,
+        timeoutMs,
+        "翻译模型请求超时",
+        translationContext.options.signal,
+        error => requestController.abort(error)
+      );
+    } finally {
+      unlink();
+    }
     const json = parseModelJson(content);
     return Array.isArray(json?.items)
       ? json.items
       : Array.isArray(json?.translated_transcript)
         ? json.translated_transcript
         : [];
+  }
+
+  async function requestTranslationWithConcurrency(config, options, request) {
+    const key = FuguangRequestSemaphore.providerKey("translation", config);
+    const limit = Math.max(1, Math.min(8, Number(config.maxConcurrency || 3) || 3));
+    for (let attempt = 0; attempt < 2; attempt += 1) {
+      try {
+        return await FuguangRequestSemaphore.withPermit(key, limit, request, options.signal);
+      } catch (error) {
+        const waitMs = Number(error?.retryAfterMs || 0) || 0;
+        if (attempt > 0 || !browserTranslationErrorIsRateLimited(error) || waitMs <= 0) {
+          throw error;
+        }
+        await FuguangRequestSemaphore.delay(waitMs, options.signal);
+      }
+    }
+    throw new Error("翻译模型请求失败。");
   }
 
   function activeProviderFunction(name, fallback) {
@@ -96,10 +130,10 @@ export const FuguangBrowserTranslationProvider = (() => {
     const timeoutMs = normalizeTimeoutMs(options.timeoutMs);
     const cacheKey = browserTranslationResponseFormatCacheKey(config);
     if (cacheKey && BROWSER_TRANSLATION_RESPONSE_FORMAT_UNSUPPORTED_KEYS.has(cacheKey)) {
-      return await requestOpenAiCompatibleChatOnce(config, messages, timeoutMs, false);
+      return await requestOpenAiCompatibleChatOnce(config, messages, timeoutMs, false, options.signal);
     }
     try {
-      return await requestOpenAiCompatibleChatOnce(config, messages, timeoutMs, true);
+      return await requestOpenAiCompatibleChatOnce(config, messages, timeoutMs, true, options.signal);
     } catch (error) {
       if (!isResponseFormatUnsupportedError(error)) {
         throw error;
@@ -107,7 +141,7 @@ export const FuguangBrowserTranslationProvider = (() => {
       if (cacheKey) {
         BROWSER_TRANSLATION_RESPONSE_FORMAT_UNSUPPORTED_KEYS.add(cacheKey);
       }
-      return await requestOpenAiCompatibleChatOnce(config, messages, timeoutMs, false);
+      return await requestOpenAiCompatibleChatOnce(config, messages, timeoutMs, false, options.signal);
     }
   }
 
@@ -124,7 +158,7 @@ export const FuguangBrowserTranslationProvider = (() => {
     ].join("\n");
   }
 
-  async function requestOpenAiCompatibleChatOnce(config, messages, timeoutMs, useJsonResponseFormat) {
+  async function requestOpenAiCompatibleChatOnce(config, messages, timeoutMs, useJsonResponseFormat, signal = null) {
     const body = {
       model: config.model,
       messages,
@@ -140,9 +174,9 @@ export const FuguangBrowserTranslationProvider = (() => {
         "content-type": "application/json"
       },
       body: JSON.stringify(body)
-    }, timeoutMs, "翻译模型");
+    }, timeoutMs, "翻译模型", signal);
     if (!response.ok) {
-      throw new Error(payload.error?.message || payload.message || `翻译模型返回 HTTP ${response.status}`);
+      throw translationResponseError(payload.error?.message || payload.message || `翻译模型返回 HTTP ${response.status}`, response);
     }
     const content = payload.choices?.[0]?.message?.content || "";
     if (useJsonResponseFormat && isResponseFormatUnsupportedError(content)) {
@@ -174,11 +208,18 @@ export const FuguangBrowserTranslationProvider = (() => {
         system,
         messages: user
       })
-    }, timeoutMs, "翻译模型");
+    }, timeoutMs, "翻译模型", options.signal);
     if (!response.ok) {
-      throw new Error(payload.error?.message || payload.message || `翻译模型返回 HTTP ${response.status}`);
+      throw translationResponseError(payload.error?.message || payload.message || `翻译模型返回 HTTP ${response.status}`, response);
     }
     return (payload.content || []).map(item => item.text || "").join("\n");
+  }
+
+  function translationResponseError(message, response) {
+    const error = new Error(message);
+    error.status = Number(response?.status || 0) || 0;
+    error.retryAfterMs = FuguangRequestSemaphore.retryAfterMs(response?.headers);
+    return error;
   }
 
   function normalizeTimeoutMs(timeoutMs) {
@@ -186,25 +227,46 @@ export const FuguangBrowserTranslationProvider = (() => {
     return Number.isFinite(normalized) && normalized > 0 ? normalized : BROWSER_TRANSLATION_TIMEOUT_MS;
   }
 
-  async function withPromiseTimeout(promise, timeoutMs, label) {
+  async function withPromiseTimeout(promise, timeoutMs, label, signal = null, onTimeout = null) {
     let timer = 0;
+    let removeAbortListener = () => {};
     try {
-      return await Promise.race([
+      const races = [
         promise,
         new Promise((_, reject) => {
           timer = setTimeout(() => {
-            reject(new Error(`${label}（${Math.round(timeoutMs / 1000)} 秒）`));
+            const error = new Error(`${label}（${Math.round(timeoutMs / 1000)} 秒）`);
+            onTimeout?.(error);
+            reject(error);
           }, timeoutMs);
         })
-      ]);
+      ];
+      if (signal) {
+        races.push(new Promise((_, reject) => {
+          if (signal.aborted) {
+            reject(translationAbortError(signal.reason));
+            return;
+          }
+          const onAbort = () => reject(translationAbortError(signal.reason));
+          signal.addEventListener?.("abort", onAbort, { once: true });
+          removeAbortListener = () => signal.removeEventListener?.("abort", onAbort);
+        }));
+      }
+      return await Promise.race(races);
     } finally {
       clearTimeout(timer);
+      removeAbortListener();
     }
   }
 
-  async function fetchJsonWithTimeout(url, init, timeoutMs, label) {
+  async function fetchJsonWithTimeout(url, init, timeoutMs, label, signal = null) {
     const controller = new AbortController();
-    const timer = setTimeout(() => controller.abort(), timeoutMs);
+    const unlink = linkTranslationAbortSignal(signal, controller);
+    let timedOut = false;
+    const timer = setTimeout(() => {
+      timedOut = true;
+      controller.abort();
+    }, timeoutMs);
     try {
       const response = await fetch(url, {
         ...init,
@@ -213,13 +275,39 @@ export const FuguangBrowserTranslationProvider = (() => {
       const payload = await response.json().catch(() => ({}));
       return { response, payload };
     } catch (error) {
-      if (controller.signal.aborted) {
+      if (signal?.aborted) {
+        throw translationAbortError(signal.reason);
+      }
+      if (timedOut || controller.signal.aborted) {
         throw new Error(`${label}请求超时（${Math.round(timeoutMs / 1000)} 秒）`);
       }
       throw error;
     } finally {
       clearTimeout(timer);
+      unlink();
     }
+  }
+
+  function linkTranslationAbortSignal(signal, controller) {
+    if (!signal) {
+      return () => {};
+    }
+    if (signal.aborted) {
+      controller.abort(signal.reason);
+      return () => {};
+    }
+    const onAbort = () => controller.abort(signal.reason);
+    signal.addEventListener?.("abort", onAbort, { once: true });
+    return () => signal.removeEventListener?.("abort", onAbort);
+  }
+
+  function translationAbortError(reason) {
+    const error = new Error(reason?.message || "任务已停止。");
+    error.name = "AbortError";
+    if (reason instanceof Error) {
+      error.cause = reason;
+    }
+    return error;
   }
 
   function browserTranslationErrorIsPermanent(error) {
@@ -231,6 +319,9 @@ export const FuguangBrowserTranslationProvider = (() => {
   }
 
   function browserTranslationErrorIsRateLimited(message) {
+    if (Number(message?.status || 0) === 429) {
+      return true;
+    }
     return /(429|rate limit|too many requests|请求过多|限流|频率限制)/.test(String(message || "").toLowerCase());
   }
 

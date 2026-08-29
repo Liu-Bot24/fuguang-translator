@@ -13,6 +13,7 @@ export const FuguangBrowserTranslationPipeline = (() => {
   } = FuguangBrowserTranslationProvider;
 
   async function translateBrowserSegments(sourceSegments, llmConfig, targetLanguage, metadata, options = {}) {
+    throwIfBrowserTranslationAborted(options.signal);
     const batches = splitSegmentsForBrowserTranslation(sourceSegments, BROWSER_TRANSLATION_BATCH_SIZE);
     const translationContext = createBrowserTranslationContext(llmConfig, targetLanguage, metadata, options);
     const translatedByBatch = new Array(batches.length);
@@ -24,12 +25,14 @@ export const FuguangBrowserTranslationPipeline = (() => {
     const workerCount = browserTranslationBatchWorkerCount(options, batches.length);
     async function worker() {
       while (nextBatchIndex < batches.length && !fatalError) {
+        throwIfBrowserTranslationAborted(options.signal);
         const batchIndex = nextBatchIndex;
         nextBatchIndex += 1;
         await translateBrowserSegmentsBatchAtIndex(batchIndex);
       }
     }
     async function translateBrowserSegmentsBatchAtIndex(batchIndex) {
+      throwIfBrowserTranslationAborted(options.signal);
       options.onProgress?.({
         batchIndex: batchIndex + 1,
         batchTotal: batches.length,
@@ -42,6 +45,7 @@ export const FuguangBrowserTranslationPipeline = (() => {
           translationContext
         );
       } catch (error) {
+        throwIfBrowserTranslationAborted(options.signal, error);
         if (browserTranslationErrorIsRateLimited(error) && batches.length > 1) {
           batchErrors[batchIndex] = error;
           failuresByBatch[batchIndex] = createBrowserTranslationFailuresForSources(batches[batchIndex], error);
@@ -136,8 +140,10 @@ export const FuguangBrowserTranslationPipeline = (() => {
 
   async function translateBrowserBatchState(state) {
     try {
+      throwIfBrowserTranslationAborted(state.translationContext?.options?.signal);
       return await requestAndAlignBrowserTranslationBatch(state);
     } catch (error) {
+      throwIfBrowserTranslationAborted(state.translationContext?.options?.signal, error);
       if (browserTranslationErrorIsRateLimited(error)) {
         throw error;
       }
@@ -155,6 +161,7 @@ export const FuguangBrowserTranslationPipeline = (() => {
     let items = [];
     for (let attempt = 0; attempt < attempts; attempt += 1) {
       try {
+        throwIfBrowserTranslationAborted(translationContext?.options?.signal);
         items = await requestBrowserTranslationItems(sourceSegments, translationContext);
         if (items.length) {
           if (shouldRetryWholeBrowserTranslationBatchBeforeSplit(sourceSegments, items, autoSplitDepth, attempt, attempts)) {
@@ -164,6 +171,7 @@ export const FuguangBrowserTranslationPipeline = (() => {
         }
         throw new Error("翻译模型没有返回可用字幕条目。");
       } catch (error) {
+        throwIfBrowserTranslationAborted(translationContext?.options?.signal, error);
         lastError = error;
         if (browserTranslationErrorIsRateLimited(error) || browserTranslationErrorIsPermanent(error) || attempt === attempts - 1) {
           break;
@@ -189,6 +197,7 @@ export const FuguangBrowserTranslationPipeline = (() => {
 
   async function retrySplitBrowserTranslationBatch(state) {
     const { sourceSegments, autoSplitDepth, error } = state;
+    throwIfBrowserTranslationAborted(state.translationContext?.options?.signal, error);
     if (browserTranslationErrorIsPermanent(error)) {
       throw error;
     }
@@ -232,6 +241,7 @@ export const FuguangBrowserTranslationPipeline = (() => {
     let fatalError = null;
     async function worker() {
       while (queue.length && !fatalError) {
+        throwIfBrowserTranslationAborted(translationContext?.options?.signal);
         const task = queue.shift();
         if (!task) {
           return;
@@ -251,6 +261,7 @@ export const FuguangBrowserTranslationPipeline = (() => {
             });
           });
         } catch (error) {
+          throwIfBrowserTranslationAborted(translationContext?.options?.signal, error);
           if (browserTranslationErrorIsPermanent(error)) {
             fatalError = error || task.error || originalError;
             throw fatalError;
@@ -336,6 +347,15 @@ export const FuguangBrowserTranslationPipeline = (() => {
       batches.push(sourceSegments.slice(index, index + size));
     }
     return batches;
+  }
+
+  function throwIfBrowserTranslationAborted(signal, error = null) {
+    if (!signal?.aborted && error?.name !== "AbortError") {
+      return;
+    }
+    const aborted = new Error(signal?.reason?.message || error?.message || "任务已停止。");
+    aborted.name = "AbortError";
+    throw aborted;
   }
 
   async function alignOrRepairTranslatedSegments(state, items) {

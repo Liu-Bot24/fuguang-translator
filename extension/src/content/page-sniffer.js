@@ -1,5 +1,5 @@
 (() => {
-  const PAGE_SNIFFER_REVISION = "20260813-safe-hooks";
+  const PAGE_SNIFFER_REVISION = "20260829-light-deep-modes";
   if (
     window.__fuguangPageSnifferRevision === PAGE_SNIFFER_REVISION &&
     typeof window.__fuguangPageSnifferRescan === "function"
@@ -102,6 +102,7 @@
   let lastContextSignature = "";
   let lastDocumentMarkupSignature = "";
   let fmp4BinaryInspections = 0;
+  let jsonHookEnabled = false;
   const seenPerformanceUrls = new Set();
   const timers = [];
   const contextTimer = setInterval(reportPageContext, 1200);
@@ -112,6 +113,7 @@
   scheduleInitialScan();
   window.__fuguangPageSnifferCleanup = cleanup;
   window.__fuguangPageSnifferRescan = scheduleInitialScan;
+  window.__fuguangPageSnifferSetMode = setSniffingMode;
   window.__fuguangPageSnifferRevision = PAGE_SNIFFER_REVISION;
 
   const fuguangFetch = function fuguangFetch(input, init) {
@@ -171,7 +173,19 @@
     return result;
   };
   fuguangJsonParse.toString = () => originalJsonParse.toString();
-  JSON.parse = fuguangJsonParse;
+
+  function setSniffingMode(mode) {
+    const deep = String(mode || "").toLowerCase() === "deep";
+    if (deep && !jsonHookEnabled && JSON.parse === originalJsonParse) {
+      JSON.parse = fuguangJsonParse;
+      jsonHookEnabled = true;
+    } else if (!deep && jsonHookEnabled && JSON.parse === fuguangJsonParse) {
+      JSON.parse = originalJsonParse;
+      jsonHookEnabled = false;
+    }
+    scheduleInitialScan();
+    return deep ? "deep" : "light";
+  }
 
   function safelyInspect(task) {
     try {
@@ -191,9 +205,7 @@
     if (XMLHttpRequest.prototype.send === fuguangXhrSend) {
       XMLHttpRequest.prototype.send = originalXhrSend;
     }
-    if (JSON.parse === fuguangJsonParse) {
-      JSON.parse = originalJsonParse;
-    }
+    setSniffingMode("light");
     timers.forEach(timer => clearTimeout(timer));
     timers.length = 0;
     if (window.__fuguangPageSnifferCleanup === cleanup) {
@@ -201,6 +213,9 @@
     }
     if (window.__fuguangPageSnifferRescan === scheduleInitialScan) {
       delete window.__fuguangPageSnifferRescan;
+    }
+    if (window.__fuguangPageSnifferSetMode === setSniffingMode) {
+      delete window.__fuguangPageSnifferSetMode;
     }
     if (window.__fuguangPageSnifferRevision === PAGE_SNIFFER_REVISION) {
       delete window.__fuguangPageSnifferRevision;

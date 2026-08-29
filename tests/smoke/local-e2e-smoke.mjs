@@ -4,11 +4,13 @@ import fs from "node:fs";
 import http from "node:http";
 import os from "node:os";
 import path from "node:path";
+import { fileURLToPath } from "node:url";
 
 const require = createRequire(import.meta.url);
-const repoRoot = path.resolve(new URL("../..", import.meta.url).pathname);
+const repoRoot = path.resolve(fileURLToPath(new URL("../..", import.meta.url)));
 const extensionPath = path.join(repoRoot, "extension");
 const { chromium } = loadPlaywright();
+const chromiumHeadless = process.env.FUGUANG_SMOKE_HEADLESS === "1";
 
 let asrCalls = 0;
 let llmCalls = 0;
@@ -49,6 +51,12 @@ try {
   if (openApiCalls !== 0) {
     throw new Error(`expected no OpenAPI probe with vad off, got ${openApiCalls}`);
   }
+  if (result.durableJob?.id !== result.latest?.job?.id || result.durableJob?.runToken !== result.latest?.job?.runToken) {
+    throw new Error(`durable job ledger mismatch: ${JSON.stringify(result.durableJob)}`);
+  }
+  if (JSON.stringify(result.durableJob).includes("smoke-key")) {
+    throw new Error("durable job ledger leaked model credentials");
+  }
 } finally {
   server.close();
   fs.rmSync(userDataDir, { recursive: true, force: true });
@@ -56,7 +64,9 @@ try {
 
 async function runExtensionSmoke(origin) {
   const context = await chromium.launchPersistentContext(userDataDir, {
-    headless: false,
+    headless: chromiumHeadless,
+    executablePath: process.env.PLAYWRIGHT_BROWSER_EXECUTABLE || undefined,
+    ignoreDefaultArgs: ["--disable-extensions"],
     args: [
       `--disable-extensions-except=${extensionPath}`,
       `--load-extension=${extensionPath}`
@@ -144,7 +154,22 @@ async function runExtensionSmoke(origin) {
         type: "FUGUANG_GET_PRELOAD_VTT",
         jobId: start.job.id
       });
-      return { start, latest, transcriptResponse, vttResponse };
+      await new Promise(resolve => setTimeout(resolve, 50));
+      const durableJob = await new Promise((resolve, reject) => {
+        const request = indexedDB.open("liusheng-job-runtime", 1);
+        request.onerror = () => reject(request.error || new Error("job ledger database failed to open"));
+        request.onsuccess = () => {
+          const db = request.result;
+          const transaction = db.transaction("jobs", "readonly");
+          const getRequest = transaction.objectStore("jobs").get(start.job.id);
+          getRequest.onerror = () => reject(getRequest.error || new Error("durable job read failed"));
+          getRequest.onsuccess = () => {
+            resolve(getRequest.result || null);
+            db.close();
+          };
+        };
+      });
+      return { start, latest, transcriptResponse, vttResponse, durableJob };
     }, { origin });
     return result;
   } finally {
@@ -239,6 +264,10 @@ function loadPlaywright() {
   try {
     return require("playwright");
   } catch {
+    const configuredRoot = String(process.env.PLAYWRIGHT_NODE_MODULES || "").trim();
+    if (configuredRoot) {
+      return require(path.join(configuredRoot, "playwright"));
+    }
     const globalRoot = execSync("npm root -g", { encoding: "utf8" }).trim();
     return require(path.join(globalRoot, "playwright"));
   }

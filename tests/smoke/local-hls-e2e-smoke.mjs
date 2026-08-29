@@ -4,9 +4,10 @@ import fs from "node:fs";
 import http from "node:http";
 import os from "node:os";
 import path from "node:path";
+import { fileURLToPath } from "node:url";
 
 const require = createRequire(import.meta.url);
-const repoRoot = path.resolve(new URL("../..", import.meta.url).pathname);
+const repoRoot = path.resolve(fileURLToPath(new URL("../..", import.meta.url)));
 const extensionPath = path.join(repoRoot, "extension");
 const { chromium } = loadPlaywright();
 const chromiumHeadless = process.env.FUGUANG_SMOKE_HEADLESS === "1";

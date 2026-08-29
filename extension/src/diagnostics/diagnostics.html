@@ -1,0 +1,27 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>流声字幕诊断导出</title>
+    <style>
+      :root { color-scheme: light dark; font: 15px/1.6 system-ui, sans-serif; }
+      body { max-width: 720px; margin: 48px auto; padding: 0 24px; }
+      form { display: grid; gap: 12px; }
+      input, button { box-sizing: border-box; min-height: 42px; padding: 8px 12px; font: inherit; }
+      button { cursor: pointer; }
+      #status { min-height: 1.6em; white-space: pre-wrap; }
+    </style>
+  </head>
+  <body>
+    <h1>诊断导出</h1>
+    <p>输入任务 ID。诊断页会在扩展本地读取任务信息和音频缓存并生成 TAR 文件，不会通过运行时消息传输音频二进制。</p>
+    <form id="exportForm">
+      <label for="jobId">任务 ID</label>
+      <input id="jobId" name="jobId" autocomplete="off" required>
+      <button type="submit">导出诊断包</button>
+    </form>
+    <p id="status" role="status"></p>
+    <script src="diagnostics.js"></script>
+  </body>
+</html>

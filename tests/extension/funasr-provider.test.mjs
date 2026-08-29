@@ -3,7 +3,10 @@ import fs from "node:fs";
 import vm from "node:vm";
 
 const source = fs.readFileSync(new URL("../../extension/src/background/browser-funasr-provider.js", import.meta.url), "utf8")
+  .replace('import { FuguangRequestSemaphore } from "../shared/request-semaphore.js";\n\n', "")
   .replace("export const FuguangBrowserFunAsrProvider =", "var FuguangBrowserFunAsrProvider =");
+const semaphoreSource = fs.readFileSync(new URL("../../extension/src/shared/request-semaphore.js", import.meta.url), "utf8")
+  .replace("export const FuguangRequestSemaphore =", "var FuguangRequestSemaphore =");
 
 const context = vm.createContext({
   console,
@@ -21,11 +24,13 @@ const context = vm.createContext({
   FormData,
   ArrayBuffer,
   Uint8Array,
+  AbortController,
   fetch: async () => ({ ok: true, json: async () => ({}), text: async () => "" }),
   setTimeout,
   clearTimeout
 });
 
+vm.runInContext(semaphoreSource, context, { filename: "request-semaphore.js" });
 vm.runInContext(source, context, { filename: "browser-funasr-provider.js" });
 Object.assign(context, context.FuguangBrowserFunAsrProvider);
 
@@ -200,4 +205,34 @@ Object.assign(context, context.FuguangBrowserFunAsrProvider);
   );
   assert.equal(payload.transcripts[0].sentences[0].text, "ok");
   assert.equal(calls.length, 5);
+}
+
+{
+  const originalFetch = context.fetch;
+  context.fetch = async (_url, options = {}) => ({
+    ok: true,
+    status: 200,
+    json: () => new Promise((_resolve, reject) => {
+      options.signal?.addEventListener?.("abort", () => {
+        const error = new Error("aborted response body");
+        error.name = "AbortError";
+        reject(error);
+      }, { once: true });
+    })
+  });
+  try {
+    const request = context.getDashScopeUploadPolicy(
+      { baseUrl: "https://dashscope.aliyuncs.com/api/v1", model: "fun-asr", apiKey: "test-key" },
+      { deadlineAt: Date.now() + 20 }
+    );
+    await assert.rejects(
+      Promise.race([
+        request,
+        new Promise((_resolve, reject) => setTimeout(() => reject(new Error("Fun-ASR body timeout was not enforced")), 100))
+      ]),
+      /Fun-ASR 请求超时/
+    );
+  } finally {
+    context.fetch = originalFetch;
+  }
 }

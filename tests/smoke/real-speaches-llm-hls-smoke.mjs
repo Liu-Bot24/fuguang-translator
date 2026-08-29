@@ -4,9 +4,10 @@ import fs from "node:fs";
 import http from "node:http";
 import os from "node:os";
 import path from "node:path";
+import { fileURLToPath } from "node:url";
 
 const require = createRequire(import.meta.url);
-const repoRoot = path.resolve(new URL("../..", import.meta.url).pathname);
+const repoRoot = path.resolve(fileURLToPath(new URL("../..", import.meta.url)));
 const extensionPath = path.join(repoRoot, "extension");
 const speachesBaseUrl = normalizeBaseUrl(process.env.SPEACHES_BASE_URL || "http://127.0.0.1:8000/v1");
 const speachesModel = process.env.SPEACHES_MODEL || "Systran/faster-whisper-large-v3";

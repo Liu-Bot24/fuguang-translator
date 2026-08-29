@@ -2,16 +2,11 @@ import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
 import fs from "node:fs";
 import path from "node:path";
+import { fileURLToPath } from "node:url";
 
-const repoRoot = path.resolve(new URL("../..", import.meta.url).pathname);
+const repoRoot = path.resolve(fileURLToPath(new URL("../..", import.meta.url)));
 
-const trackedFiles = execFileSync("git", ["ls-files", "-z"], {
-  cwd: repoRoot,
-  encoding: "utf8"
-})
-  .split("\0")
-  .filter(Boolean)
-  .sort();
+const trackedFiles = sourceFiles();
 const filesToContentScan = [...new Set([...trackedFiles, ...optionalLocalTextFiles()])]
   .filter(file => fs.existsSync(path.join(repoRoot, file)))
   .sort();
@@ -84,4 +79,41 @@ function optionalLocalTextFiles() {
     // must not become a place where plaintext credentials are pasted.
     "DEVELOPMENT_LOG.md"
   ].filter(file => fs.existsSync(path.join(repoRoot, file)));
+}
+
+function sourceFiles() {
+  try {
+    return execFileSync("git", [
+      "-c",
+      `safe.directory=${repoRoot}`,
+      "ls-files",
+      "-z"
+    ], {
+      cwd: repoRoot,
+      encoding: "utf8",
+      stdio: ["ignore", "pipe", "ignore"]
+    })
+      .split("\0")
+      .filter(Boolean)
+      .sort();
+  } catch {
+    return walkSourceTree(repoRoot).sort();
+  }
+}
+
+function walkSourceTree(directory, relativeDirectory = "") {
+  const files = [];
+  for (const entry of fs.readdirSync(directory, { withFileTypes: true })) {
+    if (entry.isDirectory() && [".git", "node_modules"].includes(entry.name)) {
+      continue;
+    }
+    const relativePath = path.join(relativeDirectory, entry.name);
+    const absolutePath = path.join(directory, entry.name);
+    if (entry.isDirectory()) {
+      files.push(...walkSourceTree(absolutePath, relativePath));
+    } else if (entry.isFile()) {
+      files.push(relativePath.split(path.sep).join("/"));
+    }
+  }
+  return files;
 }

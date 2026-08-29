@@ -46,6 +46,7 @@ const context = vm.createContext({
   Boolean,
   Math,
   TextEncoder,
+  AbortController,
   document: {
     body: node,
     createElement: () => ({ ...node }),
@@ -67,6 +68,11 @@ function loadSharedModule(path, exportName) {
 
 loadSharedModule("../../extension/src/shared/dash-manifest-parser.js", "FuguangDashManifestParser");
 loadSharedModule("../../extension/src/shared/hls-url-helpers.js", "FuguangHlsUrlHelpers");
+vm.runInContext(
+  fs.readFileSync(new URL("../../extension/src/shared/media-network-policy.js", import.meta.url), "utf8"),
+  context,
+  { filename: "media-network-policy.js" }
+);
 
 const localMediaExtractorSource = fs.readFileSync(
   new URL("../../extension/src/offscreen/local-media-extractor.js", import.meta.url),
@@ -84,6 +90,172 @@ const source = fs.readFileSync(new URL("../../extension/src/offscreen/offscreen.
 
 vm.runInContext(localMediaExtractorSource, context, { filename: "local-media-extractor.js" });
 vm.runInContext(source, context, { filename: "offscreen.js" });
+
+{
+  const fragments = [
+    { url: "https://cdn.example.test/init.mp4", segmentType: "init", start: 0, end: 0, duration: 0 },
+    ...Array.from({ length: 95 }, (_, index) => ({
+      url: `https://cdn.example.test/seg-${index}.m4s`,
+      segmentType: "media",
+      start: index * 3,
+      end: (index + 1) * 3,
+      duration: 3
+    }))
+  ];
+  const windows = context.buildFragmentedMp4Windows(fragments, 180);
+  assert.equal(windows.length, 2);
+  assert.equal(windows[0].mediaFragments.length, 60);
+  assert.equal(windows[1].mediaFragments.length, 35);
+  assert.equal(windows.every(window => window.initFragments.length === 1), true);
+  const chunks = context.normalizeFragmentedWindowAudioChunks({
+    file: { name: "window.mp3", cacheUrl: "https://fuguang.local/window.mp3", bytes: 10 },
+    bytes: 10
+  }, windows[1], 1);
+  assert.equal(chunks[0].index, 1);
+  assert.equal(chunks[0].start, windows[1].start);
+  assert.equal(chunks[0].end, windows[1].end);
+  assert.equal(chunks[0].logical, true);
+}
+
+{
+  const originalResetWebFfmpegFrame = context.resetWebFfmpegFrame;
+  let resetCalls = 0;
+  context.resetWebFfmpegFrame = () => {
+    resetCalls += 1;
+  };
+  try {
+    assert.deepEqual(JSON.parse(JSON.stringify(context.cancelOffscreenJob("inactive-job"))), { ok: true, cancelled: true });
+    assert.equal(resetCalls, 0, "取消没有在途 offscreen 操作的任务不能重置共享 FFmpeg");
+  } finally {
+    context.resetWebFfmpegFrame = originalResetWebFfmpegFrame;
+  }
+}
+
+{
+  const originalResetWebFfmpegFrame = context.resetWebFfmpegFrame;
+  let resetCalls = 0;
+  context.resetWebFfmpegFrame = () => {
+    resetCalls += 1;
+  };
+  context.cancelledJobController = new AbortController();
+  context.pendingOtherJobReject = () => {};
+  vm.runInContext(`
+    offscreenJobAbortControllers.set("cancelled-job", new Set([cancelledJobController]));
+    webFfmpegPending.set("other-job-request", { jobId: "other-job", reject: pendingOtherJobReject });
+  `, context);
+  try {
+    context.cancelOffscreenJob("cancelled-job");
+    assert.equal(context.cancelledJobController.signal.aborted, true);
+    assert.equal(resetCalls, 0, "取消任务不能重置其他任务正在使用的共享 FFmpeg");
+    assert.equal(vm.runInContext("webFfmpegPending.has('other-job-request')", context), true);
+  } finally {
+    vm.runInContext("webFfmpegPending.clear(); offscreenJobAbortControllers.clear()", context);
+    delete context.cancelledJobController;
+    delete context.pendingOtherJobReject;
+    context.resetWebFfmpegFrame = originalResetWebFfmpegFrame;
+  }
+}
+
+{
+  const originalResetWebFfmpegFrame = context.resetWebFfmpegFrame;
+  let resetCalls = 0;
+  context.resetWebFfmpegFrame = () => {
+    resetCalls += 1;
+  };
+  context.ownedJobController = new AbortController();
+  context.pendingOwnedJobReject = () => {};
+  vm.runInContext(`
+    offscreenJobAbortControllers.set("owned-job", new Set([ownedJobController]));
+    webFfmpegPending.set("owned-job-request", { jobId: "owned-job", reject: pendingOwnedJobReject });
+  `, context);
+  try {
+    context.cancelOffscreenJob("owned-job");
+    assert.equal(context.ownedJobController.signal.aborted, true);
+    assert.equal(resetCalls, 1, "取消任务应重置该任务自己正在使用的 FFmpeg");
+  } finally {
+    vm.runInContext("webFfmpegPending.clear(); offscreenJobAbortControllers.clear()", context);
+    delete context.ownedJobController;
+    delete context.pendingOwnedJobReject;
+    context.resetWebFfmpegFrame = originalResetWebFfmpegFrame;
+  }
+}
+
+{
+  let operationSignal = null;
+  const running = context.runOffscreenJobOperation({ jobId: "cancel-test" }, async message => {
+    operationSignal = message.abortSignal;
+    await new Promise((resolve, reject) => {
+      message.abortSignal.addEventListener("abort", () => reject(message.abortSignal.reason), { once: true });
+    });
+  });
+  await Promise.resolve();
+  assert.equal(operationSignal.aborted, false);
+  assert.deepEqual(JSON.parse(JSON.stringify(context.cancelOffscreenJob("cancel-test"))), { ok: true, cancelled: true });
+  await assert.rejects(running, /任务已停止/);
+  assert.equal(operationSignal.aborted, true);
+}
+
+{
+  let oldSignal = null;
+  let nextSignal = null;
+  const waitForCancellation = message => new Promise((resolve, reject) => {
+    message.abortSignal.addEventListener("abort", () => reject(message.abortSignal.reason), { once: true });
+  });
+  const oldRun = context.runOffscreenJobOperation({ jobId: "retry-job", runToken: "run-old" }, async message => {
+    oldSignal = message.abortSignal;
+    await waitForCancellation(message);
+  });
+  const nextRun = context.runOffscreenJobOperation({ jobId: "retry-job", runToken: "run-next" }, async message => {
+    nextSignal = message.abortSignal;
+    await waitForCancellation(message);
+  });
+  const nextSettled = nextRun.then(
+    value => ({ value }),
+    error => ({ error })
+  );
+  await Promise.resolve();
+  context.cancelOffscreenJob("retry-job", "run-old");
+  await assert.rejects(oldRun, /任务已停止/);
+  assert.equal(oldSignal.aborted, true);
+  assert.equal(nextSignal.aborted, false, "a late cancel from an old runToken must not abort the replacement run");
+  context.cancelOffscreenJob("retry-job", "run-next");
+  assert.match(String((await nextSettled).error?.message || ""), /任务已停止/);
+}
+
+{
+  let requestOptions = null;
+  const extractor = context.FuguangLocalMediaExtractor.createLocalMediaExtractor({
+    reportWebFfmpegExtractionProgress: () => {},
+    requestWebFfmpeg: async (_payload, _transfer, _onProgress, options) => {
+      requestOptions = options;
+      return {};
+    },
+    persistWebFfmpegAudioResult: async () => ({
+      file: { name: "chunk.mp3", cacheUrl: "https://fuguang.local/chunk.mp3", bytes: 1 },
+      bytes: 1
+    }),
+    offsetSpeechIntervals: intervals => intervals
+  });
+  await extractor.extractLocalMediaAudioWindowWithWebFfmpeg({
+    jobId: "local-job",
+    runToken: "run-current",
+    abortSignal: new AbortController().signal,
+    cacheNamespace: "local-job"
+  }, {
+    buffer: new Uint8Array([1]).buffer,
+    name: "chunk.m4a",
+    mime: "audio/mp4"
+  }, {
+    start: 0,
+    end: 10,
+    duration: 10,
+    coreStart: 0,
+    coreEnd: 10,
+    coreDuration: 10
+  }, 0, 1);
+  assert.equal(requestOptions?.jobId, "local-job");
+  assert.equal(requestOptions?.runToken, "run-current", "local/range FFmpeg work must use the run-tokenized cancellation key");
+}
 
 {
   const order = [];
@@ -118,6 +290,35 @@ vm.runInContext(source, context, { filename: "offscreen.js" });
     "recovered",
     "单次 FFmpeg 操作失败后不能阻塞后续操作"
   );
+}
+
+{
+  const originalEnsureWebFfmpegFrame = context.ensureWebFfmpegFrame;
+  const originalWarmWebFfmpegFrame = context.warmWebFfmpegFrame;
+  const originalRequestWebFfmpegNow = context.requestWebFfmpegNow;
+  let ensureCalls = 0;
+  let warmCalls = 0;
+  context.ensureWebFfmpegFrame = async url => {
+    ensureCalls += 1;
+    assert.equal(url, "chrome-extension://fuguang-test/web-ffmpeg/index.html");
+  };
+  context.warmWebFfmpegFrame = () => {
+    warmCalls += 1;
+  };
+  context.requestWebFfmpegNow = async payload => payload.id;
+  vm.runInContext("webFfmpegFrame = null", context);
+  try {
+    assert.equal(await context.requestWebFfmpegForJob({
+      jobId: "next-job",
+      webFfmpegUrl: "chrome-extension://fuguang-test/web-ffmpeg/index.html"
+    }, { id: "next-request" }), "next-request");
+    assert.equal(ensureCalls, 1, "a queued job must rebuild the frame after the previous job resets it");
+    assert.equal(warmCalls, 1);
+  } finally {
+    context.ensureWebFfmpegFrame = originalEnsureWebFfmpegFrame;
+    context.warmWebFfmpegFrame = originalWarmWebFfmpegFrame;
+    context.requestWebFfmpegNow = originalRequestWebFfmpegNow;
+  }
 }
 
 {
@@ -176,6 +377,26 @@ vm.runInContext(source, context, { filename: "offscreen.js" });
     mime: "video/mp4"
   }), false);
   assert.equal(context.shouldUseLocalMediaChunkedExtraction({
+    sourceUrl: "https://cdn.example.test/movie.mp4",
+    mime: "video/mp4",
+    remoteRangeExtraction: true
+  }), true);
+  assert.equal(context.shouldUseRangeDirectMediaExtraction({
+    sourceUrl: "https://cdn.example.test/movie.mp4",
+    mime: "video/mp4",
+    duration: 601
+  }), true);
+  assert.equal(context.shouldUseRangeDirectMediaExtraction({
+    sourceUrl: "https://cdn.example.test/movie.mp4",
+    mime: "video/mp4",
+    duration: 30
+  }), false);
+  assert.equal(context.shouldUseRangeDirectMediaExtraction({
+    sourceUrl: "https://cdn.example.test/master.m3u8",
+    ext: "m3u8",
+    duration: 3600
+  }), false);
+  assert.equal(context.shouldUseLocalMediaChunkedExtraction({
     sourceUrl: "file:///Volumes/share/playlist.m3u8",
     ext: "m3u8"
   }), false);
@@ -187,6 +408,66 @@ vm.runInContext(source, context, { filename: "offscreen.js" });
     sourceUrl: "file:///Volumes/share/fragments.mp4",
     kind: "mse-fragments"
   }), false);
+}
+
+{
+  class FakeUrlSource {
+    constructor(url, options) {
+      this.url = url;
+      this.options = options;
+    }
+  }
+  class FakeInput {
+    constructor(options) {
+      this.options = options;
+    }
+  }
+  const result = context.createRemoteMediaMediabunnyInput(
+    "https://cdn.example.test/movie.mp4",
+    { UrlSource: FakeUrlSource, Input: FakeInput, ALL_FORMATS: ["all"] },
+    {
+      sourceUrl: "https://cdn.example.test/movie.mp4",
+      sourceBytes: 70 * 1024 * 1024,
+      requestHeaders: { authorization: "Bearer media" }
+    }
+  );
+  assert.equal(result.sourceMode, "url-range");
+  assert.equal(result.size, 70 * 1024 * 1024);
+  assert.equal(result.input.options.source.url, "https://cdn.example.test/movie.mp4");
+  assert.equal(result.input.options.source.options.maxCacheSize, 16 * 1024 * 1024);
+  assert.equal(result.input.options.source.options.parallelism, 2);
+  assert.equal(result.input.options.source.options.requestInit.headers.authorization, "Bearer media");
+  assert.equal(result.input.options.source.options.requestInit.redirect, "error");
+}
+
+{
+  let constructed = 0;
+  class FakeUrlSource {
+    constructor() {
+      constructed += 1;
+    }
+  }
+  class FakeInput {}
+  assert.throws(
+    () => context.createRemoteMediaMediabunnyInput(
+      "http://127.0.0.1/private.mp4",
+      { UrlSource: FakeUrlSource, Input: FakeInput, ALL_FORMATS: ["all"] },
+      { sourceUrl: "http://127.0.0.1/private.mp4", sourceBytes: 70 * 1024 * 1024 }
+    ),
+    /未授权的私有网络/
+  );
+  assert.equal(constructed, 0, "an unobserved private Range target must be rejected before UrlSource can fetch");
+
+  assert.doesNotThrow(() => context.createRemoteMediaMediabunnyInput(
+    "http://192.168.1.20/media/movie.mp4",
+    { UrlSource: FakeUrlSource, Input: FakeInput, ALL_FORMATS: ["all"] },
+    {
+      sourceUrl: "http://192.168.1.20/media/movie.mp4",
+      sourceBytes: 70 * 1024 * 1024,
+      allowPrivateNetworkMediaOrigin: true
+    }
+  ));
+  assert.equal(constructed, 1, "a browser-observed private Range target remains allowed");
 }
 
 {
@@ -790,6 +1071,7 @@ audio-stream-inf.m3u8
   });
 
   const fetchOptions = context.buildMediaFetchOptions({
+    sourceUrl: "https://cdn.example.test/video.mp4",
     requestHeaders: {
       authorization: "Bearer media-token",
       cookie: "sid=secret",
@@ -801,6 +1083,7 @@ audio-stream-inf.m3u8
     }
   });
   assert.equal(fetchOptions.credentials, "include");
+  assert.equal(fetchOptions.redirect, "error", "privileged media fetches must never auto-follow redirects");
   assert.deepEqual(JSON.parse(JSON.stringify(fetchOptions.headers)), {
     authorization: "Bearer media-token"
   });
@@ -814,6 +1097,56 @@ audio-stream-inf.m3u8
 
   const unchangedFetchOptions = context.buildFetchOptionsWithByteRange(fetchOptions, null);
   assert.equal(unchangedFetchOptions, fetchOptions);
+
+  assert.doesNotThrow(() => context.assertMediaFetchTargetAllowed("https://cdn.example.test/segment.ts", fetchOptions));
+  assert.throws(
+    () => context.assertMediaFetchTargetAllowed("http://127.0.0.1/admin", fetchOptions),
+    /未授权的私有网络/
+  );
+
+  const observedPrivateOptions = context.buildMediaFetchOptions({
+    sourceUrl: "http://192.168.1.20/media/master.m3u8",
+    allowPrivateNetworkMediaOrigin: true
+  });
+  assert.doesNotThrow(() => context.assertMediaFetchTargetAllowed(
+    "http://192.168.1.20/media/segment.ts",
+    observedPrivateOptions
+  ));
+  assert.throws(
+    () => context.assertMediaFetchTargetAllowed("http://192.168.1.21/admin", observedPrivateOptions),
+    /未授权的私有网络/
+  );
+}
+
+{
+  const originalFetch = context.fetch;
+  const publicOptions = context.buildMediaFetchOptions({
+    sourceUrl: "https://cdn.example.test/master.m3u8"
+  });
+  let fetchCalls = 0;
+  context.fetch = async () => {
+    fetchCalls += 1;
+    return {
+      ok: true,
+      url: "http://127.0.0.1/private/master.m3u8",
+      text: async () => "#EXTM3U"
+    };
+  };
+  try {
+    await assert.rejects(
+      () => context.fetchText("http://127.0.0.1/private/master.m3u8", publicOptions),
+      /未授权的私有网络/
+    );
+    assert.equal(fetchCalls, 0, "a derived private URL must be rejected before fetch");
+
+    await assert.rejects(
+      () => context.fetchText("https://cdn.example.test/redirect.m3u8", publicOptions),
+      /未授权的私有网络/
+    );
+    assert.equal(fetchCalls, 1, "a public response redirected to a private URL must be rejected before reading its body");
+  } finally {
+    context.fetch = originalFetch;
+  }
 }
 
 {

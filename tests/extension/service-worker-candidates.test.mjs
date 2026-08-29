@@ -4,7 +4,39 @@ import vm from "node:vm";
 
 const webNavigationCommittedListeners = [];
 const webNavigationHistoryListeners = [];
+const webRequestBeforeSendHeadersListeners = [];
+const webRequestHeadersReceivedListeners = [];
+const runtimeConnectListeners = [];
+const taskRuntimePortListeners = [];
+const taskRuntimePortDisconnectListeners = [];
+const taskRuntimeSent = [];
+const runtimeMessages = [];
+let localStorageState = {};
+const webNavigationFrames = new Map();
 const addListener = () => {};
+const taskRuntimePort = {
+  name: "fuguang-task-runtime-v1",
+  onMessage: { addListener: listener => taskRuntimePortListeners.push(listener) },
+  onDisconnect: { addListener: listener => taskRuntimePortDisconnectListeners.push(listener) },
+  postMessage(message) {
+    taskRuntimeSent.push(message);
+    Promise.resolve().then(() => {
+      for (const listener of taskRuntimePortListeners) {
+        listener({
+          type: "FUGUANG_TASK_RUNTIME_ACK",
+          commandId: message.commandId,
+          accepted: true,
+          shadow: message.type === "FUGUANG_TASK_RUNTIME_OBSERVE_JOB"
+        });
+      }
+    });
+  },
+  disconnect() {
+    for (const listener of taskRuntimePortDisconnectListeners) {
+      listener();
+    }
+  }
+};
 const chrome = {
   action: { onClicked: { addListener } },
   alarms: {
@@ -12,13 +44,44 @@ const chrome = {
     create: async () => {}
   },
   offscreen: { hasDocument: async () => false, createDocument: async () => {} },
-  runtime: { getURL: value => `chrome-extension://test-extension/${value}`, getContexts: async () => [], onMessage: { addListener }, sendMessage: async () => ({}) },
+  runtime: {
+    getURL: value => `chrome-extension://test-extension/${value}`,
+    getContexts: async () => [],
+    onMessage: { addListener },
+    onConnect: { addListener: listener => runtimeConnectListeners.push(listener) },
+    sendMessage: async message => {
+      runtimeMessages.push(message);
+      return {};
+    },
+    connect: () => {
+      Promise.resolve().then(() => {
+        for (const listener of taskRuntimePortListeners) {
+          listener({ type: "FUGUANG_TASK_RUNTIME_READY", protocolVersion: 1 });
+        }
+      });
+      return taskRuntimePort;
+    }
+  },
   sidePanel: { setPanelBehavior: async () => {}, open: async () => {} },
   storage: {
     local: {
-      get: async () => ({}),
-      set: async () => {},
-      remove: async () => {},
+      get: async keys => {
+        if (keys == null) {
+          return structuredClone(localStorageState);
+        }
+        const names = Array.isArray(keys) ? keys : [keys];
+        return Object.fromEntries(names
+          .filter(name => Object.hasOwn(localStorageState, name))
+          .map(name => [name, structuredClone(localStorageState[name])]));
+      },
+      set: async values => {
+        Object.assign(localStorageState, structuredClone(values || {}));
+      },
+      remove: async keys => {
+        for (const key of Array.isArray(keys) ? keys : [keys]) {
+          delete localStorageState[key];
+        }
+      },
       setAccessLevel: async () => {}
     },
     sync: {
@@ -37,6 +100,7 @@ const chrome = {
     onRemoved: { addListener }
   },
   webNavigation: {
+    getFrame: async ({ tabId, frameId }) => webNavigationFrames.get(`${tabId}:${frameId}`) || null,
     getAllFrames: async () => [],
     onCommitted: { addListener: listener => webNavigationCommittedListeners.push(listener) },
     onHistoryStateUpdated: { addListener: listener => webNavigationHistoryListeners.push(listener) },
@@ -44,9 +108,9 @@ const chrome = {
   },
   webRequest: {
     onBeforeRequest: { addListener },
-    onBeforeSendHeaders: { addListener },
+    onBeforeSendHeaders: { addListener: listener => webRequestBeforeSendHeadersListeners.push(listener) },
     onCompleted: { addListener },
-    onHeadersReceived: { addListener },
+    onHeadersReceived: { addListener: listener => webRequestHeadersReceivedListeners.push(listener) },
     onErrorOccurred: { addListener },
     OnBeforeSendHeadersOptions: { EXTRA_HEADERS: "extraHeaders" }
   }
@@ -64,7 +128,6 @@ class FakeResponse {
     return this.body;
   }
 }
-
 const fakeCaches = new Map();
 const caches = {
   async open(name) {
@@ -109,6 +172,8 @@ const context = vm.createContext({
   Blob,
   FormData,
   AbortController,
+  crypto: globalThis.crypto,
+  structuredClone,
   fetch: async () => ({ ok: true, json: async () => ({}), text: async () => "" }),
   setTimeout,
   clearTimeout,
@@ -125,6 +190,7 @@ const asrPostprocessSource = fs.readFileSync(new URL("../../extension/src/backgr
   .replace("export const FuguangBrowserAsrPostprocess =", "var FuguangBrowserAsrPostprocess =");
 const mediaAssetModelSource = fs.readFileSync(new URL("../../extension/src/background/media-asset-model.js", import.meta.url), "utf8")
   .replace("export const FuguangMediaAssetModel =", "var FuguangMediaAssetModel =");
+const mediaNetworkPolicySource = fs.readFileSync(new URL("../../extension/src/shared/media-network-policy.js", import.meta.url), "utf8");
 const hlsUrlHelpersSource = fs.readFileSync(new URL("../../extension/src/shared/hls-url-helpers.js", import.meta.url), "utf8")
   .replace("export const FuguangHlsUrlHelpers =", "var FuguangHlsUrlHelpers =");
 const hlsManifestParserSource = fs.readFileSync(new URL("../../extension/src/background/hls-manifest-parser.js", import.meta.url), "utf8")
@@ -147,6 +213,7 @@ const mediaSourceResolversSource = fs.readFileSync(new URL("../../extension/src/
   .replace('import { FuguangYoutubeMediaAdapter } from "./site-adapters/youtube-media-adapter.js";\n\n', "")
   .replace("export const FuguangMediaSourceResolvers =", "var FuguangMediaSourceResolvers =");
 const mediaCandidatesSource = fs.readFileSync(new URL("../../extension/src/background/browser-media-candidates.js", import.meta.url), "utf8")
+  .replace('import "../shared/media-network-policy.js";\n', "")
   .replace('import { FuguangMediaAssetModel } from "./media-asset-model.js";\n\n', "")
   .replace('import { FuguangMediaAssetModel } from "./media-asset-model.js";\n', "")
   .replace('import { FuguangMediaSourceResolvers } from "./media-source-resolvers.js";\n\n', "")
@@ -156,15 +223,26 @@ const modelProfilesSource = fs.readFileSync(new URL("../../extension/src/backgro
   .replace('import { FuguangBrowserAsrProvider } from "./browser-asr-provider.js";\n\n', "")
   .replace("export const FuguangBrowserModelProfiles =", "var FuguangBrowserModelProfiles =");
 const funasrProviderSource = fs.readFileSync(new URL("../../extension/src/background/browser-funasr-provider.js", import.meta.url), "utf8")
+  .replace('import { FuguangRequestSemaphore } from "../shared/request-semaphore.js";\n\n', "")
   .replace("export const FuguangBrowserFunAsrProvider =", "var FuguangBrowserFunAsrProvider =");
 const providerSource = fs.readFileSync(new URL("../../extension/src/background/browser-translation-provider.js", import.meta.url), "utf8")
-  .replace('import { FuguangBrowserLanguage } from "./browser-language.js";\n\n', "")
+  .replace('import { FuguangBrowserLanguage } from "./browser-language.js";\n', "")
+  .replace('import { FuguangRequestSemaphore } from "../shared/request-semaphore.js";\n\n', "")
   .replace("export const FuguangBrowserTranslationProvider =", "var FuguangBrowserTranslationProvider =");
 const pipelineSource = fs.readFileSync(new URL("../../extension/src/background/browser-translation-pipeline.js", import.meta.url), "utf8")
   .replace('import { FuguangBrowserTranslationProvider } from "./browser-translation-provider.js";\n\n', "")
   .replace("export const FuguangBrowserTranslationPipeline =", "var FuguangBrowserTranslationPipeline =");
 const mediaHeaderRulesSource = fs.readFileSync(new URL("../../extension/src/background/media-header-rules.js", import.meta.url), "utf8")
   .replace("export const FuguangMediaHeaderRules =", "var FuguangMediaHeaderRules =");
+const jobContractSource = fs.readFileSync(new URL("../../extension/src/shared/job-contract.js", import.meta.url), "utf8")
+  .replace("export const FuguangJobContract =", "var FuguangJobContract =");
+const taskRuntimeProtocolSource = fs.readFileSync(new URL("../../extension/src/shared/task-runtime-protocol.js", import.meta.url), "utf8")
+  .replace("export const FuguangTaskRuntimeProtocol =", "var FuguangTaskRuntimeProtocol =");
+const requestSemaphoreSource = fs.readFileSync(new URL("../../extension/src/shared/request-semaphore.js", import.meta.url), "utf8")
+  .replace("export const FuguangRequestSemaphore =", "var FuguangRequestSemaphore =");
+const jobStoreSource = fs.readFileSync(new URL("../../extension/src/background/job-store.js", import.meta.url), "utf8")
+  .replace('import { FuguangJobContract } from "../shared/job-contract.js";\n\n', "")
+  .replace("export const FuguangJobStore =", "var FuguangJobStore =");
 const source = fs.readFileSync(new URL("../../extension/src/background/service-worker.js", import.meta.url), "utf8")
   .replace('import { FuguangBrowserAsrProvider } from "./browser-asr-provider.js";\n', "")
   .replace('import { FuguangBrowserAsrPostprocess } from "./browser-asr-postprocess.js";\n', "")
@@ -173,7 +251,11 @@ const source = fs.readFileSync(new URL("../../extension/src/background/service-w
   .replace('import { FuguangBrowserModelProfiles } from "./browser-model-profiles.js";\n', "")
   .replace('import { FuguangBrowserFunAsrProvider } from "./browser-funasr-provider.js";\n', "")
   .replace('import { FuguangBrowserTranslationPipeline } from "./browser-translation-pipeline.js";\n', "")
-  .replace('import { FuguangMediaHeaderRules } from "./media-header-rules.js";\n\n', "");
+  .replace('import { FuguangJobStore } from "./job-store.js";\n', "")
+  .replace('import { FuguangMediaHeaderRules } from "./media-header-rules.js";\n', "")
+  .replace('import { FuguangJobContract } from "../shared/job-contract.js";\n', "")
+  .replace('import { FuguangTaskRuntimeProtocol } from "../shared/task-runtime-protocol.js";\n', "")
+  .replace('import { FuguangRequestSemaphore } from "../shared/request-semaphore.js";\n\n', "");
 
 vm.runInContext(languageSource, context, { filename: "browser-language.js" });
 Object.assign(context, context.FuguangBrowserLanguage);
@@ -183,6 +265,7 @@ vm.runInContext(asrPostprocessSource, context, { filename: "browser-asr-postproc
 Object.assign(context, context.FuguangBrowserAsrPostprocess);
 vm.runInContext(mediaAssetModelSource, context, { filename: "media-asset-model.js" });
 Object.assign(context, context.FuguangMediaAssetModel);
+vm.runInContext(mediaNetworkPolicySource, context, { filename: "media-network-policy.js" });
 vm.runInContext(hlsUrlHelpersSource, context, { filename: "hls-url-helpers.js" });
 Object.assign(context, context.FuguangHlsUrlHelpers);
 vm.runInContext(hlsManifestParserSource, context, { filename: "hls-manifest-parser.js" });
@@ -201,6 +284,7 @@ vm.runInContext(mediaCandidatesSource, context, { filename: "browser-media-candi
 Object.assign(context, context.FuguangBrowserMediaCandidates);
 vm.runInContext(modelProfilesSource, context, { filename: "browser-model-profiles.js" });
 Object.assign(context, context.FuguangBrowserModelProfiles);
+vm.runInContext(requestSemaphoreSource, context, { filename: "request-semaphore.js" });
 vm.runInContext(funasrProviderSource, context, { filename: "browser-funasr-provider.js" });
 Object.assign(context, context.FuguangBrowserFunAsrProvider);
 vm.runInContext(providerSource, context, { filename: "browser-translation-provider.js" });
@@ -208,7 +292,1188 @@ Object.assign(context, context.FuguangBrowserTranslationProvider);
 vm.runInContext(pipelineSource, context, { filename: "browser-translation-pipeline.js" });
 Object.assign(context, context.FuguangBrowserTranslationPipeline);
 vm.runInContext(mediaHeaderRulesSource, context, { filename: "media-header-rules.js" });
+vm.runInContext(jobContractSource, context, { filename: "job-contract.js" });
+vm.runInContext(taskRuntimeProtocolSource, context, { filename: "task-runtime-protocol.js" });
+vm.runInContext(jobStoreSource, context, { filename: "job-store.js" });
+context.FuguangJobStore.create = context.FuguangJobStore.createMemory;
 vm.runInContext(source, context, { filename: "service-worker.js" });
+
+{
+  const now = Date.now();
+  const expiredAt = now - (8 * 24 * 60 * 60 * 1000);
+  const snapshots = [
+    {
+      job: {
+        id: "expired-terminal-job",
+        runToken: "expired-terminal-run",
+        status: "completed",
+        stage: "completed",
+        activeKey: "",
+        createdAt: expiredAt,
+        updatedAt: expiredAt
+      },
+      chunks: [{
+        key: "expired-terminal-job:expired-terminal-run:0",
+        jobId: "expired-terminal-job",
+        runToken: "expired-terminal-run",
+        index: 0
+      }]
+    },
+    {
+      job: {
+        id: "expired-interrupted-job",
+        runToken: "expired-interrupted-run",
+        status: "interrupted",
+        stage: "interrupted",
+        activeKey: "",
+        createdAt: expiredAt,
+        updatedAt: now
+      },
+      chunks: [{
+        key: "expired-interrupted-job:expired-interrupted-run:0",
+        jobId: "expired-interrupted-job",
+        runToken: "expired-interrupted-run",
+        index: 0
+      }]
+    }
+  ];
+  context.maintenanceSnapshots = snapshots;
+  await vm.runInContext("Promise.all(maintenanceSnapshots.map(snapshot => browserJobStore.putSnapshot(snapshot)))", context);
+  assert.deepEqual(
+    JSON.parse(JSON.stringify(await context.requestBrowserJobLedgerMaintenance(now))),
+    { deletedTerminalJobs: 1, deletedInterruptedJobs: 1 }
+  );
+  assert.equal(await vm.runInContext("browserJobStore.getJob('expired-terminal-job')", context), null);
+  assert.equal(await vm.runInContext("browserJobStore.getJob('expired-interrupted-job')", context), null);
+  assert.deepEqual(JSON.parse(JSON.stringify(await vm.runInContext("browserJobStore.getChunks('expired-terminal-job')", context))), []);
+  assert.deepEqual(JSON.parse(JSON.stringify(await vm.runInContext("browserJobStore.getChunks('expired-interrupted-job')", context))), []);
+  delete context.maintenanceSnapshots;
+}
+
+{
+  const incoming = [];
+  const sent = [];
+  const port = {
+    name: "fuguang-sidepanel-status-v1",
+    onMessage: { addListener: listener => incoming.push(listener) },
+    onDisconnect: { addListener: () => {} },
+    postMessage: message => sent.push(message)
+  };
+  runtimeConnectListeners[0](port);
+  incoming[0]({ type: "FUGUANG_SIDEPANEL_SUBSCRIBE", tabId: 91 });
+  context.setTabStatus(91, {
+    preload: "running",
+    page: { url: "https://example.test/watch/91" },
+    preloadJob: {
+      id: "summary-job",
+      runToken: "summary-run",
+      status: "running",
+      stage: "translation",
+      createdAt: 1,
+      updatedAt: 2,
+      extract: { status: "completed", progress: 100 },
+      translation: {
+        status: "running",
+        chunksTotal: 1,
+        chunkStatuses: [{ index: 0, stage: "translation" }],
+        transcript: { source: [{ text: "must not be pushed" }] },
+        vttText: "WEBVTT"
+      }
+    }
+  });
+  context.publishSidepanelStatusChange(91);
+  assert.equal(sent.length, 1);
+  assert.equal(sent[0].type, "FUGUANG_SIDEPANEL_JOB_CHANGED");
+  assert.equal(sent[0].job.id, "summary-job");
+  assert.equal(sent[0].job.translation.translating, 1);
+  assert.equal(JSON.stringify(sent[0]).includes("must not be pushed"), false);
+  assert.equal(JSON.stringify(sent[0]).includes("chunkStatuses"), false);
+  assert.equal(JSON.stringify(sent[0]).includes("WEBVTT"), false);
+}
+
+{
+  const originalFetch = context.fetch;
+  const controller = new AbortController();
+  let requestSignal = null;
+  context.fetch = async (_url, init = {}) => {
+    requestSignal = init.signal;
+    return new Promise((resolve, reject) => {
+      init.signal?.addEventListener("abort", () => {
+        const error = new Error("aborted");
+        error.name = "AbortError";
+        reject(error);
+      }, { once: true });
+    });
+  };
+  try {
+    const request = context.requestBrowserAsrTranscription({
+      endpoint: "https://asr.example.test/v1/audio/transcriptions",
+      timeoutMs: 60_000,
+      asrConfig: { providerType: "openai", model: "whisper-1", apiKey: "test", vadFilter: "off" },
+      supportedRequestFields: new Set(),
+      effectiveChunk: { index: 0, start: 0, end: 1, file: { name: "chunk.mp3", mime: "audio/mpeg" } },
+      fileBuffer: new Uint8Array([0x49, 0x44, 0x33, 0]).buffer,
+      fileName: "chunk.mp3",
+      clipTimestamps: "",
+      matureAsrPlan: {},
+      signal: controller.signal
+    });
+    for (let index = 0; index < 4 && !requestSignal; index += 1) {
+      await Promise.resolve();
+    }
+    assert.equal(requestSignal?.aborted, false);
+    controller.abort(new Error("任务已停止。"));
+    await assert.rejects(request, error => error?.name === "AbortError" && /任务已停止/.test(error.message));
+    assert.equal(requestSignal.aborted, true);
+  } finally {
+    context.fetch = originalFetch;
+  }
+}
+
+{
+  const originalGetContexts = chrome.runtime.getContexts;
+  const originalCreateDocument = chrome.offscreen.createDocument;
+  const originalCloseDocument = chrome.offscreen.closeDocument;
+  let createCalls = 0;
+  let closeCalls = 0;
+  let releaseCreate;
+  const createGate = new Promise(resolve => {
+    releaseCreate = resolve;
+  });
+  chrome.runtime.getContexts = async () => [];
+  chrome.offscreen.createDocument = async () => {
+    createCalls += 1;
+    await createGate;
+  };
+  try {
+    const first = context.ensureOffscreenDocument();
+    const second = context.ensureOffscreenDocument();
+    await Promise.resolve();
+    releaseCreate();
+    await Promise.all([first, second]);
+    assert.equal(createCalls, 1);
+
+    chrome.runtime.getContexts = async () => [{ contextType: "OFFSCREEN_DOCUMENT" }];
+    chrome.offscreen.closeDocument = async () => {
+      closeCalls += 1;
+    };
+    assert.deepEqual(JSON.parse(JSON.stringify(await context.closeOffscreenDocumentIfIdle())), { closed: true });
+    assert.equal(closeCalls, 1);
+  } finally {
+    chrome.runtime.getContexts = originalGetContexts;
+    chrome.offscreen.createDocument = originalCreateDocument;
+    chrome.offscreen.closeDocument = originalCloseDocument;
+  }
+}
+
+{
+  const originalTranscribeBrowserAudioChunk = context.transcribeBrowserAudioChunk;
+  const originalTranslateBrowserSegments = context.translateBrowserSegments;
+  const record = {
+    tabId: 780,
+    runToken: "run-offscreen-overlap",
+    pipeline: "browser",
+    startedAt: Date.now(),
+    cancelled: false,
+    abortController: new AbortController(),
+    candidate: { url: "https://media.example.test/offscreen-overlap.mp3", kind: "audio", ext: "mp3" },
+    metadata: { pageUrl: "https://example.test/watch/offscreen-overlap", duration: 30 },
+    modelConfig: { asr: {}, translation: {}, targetLanguage: "zh-CN", asrWorkers: 1, workers: 1, chunkSeconds: 900 },
+    sourceSegmentsByChunk: new Map(),
+    translatedSegmentsByChunk: new Map(),
+    job: {
+      id: "job-offscreen-overlap",
+      runToken: "run-offscreen-overlap",
+      pipeline: "browser",
+      status: "running",
+      stage: "asr",
+      createdAt: 100,
+      updatedAt: 200,
+      extract: { status: "completed", progress: 100, duration: 30 },
+      translation: { status: "running", chunksTotal: 0, chunksDone: 0, chunkStatuses: [] }
+    }
+  };
+  context.enqueueBrowserLogicalAudioChunk(record, {
+    index: 0,
+    start: 0,
+    end: 30,
+    coreStart: 0,
+    coreEnd: 30,
+    duration: 30,
+    file: { name: "offscreen-overlap.mp3", mime: "audio/mpeg", buffer: new ArrayBuffer(1) }
+  });
+  context.closeAllBrowserTranslationGroups(record);
+  let transcribeCalls = 0;
+  let markStarted;
+  let releaseTranscription;
+  const started = new Promise(resolve => {
+    markStarted = resolve;
+  });
+  const transcriptionGate = new Promise(resolve => {
+    releaseTranscription = resolve;
+  });
+  context.transcribeBrowserAudioChunk = async () => {
+    transcribeCalls += 1;
+    markStarted();
+    await transcriptionGate;
+    return [{ start: 1, end: 2, text: "source" }];
+  };
+  context.translateBrowserSegments = async segments => segments.map(segment => ({ ...segment, text: "译文" }));
+  context.offscreenOverlapRecord = record;
+  vm.runInContext("browserPreloadJobs.set('job-offscreen-overlap', offscreenOverlapRecord)", context);
+  await vm.runInContext("browserJobStore.putSnapshot({ job: offscreenOverlapRecord.job, chunks: [] })", context);
+  const claim = await vm.runInContext("browserJobStore.claimRun('job-offscreen-overlap', 'run-offscreen-overlap', { ownerId: 'offscreen-overlap-owner', claimedAt: Date.now(), leaseDurationMs: 30000 })", context);
+  const message = {
+    jobId: record.job.id,
+    runToken: record.runToken,
+    executionOwnerId: "offscreen-overlap-owner",
+    executionEpoch: claim.job?.executionEpoch,
+    chunkIndex: 0
+  };
+  try {
+    const first = context.processOffscreenBrowserJobChunk(message);
+    await started;
+    const second = context.processOffscreenBrowserJobChunk(message);
+    await new Promise(resolve => setTimeout(resolve, 0));
+    assert.equal(transcribeCalls, 1, "overlapping owners must not submit the same paid chunk twice");
+    releaseTranscription();
+    const [, duplicate] = await Promise.all([first, second]);
+    assert.equal(Boolean(duplicate.duplicate || duplicate.inProgress), true);
+  } finally {
+    releaseTranscription();
+    await vm.runInContext("browserJobStore.deleteJob('job-offscreen-overlap')", context);
+    vm.runInContext("browserPreloadJobs.delete('job-offscreen-overlap')", context);
+    delete context.offscreenOverlapRecord;
+    context.transcribeBrowserAudioChunk = originalTranscribeBrowserAudioChunk;
+    context.translateBrowserSegments = originalTranslateBrowserSegments;
+  }
+}
+
+{
+  const originalTranscribeBrowserAudioChunk = context.transcribeBrowserAudioChunk;
+  const originalTranslateBrowserSegments = context.translateBrowserSegments;
+  const record = {
+    tabId: 1003,
+    runToken: "run-process-cas-race",
+    pipeline: "browser",
+    startedAt: Date.now(),
+    cancelled: false,
+    abortController: new AbortController(),
+    candidate: { url: "https://media.example.test/process-cas-race.mp3", kind: "audio", ext: "mp3" },
+    metadata: { pageUrl: "https://example.test/watch/process-cas-race", duration: 30 },
+    modelConfig: { asr: {}, translation: {}, targetLanguage: "zh-CN", asrWorkers: 1, workers: 1, chunkSeconds: 900 },
+    sourceSegmentsByChunk: new Map(),
+    translatedSegmentsByChunk: new Map(),
+    job: {
+      id: "job-process-cas-race",
+      runToken: "run-process-cas-race",
+      pipeline: "browser",
+      status: "running",
+      stage: "asr",
+      createdAt: 100,
+      updatedAt: 200,
+      extract: { status: "completed", progress: 100, duration: 30 },
+      translation: { status: "running", chunksTotal: 0, chunksDone: 0, chunkStatuses: [] }
+    }
+  };
+  context.enqueueBrowserLogicalAudioChunk(record, {
+    index: 0,
+    start: 0,
+    end: 30,
+    coreStart: 0,
+    coreEnd: 30,
+    duration: 30,
+    file: { name: "process-cas-race.mp3", mime: "audio/mpeg", cacheUrl: "https://fuguang.local/__fuguang_audio_cache/job-process-cas-race/0.mp3" }
+  });
+  context.closeAllBrowserTranslationGroups(record);
+  context.transcribeBrowserAudioChunk = async () => [{ start: 1, end: 2, text: "source" }];
+  context.translateBrowserSegments = async segments => segments.map(segment => ({ ...segment, text: "译文" }));
+  context.processCasRaceRecord = record;
+  vm.runInContext("browserPreloadJobs.set('job-process-cas-race', processCasRaceRecord)", context);
+  await vm.runInContext("browserJobStore.putSnapshot(createBrowserJobLedgerSnapshot(processCasRaceRecord))", context);
+  const firstClaim = await vm.runInContext("browserJobStore.claimRun('job-process-cas-race', 'run-process-cas-race', { ownerId: 'owner-a', claimedAt: Date.now(), leaseDurationMs: 30000 })", context);
+  context.processCasRaceOriginalPutOwned = await vm.runInContext("browserJobStore.putSnapshotIfOwned", context);
+  context.processCasRaceFirstEpoch = firstClaim.job.executionEpoch;
+  context.processCasRaceTakeover = null;
+  vm.runInContext(`browserJobStore.putSnapshotIfOwned = async (snapshot, ownership) => {
+    const completedAudio = (snapshot?.chunks || []).some(chunk => chunk.entryType === 'audio-chunk' && chunk.asrCompleted);
+    if (!processCasRaceTakeover && completedAudio) {
+      await browserJobStore.releaseRun('job-process-cas-race', 'run-process-cas-race', 'owner-a', Date.now(), processCasRaceFirstEpoch);
+      processCasRaceTakeover = await browserJobStore.claimRun('job-process-cas-race', 'run-process-cas-race', { ownerId: 'owner-b', claimedAt: Date.now(), leaseDurationMs: 30000 });
+    }
+    return processCasRaceOriginalPutOwned(snapshot, ownership);
+  }`, context);
+  try {
+    const staleProcess = await context.processOffscreenBrowserJobChunk({
+      jobId: record.job.id,
+      runToken: record.runToken,
+      executionOwnerId: "owner-a",
+      executionEpoch: firstClaim.job.executionEpoch,
+      chunkIndex: 0
+    });
+    const takeover = context.processCasRaceTakeover;
+    assert.equal(staleProcess.stale, true);
+    assert.equal(Boolean(record.audioChunks[0].asrCompleted), true, "the rejected old draft demonstrates the dirty chunk race");
+    const takeoverWork = await context.getOffscreenBrowserJobWork({
+      jobId: record.job.id,
+      runToken: record.runToken,
+      executionOwnerId: "owner-b",
+      executionEpoch: takeover.job.executionEpoch
+    });
+    const currentAsrCompleted = vm.runInContext("Boolean(browserPreloadJobs.get('job-process-cas-race').audioChunks[0].asrCompleted)", context);
+    assert.equal(takeoverWork.interrupted, true);
+    assert.equal(currentAsrCompleted, false, "the new owner must not inherit an uncommitted ASR completion flag");
+  } finally {
+    vm.runInContext("browserJobStore.putSnapshotIfOwned = processCasRaceOriginalPutOwned", context);
+    await vm.runInContext("browserJobStore.deleteJob('job-process-cas-race')", context);
+    vm.runInContext("browserPreloadJobs.delete('job-process-cas-race')", context);
+    delete context.processCasRaceRecord;
+    delete context.processCasRaceOriginalPutOwned;
+    delete context.processCasRaceFirstEpoch;
+    delete context.processCasRaceTakeover;
+    context.transcribeBrowserAudioChunk = originalTranscribeBrowserAudioChunk;
+    context.translateBrowserSegments = originalTranslateBrowserSegments;
+  }
+}
+
+{
+  const record = {
+    tabId: 1008,
+    runToken: "run-finalize-owned-write-error",
+    pipeline: "funasr",
+    startedAt: Date.now(),
+    cancelled: false,
+    abortController: new AbortController(),
+    candidate: { url: "https://media.example.test/finalize-owned-write-error.mp3", kind: "audio", ext: "mp3" },
+    metadata: { pageUrl: "https://example.test/watch/finalize-owned-write-error", duration: 30 },
+    modelConfig: { asr: {}, translation: {}, targetLanguage: "zh-CN", asrWorkers: 1, workers: 1, chunkSeconds: 900 },
+    sourceSegmentsByChunk: new Map([[0, [{ start: 1, end: 2, text: "source" }]]]),
+    translatedSegmentsByChunk: new Map([[0, [{ start: 1, end: 2, text: "译文" }]]]),
+    browserAsrDiagnosticsByChunk: new Map(),
+    audioChunks: [{
+      index: 0,
+      start: 0,
+      end: 30,
+      duration: 30,
+      asrCompleted: true,
+      file: { name: "finalize-owned-write-error.mp3", mime: "audio/mpeg", cacheUrl: "https://fuguang.local/__fuguang_audio_cache/job-finalize-owned-write-error/0.mp3" }
+    }],
+    job: {
+      id: "job-finalize-owned-write-error",
+      runToken: "run-finalize-owned-write-error",
+      pipeline: "funasr",
+      status: "running",
+      stage: "translation",
+      createdAt: 100,
+      updatedAt: 200,
+      extract: { status: "completed", progress: 100, duration: 30 },
+      translation: {
+        status: "running",
+        chunksTotal: 1,
+        chunksDone: 1,
+        chunkStatuses: [{ index: 0, stage: "completed", status: "完成", sourceCount: 1, translatedCount: 1 }]
+      }
+    }
+  };
+  context.finalizeOwnedWriteErrorRecord = record;
+  vm.runInContext("browserPreloadJobs.set('job-finalize-owned-write-error', finalizeOwnedWriteErrorRecord)", context);
+  await vm.runInContext("browserJobStore.putSnapshot(createBrowserJobLedgerSnapshot(finalizeOwnedWriteErrorRecord))", context);
+  const firstClaim = await vm.runInContext("browserJobStore.claimRun('job-finalize-owned-write-error', 'run-finalize-owned-write-error', { ownerId: 'owner-a', claimedAt: Date.now(), leaseDurationMs: 30000 })", context);
+  context.finalizeOwnedWriteErrorOriginalPutOwned = vm.runInContext("browserJobStore.putSnapshotIfOwned", context);
+  vm.runInContext("browserJobStore.putSnapshotIfOwned = async () => { throw new Error('injected-finalize-owned-write-error'); }", context);
+  let finalizeResult;
+  try {
+    finalizeResult = await context.finalizeOffscreenBrowserJob({
+      jobId: record.job.id,
+      runToken: record.runToken,
+      executionOwnerId: "owner-a",
+      executionEpoch: firstClaim.job.executionEpoch
+    });
+  } finally {
+    vm.runInContext("browserJobStore.putSnapshotIfOwned = finalizeOwnedWriteErrorOriginalPutOwned", context);
+  }
+  try {
+    assert.equal(finalizeResult.stale, true);
+    assert.equal(finalizeResult.retryable, true);
+    assert.equal(record.staleOffscreenOperationDetected, true);
+    assert.equal(record.job.status, "completed", "the rejected finalization leaves a dirty draft that takeover must discard");
+    await vm.runInContext(`browserJobStore.releaseRun('job-finalize-owned-write-error', 'run-finalize-owned-write-error', 'owner-a', Date.now(), ${firstClaim.job.executionEpoch})`, context);
+    const takeover = await vm.runInContext("browserJobStore.claimRun('job-finalize-owned-write-error', 'run-finalize-owned-write-error', { ownerId: 'owner-b', claimedAt: Date.now(), leaseDurationMs: 30000 })", context);
+    const takeoverWork = await context.getOffscreenBrowserJobWork({
+      jobId: record.job.id,
+      runToken: record.runToken,
+      executionOwnerId: "owner-b",
+      executionEpoch: takeover.job.executionEpoch
+    });
+    const currentStatus = vm.runInContext("browserPreloadJobs.get('job-finalize-owned-write-error').job.status", context);
+    const durable = await vm.runInContext("browserJobStore.getJob('job-finalize-owned-write-error')", context);
+    assert.equal(takeoverWork.interrupted, true);
+    assert.equal(currentStatus, "interrupted");
+    assert.equal(durable.status, "interrupted");
+  } finally {
+    await vm.runInContext("browserJobStore.deleteJob('job-finalize-owned-write-error')", context);
+    vm.runInContext("browserPreloadJobs.delete('job-finalize-owned-write-error')", context);
+    delete context.finalizeOwnedWriteErrorRecord;
+    delete context.finalizeOwnedWriteErrorOriginalPutOwned;
+  }
+}
+
+{
+  const record = {
+    tabId: 1002,
+    runToken: "run-finalize-cas-race",
+    pipeline: "funasr",
+    startedAt: Date.now(),
+    cancelled: false,
+    abortController: new AbortController(),
+    candidate: { url: "https://media.example.test/finalize-cas-race.mp3", kind: "audio", ext: "mp3" },
+    metadata: { pageUrl: "https://example.test/watch/finalize-cas-race", duration: 30 },
+    modelConfig: { asr: {}, translation: {}, targetLanguage: "zh-CN", asrWorkers: 1, workers: 1, chunkSeconds: 900 },
+    sourceSegmentsByChunk: new Map([[0, [{ start: 1, end: 2, text: "source" }]]]),
+    translatedSegmentsByChunk: new Map([[0, [{ start: 1, end: 2, text: "译文" }]]]),
+    audioChunks: [{
+      index: 0,
+      start: 0,
+      end: 30,
+      duration: 30,
+      asrCompleted: true,
+      file: { name: "finalize-cas-race.mp3", mime: "audio/mpeg", cacheUrl: "https://fuguang.local/__fuguang_audio_cache/job-finalize-cas-race/0.mp3" }
+    }],
+    job: {
+      id: "job-finalize-cas-race",
+      runToken: "run-finalize-cas-race",
+      pipeline: "funasr",
+      status: "running",
+      stage: "translation",
+      createdAt: 100,
+      updatedAt: 200,
+      extract: { status: "completed", progress: 100, duration: 30 },
+      translation: {
+        status: "running",
+        chunksTotal: 1,
+        chunksDone: 1,
+        chunkStatuses: [{ index: 0, stage: "completed", status: "完成", sourceCount: 1, translatedCount: 1 }]
+      }
+    }
+  };
+  context.finalizeCasRaceRecord = record;
+  vm.runInContext("browserPreloadJobs.set('job-finalize-cas-race', finalizeCasRaceRecord)", context);
+  await vm.runInContext("browserJobStore.putSnapshot(createBrowserJobLedgerSnapshot(finalizeCasRaceRecord))", context);
+  const firstClaim = await vm.runInContext("browserJobStore.claimRun('job-finalize-cas-race', 'run-finalize-cas-race', { ownerId: 'owner-a', claimedAt: Date.now(), leaseDurationMs: 30000 })", context);
+  context.finalizeCasRaceOriginalPutOwned = await vm.runInContext("browserJobStore.putSnapshotIfOwned", context);
+  context.finalizeCasRaceFirstEpoch = firstClaim.job.executionEpoch;
+  context.finalizeCasRaceTakeover = null;
+  vm.runInContext(`browserJobStore.putSnapshotIfOwned = async (snapshot, ownership) => {
+    if (!finalizeCasRaceTakeover && snapshot?.job?.status === 'completed') {
+      await browserJobStore.releaseRun('job-finalize-cas-race', 'run-finalize-cas-race', 'owner-a', Date.now(), finalizeCasRaceFirstEpoch);
+      finalizeCasRaceTakeover = await browserJobStore.claimRun('job-finalize-cas-race', 'run-finalize-cas-race', { ownerId: 'owner-b', claimedAt: Date.now(), leaseDurationMs: 30000 });
+    }
+    return finalizeCasRaceOriginalPutOwned(snapshot, ownership);
+  }`, context);
+  try {
+    const staleFinalize = await context.finalizeOffscreenBrowserJob({
+      jobId: record.job.id,
+      runToken: record.runToken,
+      executionOwnerId: "owner-a",
+      executionEpoch: firstClaim.job.executionEpoch
+    });
+    const takeover = context.finalizeCasRaceTakeover;
+    assert.equal(staleFinalize.stale, true);
+    assert.equal(record.job.status, "completed", "the rejected old draft demonstrates the dirty in-memory race");
+    const takeoverWork = await context.getOffscreenBrowserJobWork({
+      jobId: record.job.id,
+      runToken: record.runToken,
+      executionOwnerId: "owner-b",
+      executionEpoch: takeover.job.executionEpoch
+    });
+    const currentStatus = vm.runInContext("browserPreloadJobs.get('job-finalize-cas-race').job.status", context);
+    const currentAsrCompleted = vm.runInContext("Boolean(browserPreloadJobs.get('job-finalize-cas-race').audioChunks[0].asrCompleted)", context);
+    const durable = await vm.runInContext("browserJobStore.getJob('job-finalize-cas-race')", context);
+    assert.equal(takeoverWork.interrupted, true);
+    assert.equal(currentStatus, "interrupted", "the new owner must replace dirty memory with the durable snapshot");
+    assert.equal(currentAsrCompleted, true, "already committed ASR state remains reusable after clean rehydration");
+    assert.equal(durable.status, "interrupted");
+  } finally {
+    vm.runInContext("browserJobStore.putSnapshotIfOwned = finalizeCasRaceOriginalPutOwned", context);
+    await vm.runInContext("browserJobStore.deleteJob('job-finalize-cas-race')", context);
+    vm.runInContext("browserPreloadJobs.delete('job-finalize-cas-race')", context);
+    delete context.finalizeCasRaceRecord;
+    delete context.finalizeCasRaceOriginalPutOwned;
+    delete context.finalizeCasRaceFirstEpoch;
+    delete context.finalizeCasRaceTakeover;
+  }
+}
+
+{
+  const originalTranscribeBrowserAudioChunk = context.transcribeBrowserAudioChunk;
+  const originalTranslateBrowserSegments = context.translateBrowserSegments;
+  const record = {
+    tabId: 1004,
+    runToken: "run-process-owned-write-error",
+    pipeline: "browser",
+    startedAt: Date.now(),
+    cancelled: false,
+    abortController: new AbortController(),
+    candidate: { url: "https://media.example.test/process-owned-write-error.mp3", kind: "audio", ext: "mp3" },
+    metadata: { pageUrl: "https://example.test/watch/process-owned-write-error", duration: 30 },
+    modelConfig: { asr: {}, translation: {}, targetLanguage: "zh-CN", asrWorkers: 1, workers: 1, chunkSeconds: 900 },
+    sourceSegmentsByChunk: new Map(),
+    translatedSegmentsByChunk: new Map(),
+    browserAsrDiagnosticsByChunk: new Map(),
+    job: {
+      id: "job-process-owned-write-error",
+      runToken: "run-process-owned-write-error",
+      pipeline: "browser",
+      status: "running",
+      stage: "asr",
+      createdAt: 100,
+      updatedAt: 200,
+      extract: { status: "completed", progress: 100, duration: 30 },
+      translation: { status: "running", chunksTotal: 0, chunksDone: 0, chunkStatuses: [] }
+    }
+  };
+  context.enqueueBrowserLogicalAudioChunk(record, {
+    index: 0,
+    start: 0,
+    end: 30,
+    coreStart: 0,
+    coreEnd: 30,
+    duration: 30,
+    file: { name: "owned-write-error.mp3", mime: "audio/mpeg", cacheUrl: "https://fuguang.local/__fuguang_audio_cache/job-process-owned-write-error/0.mp3" }
+  });
+  context.closeAllBrowserTranslationGroups(record);
+  context.transcribeBrowserAudioChunk = async () => [{ start: 1, end: 2, text: "source" }];
+  context.translateBrowserSegments = async segments => segments.map(segment => ({ ...segment, text: "译文" }));
+  context.processOwnedWriteErrorRecord = record;
+  vm.runInContext("browserPreloadJobs.set('job-process-owned-write-error', processOwnedWriteErrorRecord)", context);
+  await vm.runInContext("browserJobStore.putSnapshot(createBrowserJobLedgerSnapshot(processOwnedWriteErrorRecord))", context);
+  const firstClaim = await vm.runInContext("browserJobStore.claimRun('job-process-owned-write-error', 'run-process-owned-write-error', { ownerId: 'owner-a', claimedAt: Date.now(), leaseDurationMs: 30000 })", context);
+  context.processOwnedWriteErrorOriginalPutOwned = await vm.runInContext("browserJobStore.putSnapshotIfOwned", context);
+  vm.runInContext("browserJobStore.putSnapshotIfOwned = async () => { throw new Error('injected-owned-write-error'); }", context);
+  let processResult = null;
+  let processError = null;
+  try {
+    processResult = await context.processOffscreenBrowserJobChunk({
+      jobId: record.job.id,
+      runToken: record.runToken,
+      executionOwnerId: "owner-a",
+      executionEpoch: firstClaim.job.executionEpoch,
+      chunkIndex: 0
+    });
+  } catch (error) {
+    processError = error;
+  } finally {
+    vm.runInContext("browserJobStore.putSnapshotIfOwned = processOwnedWriteErrorOriginalPutOwned", context);
+  }
+  try {
+    assert.equal(processError, null, "owned write failures must become structured stale results");
+    assert.equal(processResult?.stale, true);
+    assert.equal(record.staleOffscreenOperationDetected, true);
+    await vm.runInContext(`browserJobStore.releaseRun('job-process-owned-write-error', 'run-process-owned-write-error', 'owner-a', Date.now(), ${firstClaim.job.executionEpoch})`, context);
+    const takeover = await vm.runInContext("browserJobStore.claimRun('job-process-owned-write-error', 'run-process-owned-write-error', { ownerId: 'owner-b', claimedAt: Date.now(), leaseDurationMs: 30000 })", context);
+    const takeoverWork = await context.getOffscreenBrowserJobWork({
+      jobId: record.job.id,
+      runToken: record.runToken,
+      executionOwnerId: "owner-b",
+      executionEpoch: takeover.job.executionEpoch
+    });
+    const currentAsrCompleted = vm.runInContext("Boolean(browserPreloadJobs.get('job-process-owned-write-error').audioChunks[0].asrCompleted)", context);
+    assert.equal(takeoverWork.interrupted, true);
+    assert.equal(currentAsrCompleted, false, "a rejected owned write must not leak its dirty ASR result into takeover");
+  } finally {
+    await vm.runInContext("browserJobStore.deleteJob('job-process-owned-write-error')", context);
+    vm.runInContext("browserPreloadJobs.delete('job-process-owned-write-error')", context);
+    delete context.processOwnedWriteErrorRecord;
+    delete context.processOwnedWriteErrorOriginalPutOwned;
+    context.transcribeBrowserAudioChunk = originalTranscribeBrowserAudioChunk;
+    context.translateBrowserSegments = originalTranslateBrowserSegments;
+  }
+}
+
+{
+  const record = {
+    tabId: 1005,
+    runToken: "run-snapshot-read-error",
+    pipeline: "browser",
+    startedAt: Date.now(),
+    cancelled: false,
+    abortController: new AbortController(),
+    candidate: { url: "https://media.example.test/snapshot-read-error.mp3", kind: "audio", ext: "mp3" },
+    metadata: { pageUrl: "https://example.test/watch/snapshot-read-error", duration: 30 },
+    modelConfig: { asr: {}, translation: {}, targetLanguage: "zh-CN", asrWorkers: 1, workers: 1, chunkSeconds: 900 },
+    sourceSegmentsByChunk: new Map(),
+    translatedSegmentsByChunk: new Map(),
+    browserAsrDiagnosticsByChunk: new Map(),
+    audioChunks: [{
+      index: 0,
+      start: 0,
+      end: 30,
+      duration: 30,
+      asrCompleted: true,
+      file: { name: "snapshot-read-error.mp3", mime: "audio/mpeg", cacheUrl: "https://fuguang.local/__fuguang_audio_cache/job-snapshot-read-error/0.mp3" }
+    }],
+    staleOffscreenOperationDetected: true,
+    job: {
+      id: "job-snapshot-read-error",
+      runToken: "run-snapshot-read-error",
+      pipeline: "browser",
+      status: "completed",
+      stage: "completed",
+      createdAt: 100,
+      updatedAt: 200,
+      extract: { status: "completed", progress: 100, duration: 30 },
+      translation: { status: "completed", chunksTotal: 1, chunksDone: 1, chunkStatuses: [] }
+    }
+  };
+  const durableDraft = {
+    ...record,
+    audioChunks: [{ ...record.audioChunks[0], asrCompleted: false }],
+    job: { ...record.job, status: "running", stage: "asr", translation: { ...record.job.translation, status: "running" } }
+  };
+  context.snapshotReadErrorRecord = record;
+  context.snapshotReadErrorDurableDraft = durableDraft;
+  vm.runInContext("browserPreloadJobs.set('job-snapshot-read-error', snapshotReadErrorRecord)", context);
+  await vm.runInContext("browserJobStore.putSnapshot(createBrowserJobLedgerSnapshot(snapshotReadErrorDurableDraft))", context);
+  const claim = await vm.runInContext("browserJobStore.claimRun('job-snapshot-read-error', 'run-snapshot-read-error', { ownerId: 'owner-b', claimedAt: Date.now(), leaseDurationMs: 30000 })", context);
+  context.snapshotReadErrorOriginalGetJob = await vm.runInContext("browserJobStore.getJob", context);
+  context.snapshotReadErrorOriginalGetSnapshot = vm.runInContext("typeof browserJobStore.getSnapshot === 'function' ? browserJobStore.getSnapshot : null", context);
+  context.snapshotReadErrorOriginalGetChunks = await vm.runInContext("browserJobStore.getChunks", context);
+  vm.runInContext(`
+    snapshotReadErrorGetJobCalls = 0;
+    browserJobStore.getJob = async (...args) => {
+      snapshotReadErrorGetJobCalls += 1;
+      if (snapshotReadErrorGetJobCalls === 1) {
+        return snapshotReadErrorOriginalGetJob(...args);
+      }
+      throw new Error('injected-snapshot-read-error');
+    };
+    if (snapshotReadErrorOriginalGetSnapshot) {
+      browserJobStore.getSnapshot = async () => { throw new Error('injected-snapshot-read-error'); };
+    } else {
+      browserJobStore.getChunks = async () => { throw new Error('injected-snapshot-read-error'); };
+    }
+  `, context);
+  try {
+    const result = await context.getOffscreenBrowserJobWork({
+      jobId: record.job.id,
+      runToken: record.runToken,
+      executionOwnerId: "owner-b",
+      executionEpoch: claim.job.executionEpoch
+    });
+    const durable = await context.snapshotReadErrorOriginalGetJob("job-snapshot-read-error");
+    const currentRecordIsDirtyOriginal = vm.runInContext("browserPreloadJobs.get('job-snapshot-read-error') === snapshotReadErrorRecord", context);
+    assert.equal(result.retryable, true, "snapshot read errors must fail closed and remain retryable");
+    assert.equal(currentRecordIsDirtyOriginal, true, "a failed rehydration must not replace the in-memory record");
+    assert.equal(durable.status, "running", "a failed rehydration must not commit dirty memory as interrupted");
+  } finally {
+    vm.runInContext(`
+      browserJobStore.getJob = snapshotReadErrorOriginalGetJob;
+      browserJobStore.getChunks = snapshotReadErrorOriginalGetChunks;
+      if (snapshotReadErrorOriginalGetSnapshot) browserJobStore.getSnapshot = snapshotReadErrorOriginalGetSnapshot;
+    `, context);
+    await vm.runInContext("browserJobStore.deleteJob('job-snapshot-read-error')", context);
+    vm.runInContext("browserPreloadJobs.delete('job-snapshot-read-error')", context);
+    delete context.snapshotReadErrorRecord;
+    delete context.snapshotReadErrorDurableDraft;
+    delete context.snapshotReadErrorOriginalGetJob;
+    delete context.snapshotReadErrorOriginalGetSnapshot;
+    delete context.snapshotReadErrorOriginalGetChunks;
+  }
+}
+
+{
+  const oldRecord = {
+    tabId: 1006,
+    runToken: "run-deferred-extraction-takeover",
+    pipeline: "browser",
+    startedAt: Date.now(),
+    cancelled: false,
+    abortController: new AbortController(),
+    candidate: { url: "https://media.example.test/deferred-extraction.mp3", kind: "audio", ext: "mp3" },
+    metadata: { pageUrl: "https://example.test/watch/deferred-extraction", duration: 30 },
+    modelConfig: { asr: {}, translation: {}, targetLanguage: "zh-CN", asrWorkers: 1, workers: 1, chunkSeconds: 900 },
+    sourceSegmentsByChunk: new Map(),
+    translatedSegmentsByChunk: new Map(),
+    browserAsrDiagnosticsByChunk: new Map(),
+    audioChunks: [],
+    job: {
+      id: "job-deferred-extraction-takeover",
+      runToken: "run-deferred-extraction-takeover",
+      pipeline: "browser",
+      status: "running",
+      stage: "extracting",
+      createdAt: 100,
+      updatedAt: 200,
+      extract: { status: "running", progress: 10, duration: 30 },
+      translation: { status: "queued", chunksTotal: 0, chunksDone: 0, chunkStatuses: [] }
+    }
+  };
+  const originalExtract = context.extractCandidateAudioInBrowser;
+  const originalStart = context.startBrowserJobInOffscreen;
+  const originalResolveOwner = context.resolveBrowserJobExecutionOwner;
+  let resolveExtraction;
+  let extractionStarted;
+  const extractionStartedPromise = new Promise(resolve => { extractionStarted = resolve; });
+  context.extractCandidateAudioInBrowser = () => new Promise(resolve => {
+    resolveExtraction = resolve;
+    extractionStarted();
+  });
+  context.startBrowserJobInOffscreen = async () => ({ status: "started" });
+  context.resolveBrowserJobExecutionOwner = async () => "offscreen";
+  context.deferredExtractionOldRecord = oldRecord;
+  vm.runInContext("browserPreloadJobs.set('job-deferred-extraction-takeover', deferredExtractionOldRecord)", context);
+  await vm.runInContext("browserJobStore.putSnapshot(createBrowserJobLedgerSnapshot(deferredExtractionOldRecord))", context);
+  const firstClaim = await vm.runInContext("browserJobStore.claimRun('job-deferred-extraction-takeover', 'run-deferred-extraction-takeover', { ownerId: 'owner-a', claimedAt: Date.now(), leaseDurationMs: 30000 })", context);
+  const running = context.runBrowserPreloadJob("job-deferred-extraction-takeover");
+  await extractionStartedPromise;
+  oldRecord.staleOffscreenOperationDetected = true;
+  await vm.runInContext(`browserJobStore.releaseRun('job-deferred-extraction-takeover', 'run-deferred-extraction-takeover', 'owner-a', Date.now(), ${firstClaim.job.executionEpoch})`, context);
+  const takeover = await vm.runInContext("browserJobStore.claimRun('job-deferred-extraction-takeover', 'run-deferred-extraction-takeover', { ownerId: 'owner-b', claimedAt: Date.now(), leaseDurationMs: 30000 })", context);
+  try {
+    const takeoverWork = await context.getOffscreenBrowserJobWork({
+      jobId: oldRecord.job.id,
+      runToken: oldRecord.runToken,
+      executionOwnerId: "owner-b",
+      executionEpoch: takeover.job.executionEpoch
+    });
+    assert.equal(takeoverWork.interrupted, true);
+    await new Promise(resolve => setTimeout(resolve, 2));
+    resolveExtraction({
+      duration: 30,
+      chunks: [{
+        index: 0,
+        start: 0,
+        end: 30,
+        duration: 30,
+        file: { name: "late.mp3", mime: "audio/mpeg", cacheUrl: "https://fuguang.local/__fuguang_audio_cache/job-deferred-extraction-takeover/late.mp3" }
+      }]
+    });
+    await running;
+    await vm.runInContext("flushBrowserJobMirror('job-deferred-extraction-takeover')", context);
+    const durable = await vm.runInContext("browserJobStore.getJob('job-deferred-extraction-takeover')", context);
+    const current = vm.runInContext("browserPreloadJobs.get('job-deferred-extraction-takeover')", context);
+    assert.notEqual(current, oldRecord, "takeover must retain the clean recovered record");
+    assert.equal(current.job.status, "interrupted");
+    assert.equal(durable.status, "interrupted", "a late extraction result must not overwrite takeover state");
+    assert.equal(oldRecord.abortController.signal.aborted, true, "takeover must abort the superseded extraction");
+  } finally {
+    resolveExtraction?.({ duration: 0, chunks: [] });
+    await running.catch(() => {});
+    context.extractCandidateAudioInBrowser = originalExtract;
+    context.startBrowserJobInOffscreen = originalStart;
+    context.resolveBrowserJobExecutionOwner = originalResolveOwner;
+    await vm.runInContext("browserJobStore.deleteJob('job-deferred-extraction-takeover')", context);
+    vm.runInContext("browserPreloadJobs.delete('job-deferred-extraction-takeover')", context);
+    delete context.deferredExtractionOldRecord;
+  }
+}
+
+{
+  const oldRecord = {
+    tabId: 1009,
+    runToken: "run-stale-failure-handler",
+    startedAt: Date.now(),
+    cancelled: false,
+    abortController: new AbortController(),
+    job: {
+      id: "job-stale-failure-handler",
+      runToken: "run-stale-failure-handler",
+      status: "running",
+      stage: "extracting",
+      extract: { status: "running", elapsedSeconds: 0 },
+      translation: { status: "queued", chunkStatuses: [] }
+    }
+  };
+  const cleanRecord = {
+    ...oldRecord,
+    abortController: new AbortController(),
+    job: {
+      ...oldRecord.job,
+      status: "interrupted",
+      stage: "interrupted",
+      error: "takeover"
+    }
+  };
+  context.staleFailureOldRecord = oldRecord;
+  context.staleFailureCleanRecord = cleanRecord;
+  vm.runInContext("browserPreloadJobs.set('job-stale-failure-handler', staleFailureCleanRecord)", context);
+  try {
+    context.failBrowserPreloadJob(oldRecord, new Error("late extraction failure"));
+    assert.equal(cleanRecord.job.status, "interrupted", "an old task catch handler must not fail the replacement record");
+    assert.equal(cleanRecord.job.error, "takeover");
+  } finally {
+    vm.runInContext("browserPreloadJobs.delete('job-stale-failure-handler')", context);
+    delete context.staleFailureOldRecord;
+    delete context.staleFailureCleanRecord;
+  }
+}
+
+{
+  const job = {
+    id: "job-uncommitted-ui",
+    runToken: "run-uncommitted-ui",
+    status: "running",
+    stage: "asr",
+    createdAt: 100,
+    updatedAt: 200,
+    extract: { status: "completed", progress: 100 },
+    translation: { status: "running", chunksTotal: 1, chunksDone: 0, chunkStatuses: [] }
+  };
+  const record = {
+    tabId: 1007,
+    runToken: job.runToken,
+    job,
+    startedAt: Date.now(),
+    cancelled: false,
+    abortController: new AbortController(),
+    sourceSegmentsByChunk: new Map(),
+    translatedSegmentsByChunk: new Map(),
+    audioChunks: [],
+    lastCommittedJob: structuredClone(job),
+    offscreenMirrorSuppressionCount: 1
+  };
+  context.uncommittedUiRecord = record;
+  vm.runInContext("browserPreloadJobs.set('job-uncommitted-ui', uncommittedUiRecord)", context);
+  context.setTabStatus(1007, { preload: "running", preloadJob: job, page: { url: "" }, context: { href: "" } });
+  job.status = "completed";
+  job.stage = "completed";
+  try {
+    const stateReferenceStatus = vm.runInContext("getState(1007).preloadJob.status", context);
+    const polled = context.refreshBrowserPreloadJobForStatus(job);
+    assert.equal(stateReferenceStatus, "running", "tab state must not retain a mutable job reference");
+    assert.equal(polled.status, "running", "status polling must expose the last committed snapshot while a write is pending");
+    delete record.offscreenMirrorSuppressionCount;
+    record.staleOffscreenOperationDetected = true;
+    const polledAfterFailure = context.refreshBrowserPreloadJobForStatus(job);
+    const dirtyMirrorQueued = vm.runInContext("browserJobMirrorPending.has('job-uncommitted-ui')", context);
+    assert.equal(polledAfterFailure.status, "running", "a rejected draft must stay hidden until durable rehydration");
+    assert.equal(dirtyMirrorQueued, false, "status polling must not mirror a rejected draft through the ordinary writer");
+  } finally {
+    vm.runInContext("browserPreloadJobs.delete('job-uncommitted-ui')", context);
+    delete context.uncommittedUiRecord;
+  }
+}
+
+{
+  const record = {
+    tabId: 781,
+    runToken: "run-offscreen-fence",
+    pipeline: "browser",
+    cancelled: false,
+    audioChunks: [],
+    job: {
+      id: "job-offscreen-fence",
+      runToken: "run-offscreen-fence",
+      pipeline: "browser",
+      status: "running",
+      stage: "asr",
+      createdAt: 100,
+      updatedAt: 200,
+      extract: { status: "completed" },
+      translation: { status: "running", chunkStatuses: [] }
+    }
+  };
+  context.offscreenFenceRecord = record;
+  vm.runInContext("browserPreloadJobs.set('job-offscreen-fence', offscreenFenceRecord)", context);
+  await vm.runInContext("browserJobStore.putSnapshot({ job: offscreenFenceRecord.job, chunks: [] })", context);
+  const first = await vm.runInContext("browserJobStore.claimRun('job-offscreen-fence', 'run-offscreen-fence', { ownerId: 'same-owner', claimedAt: Date.now(), leaseDurationMs: 30000 })", context);
+  await vm.runInContext(`browserJobStore.releaseRun('job-offscreen-fence', 'run-offscreen-fence', 'same-owner', Date.now(), ${first.job.executionEpoch})`, context);
+  const second = await vm.runInContext("browserJobStore.claimRun('job-offscreen-fence', 'run-offscreen-fence', { ownerId: 'same-owner', claimedAt: Date.now(), leaseDurationMs: 30000 })", context);
+  try {
+    const stale = await context.getOffscreenBrowserJobWork({
+      jobId: record.job.id,
+      runToken: record.runToken,
+      executionOwnerId: "same-owner",
+      executionEpoch: first.job.executionEpoch
+    });
+    assert.equal(stale.stale, true);
+    assert.equal(stale.reason, "stale-epoch", "an old fence must be rejected even when the runtime owner id is reused");
+    const current = await context.getOffscreenBrowserJobWork({
+      jobId: record.job.id,
+      runToken: record.runToken,
+      executionOwnerId: "same-owner",
+      executionEpoch: second.job.executionEpoch
+    });
+    assert.equal(current.accepted, true);
+  } finally {
+    await vm.runInContext("browserJobStore.deleteJob('job-offscreen-fence')", context);
+    vm.runInContext("browserPreloadJobs.delete('job-offscreen-fence')", context);
+    delete context.offscreenFenceRecord;
+  }
+}
+
+{
+  const originalRunBrowserPreloadJob = context.runBrowserPreloadJob;
+  context.runBrowserPreloadJob = async () => {};
+  try {
+    const started = await context.startBrowserPreload(
+      77,
+      { url: "https://media.example.test/recovery.mp3", kind: "audio", ext: "mp3", duration: 30 },
+      { pageUrl: "https://example.test/watch/1", sourceUrl: "https://media.example.test/recovery.mp3", duration: 30 },
+      {
+        asr: { providerType: "openai", baseUrl: "https://asr.example.test/v1", model: "whisper-1", apiKey: "test", vadFilter: "off" },
+        translation: { providerType: "openai", baseUrl: "https://llm.example.test/v1", model: "test", apiKey: "test" },
+        targetLanguage: "zh-CN",
+        asrWorkers: 1,
+        workers: 1,
+        chunkSeconds: 900
+      }
+    );
+    const record = context.findBrowserPreloadRecord(started.job.id, 77);
+    const cacheUrl = `https://fuguang.local/__fuguang_audio_cache/${started.job.id}/chunk-0.mp3`;
+    record.audioChunks = [{ index: 0, start: 0, end: 30, duration: 30, coreStart: 0, coreEnd: 30, file: { name: "chunk-0.mp3", mime: "audio/mpeg", cacheUrl } }];
+    record.sourceSegmentsByChunk.set(0, [{ start: 1, end: 2, text: "source", chunkIndex: 0, segmentIndex: 0 }]);
+    record.translatedSegmentsByChunk.set(0, [{ start: 1, end: 2, text: "译文", chunkIndex: 0, segmentIndex: 0 }]);
+    record.job.translation.chunkStatuses[0] = { index: 0, stage: "completed", status: "完成", sourceCount: 1, translatedCount: 1, updatedAt: Date.now() };
+    record.job.translation.chunksTotal = 1;
+    context.publishBrowserPreloadJob(record);
+    await context.flushBrowserJobMirror(started.job.id);
+    context.recoveryJobId = started.job.id;
+    vm.runInContext("browserPreloadJobs.delete(recoveryJobId); tabState.delete(77)", context);
+
+    assert.deepEqual(JSON.parse(JSON.stringify(await context.recoverBrowserJobIndex())), { recovered: 1 });
+    const recovered = context.findBrowserPreloadRecord(started.job.id, 77);
+    assert.equal(recovered.recovered, true);
+    assert.equal(recovered.job.status, "interrupted");
+    assert.equal(recovered.job.stage, "interrupted");
+    assert.equal(recovered.audioChunks[0].file.cacheUrl, cacheUrl);
+    assert.equal(recovered.sourceSegmentsByChunk.get(0)[0].text, "source");
+    assert.equal(recovered.translatedSegmentsByChunk.get(0)[0].text, "译文");
+    assert.match(recovered.job.translation.vttText, /译文/);
+    assert.deepEqual(JSON.parse(JSON.stringify(await context.recoverBrowserJobIndex())), { recovered: 0 });
+    await context.cancelPreload(77, started.job.id);
+  } finally {
+    delete context.recoveryJobId;
+    context.runBrowserPreloadJob = originalRunBrowserPreloadJob;
+  }
+}
+
+{
+  const record = {
+    tabId: 778,
+    runToken: "run-offscreen-owner",
+    pipeline: "browser",
+    candidate: { url: "https://media.example.test/offscreen.mp3", kind: "audio", ext: "mp3" },
+    metadata: { pageUrl: "https://example.test/watch/offscreen" },
+    modelConfig: {
+      asr: { apiKey: "must-not-leave-worker" },
+      translation: { apiKey: "must-not-leave-worker" },
+      chunkSeconds: 900
+    },
+    audioChunks: [{
+      index: 0,
+      start: 0,
+      end: 30,
+      coreStart: 0,
+      coreEnd: 30,
+      file: { cacheUrl: "https://fuguang.local/__fuguang_audio_cache/job-offscreen-owner/0.mp3" }
+    }],
+    browserAsrChunkToTranslationGroup: new Map([[0, 0]]),
+    sourceSegmentsByChunk: new Map(),
+    translatedSegmentsByChunk: new Map(),
+    job: {
+      id: "job-offscreen-owner",
+      runToken: "run-offscreen-owner",
+      pipeline: "browser",
+      status: "running",
+      stage: "asr",
+      createdAt: 100,
+      updatedAt: 200,
+      extract: { status: "completed", progress: 100 },
+      translation: { status: "running", chunksTotal: 1, chunkStatuses: [{ index: 0, stage: "queued" }] }
+    }
+  };
+  const started = await context.startBrowserJobInOffscreen(record);
+  assert.equal(started.status, "started");
+  assert.equal(record.offscreenExecution, true);
+  const command = taskRuntimeSent.find(message =>
+    message.type === "FUGUANG_TASK_RUNTIME_START_JOB" && message.snapshot?.job?.id === record.job.id
+  );
+  assert.ok(command);
+  assert.equal(command.snapshot.chunks.some(chunk => chunk.entryType === "audio-chunk"), true);
+  assert.equal(JSON.stringify(command).includes("must-not-leave-worker"), false);
+}
+
+{
+  const originalSendOffscreenTaskRuntimeCommand = context.sendOffscreenTaskRuntimeCommand;
+  context.sendOffscreenTaskRuntimeCommand = async () => {
+    const error = new Error("Offscreen task runtime command timed out.");
+    error.deliveryUnknown = true;
+    throw error;
+  };
+  const record = {
+    tabId: 778,
+    runToken: "run-offscreen-timeout",
+    pipeline: "browser",
+    candidate: { url: "https://media.example.test/timeout.mp3", kind: "audio", ext: "mp3" },
+    metadata: { pageUrl: "https://example.test/watch/timeout" },
+    modelConfig: { asrWorkers: 1, chunkSeconds: 900 },
+    audioChunks: [],
+    sourceSegmentsByChunk: new Map(),
+    translatedSegmentsByChunk: new Map(),
+    job: {
+      id: "job-offscreen-timeout",
+      runToken: "run-offscreen-timeout",
+      pipeline: "browser",
+      status: "running",
+      stage: "extracting",
+      createdAt: 100,
+      updatedAt: 200,
+      extract: { status: "running" },
+      translation: { status: "queued", chunksTotal: 0, chunkStatuses: [] }
+    }
+  };
+  try {
+    const result = await context.startBrowserJobInOffscreen(record);
+    assert.equal(result.status, "unknown", "an ACK timeout must not be reported as a definite start failure");
+    assert.equal(record.offscreenExecution, true, "unknown delivery must not enable an uncoordinated local fallback");
+  } finally {
+    context.sendOffscreenTaskRuntimeCommand = originalSendOffscreenTaskRuntimeCommand;
+  }
+}
+
+{
+  const previousStorage = localStorageState;
+  localStorageState = {
+    modelSettingsVersion: 5,
+    selectedAsrProfileId: "asr-a",
+    selectedLlmProfileId: "llm-a",
+    sourceLanguage: "ja",
+    targetLanguage: "zh-CN",
+    translationWorkers: 2,
+    chunkMinutes: 15,
+    asrProfiles: [
+      { id: "asr-a", name: "ASR A", providerType: "openai", baseUrl: "https://asr-a.example.test/v1", model: "asr-a", apiKey: "secret-a" },
+      { id: "asr-b", name: "ASR B", providerType: "openai", baseUrl: "https://asr-b.example.test/v1", model: "asr-b", apiKey: "secret-b" }
+    ],
+    llmProfiles: [
+      { id: "llm-a", name: "LLM A", providerType: "openai", baseUrl: "https://llm-a.example.test/v1", model: "llm-a", apiKey: "secret-a" },
+      { id: "llm-b", name: "LLM B", providerType: "openai", baseUrl: "https://llm-b.example.test/v1", model: "llm-b", apiKey: "secret-b" }
+    ]
+  };
+  try {
+    const originalConfig = await context.getModelConfig();
+    assert.ok(originalConfig.executionSpec?.fingerprint, "a new job must freeze a non-secret execution reference");
+    const ledger = context.FuguangJobContract.createJobLedgerEntry({
+      modelConfig: originalConfig,
+      job: {
+        id: "job-config-a",
+        runToken: "run-config-a",
+        status: "running",
+        stage: "asr",
+        createdAt: 100,
+        updatedAt: 100,
+        extract: {},
+        translation: {}
+      }
+    });
+    assert.equal(ledger.executionSpec.fingerprint, originalConfig.executionSpec.fingerprint);
+    assert.equal(JSON.stringify(ledger).includes("secret-a"), false, "the frozen execution reference must not persist API keys");
+    localStorageState.selectedAsrProfileId = "asr-b";
+    localStorageState.selectedLlmProfileId = "llm-b";
+    const recoveredConfig = await context.getModelConfig(originalConfig.executionSpec);
+    assert.equal(recoveredConfig.asr.model, "asr-a", "recovery must resolve the original ASR profile, not the current selection");
+    assert.equal(recoveredConfig.translation.model, "llm-a", "recovery must resolve the original translation profile");
+    assert.equal(recoveredConfig.executionSpec.fingerprint, originalConfig.executionSpec.fingerprint);
+    localStorageState.asrProfiles.find(profile => profile.id === "asr-a").model = "asr-a-modified";
+    await assert.rejects(
+      context.getModelConfig(originalConfig.executionSpec),
+      /模型配置已被修改/,
+      "recovery must interrupt instead of silently using a modified profile"
+    );
+  } finally {
+    localStorageState = previousStorage;
+  }
+}
+
+{
+  const originalTranscribeBrowserAudioChunk = context.transcribeBrowserAudioChunk;
+  const originalTranslateBrowserSegments = context.translateBrowserSegments;
+  const originalAttachBrowserJobVttIfReady = context.attachBrowserJobVttIfReady;
+  const record = {
+    tabId: 779,
+    runToken: "run-offscreen-process",
+    pipeline: "browser",
+    startedAt: Date.now(),
+    cancelled: false,
+    abortController: new AbortController(),
+    candidate: { url: "https://media.example.test/offscreen-process.mp3", kind: "audio", ext: "mp3" },
+    metadata: { pageUrl: "https://example.test/watch/offscreen-process", duration: 30 },
+    modelConfig: {
+      asr: {},
+      translation: {},
+      targetLanguage: "zh-CN",
+      asrWorkers: 1,
+      workers: 1,
+      chunkSeconds: 900
+    },
+    sourceSegmentsByChunk: new Map(),
+    translatedSegmentsByChunk: new Map(),
+    job: {
+      id: "job-offscreen-process",
+      runToken: "run-offscreen-process",
+      pipeline: "browser",
+      status: "running",
+      stage: "asr",
+      createdAt: 100,
+      updatedAt: 200,
+      extract: { status: "completed", progress: 100, duration: 30 },
+      translation: { status: "running", chunksTotal: 0, chunksDone: 0, chunkStatuses: [] }
+    }
+  };
+  const chunk = {
+    index: 0,
+    start: 0,
+    end: 30,
+    coreStart: 0,
+    coreEnd: 30,
+    duration: 30,
+    file: { name: "offscreen-process.mp3", mime: "audio/mpeg", buffer: new ArrayBuffer(1) }
+  };
+  context.enqueueBrowserLogicalAudioChunk(record, chunk);
+  context.closeAllBrowserTranslationGroups(record);
+  context.transcribeBrowserAudioChunk = async () => [{ start: 1, end: 2, text: "source" }];
+  context.translateBrowserSegments = async segments => segments.map(segment => ({ ...segment, text: "译文" }));
+  context.attachBrowserJobVttIfReady = async () => {};
+  context.offscreenProcessRecord = record;
+  vm.runInContext("browserPreloadJobs.set('job-offscreen-process', offscreenProcessRecord)", context);
+  await vm.runInContext("browserJobStore.putSnapshot({ job: offscreenProcessRecord.job, chunks: [] })", context);
+  const claim = await vm.runInContext("browserJobStore.claimRun('job-offscreen-process', 'run-offscreen-process', { ownerId: 'offscreen-process-owner', claimedAt: Date.now(), leaseDurationMs: 30000 })", context);
+  const fence = {
+    executionOwnerId: "offscreen-process-owner",
+    executionEpoch: claim.job.executionEpoch
+  };
+  try {
+    const before = await context.getOffscreenBrowserJobWork({
+      jobId: record.job.id,
+      runToken: record.runToken,
+      ...fence
+    });
+    assert.equal(before.chunks[0].asrCompleted, false);
+    await context.processOffscreenBrowserJobChunk({
+      jobId: record.job.id,
+      runToken: record.runToken,
+      ...fence,
+      chunkIndex: 0
+    });
+    assert.equal(record.audioChunks[0].asrCompleted, true);
+    assert.equal(record.job.translation.chunkStatuses[0].stage, "completed");
+    const finalized = await context.finalizeOffscreenBrowserJob({
+      jobId: record.job.id,
+      runToken: record.runToken,
+      ...fence
+    });
+    assert.equal(finalized.accepted, true);
+    assert.equal(record.job.status, "completed");
+  } finally {
+    await vm.runInContext("browserJobStore.deleteJob('job-offscreen-process')", context);
+    vm.runInContext("browserPreloadJobs.delete('job-offscreen-process')", context);
+    delete context.offscreenProcessRecord;
+    context.transcribeBrowserAudioChunk = originalTranscribeBrowserAudioChunk;
+    context.translateBrowserSegments = originalTranslateBrowserSegments;
+    context.attachBrowserJobVttIfReady = originalAttachBrowserJobVttIfReady;
+  }
+}
 
 {
   const originalRunBrowserPreloadJob = context.runBrowserPreloadJob;
@@ -255,6 +1520,58 @@ vm.runInContext(source, context, { filename: "service-worker.js" });
     assert.equal(response.job.translation.asrWorkers, 1);
     assert.equal(response.job.translation.chunkStatuses.length, 0);
     assert.equal(queuedJobId, response.job.id);
+    assert.match(response.job.id, /^[0-9a-f]{8}-[0-9a-f-]{27}$/i);
+    assert.match(response.job.runToken, /^[0-9a-f]{8}-[0-9a-f-]{27}$/i);
+    const mirrored = await context.flushBrowserJobMirror(response.job.id);
+    assert.equal(mirrored.id, response.job.id);
+    assert.equal(mirrored.runToken, response.job.runToken);
+    assert.equal(JSON.stringify(mirrored).includes("apiKey"), false);
+    assert.equal(JSON.stringify(mirrored).includes("authorization"), false);
+    await new Promise(resolve => setTimeout(resolve, 0));
+    const observed = taskRuntimeSent.find(message => message.snapshot?.job?.id === response.job.id);
+    assert.equal(observed.type, "FUGUANG_TASK_RUNTIME_OBSERVE_JOB");
+    assert.equal(observed.snapshot.job.runToken, response.job.runToken);
+    assert.equal(JSON.stringify(observed.snapshot).includes("apiKey"), false);
+    const record = context.findBrowserPreloadRecord(response.job.id, 1);
+    record.browserAsrQueue = context.createAsyncQueue();
+    record.browserTranslationQueue = context.createAsyncQueue();
+    record.browserFunAsrQueue = context.createAsyncQueue();
+    record.browserAsrQueue.items.push({ index: 1 });
+    record.browserTranslationQueue.items.push({ index: 1 });
+    record.browserFunAsrQueue.items.push({ index: 1 });
+    const cancelled = await context.cancelPreload(1, response.job.id);
+    assert.equal(cancelled.job.status, "cancelled");
+    assert.equal(record.abortController.signal.aborted, true);
+    assert.equal(record.browserAsrQueue.closed, true);
+    assert.equal(record.browserTranslationQueue.closed, true);
+    assert.equal(record.browserFunAsrQueue.closed, true);
+    assert.equal(record.browserAsrQueue.items.length, 0);
+    assert.equal(record.browserTranslationQueue.items.length, 0);
+    assert.equal(record.browserFunAsrQueue.items.length, 0);
+    const storedCancelled = await context.flushBrowserJobMirror(response.job.id);
+    assert.equal(storedCancelled.status, "cancelled");
+    assert.equal(storedCancelled.cancelRequested, true);
+    assert.ok(runtimeMessages.some(message => message.type === "FUGUANG_OFFSCREEN_CANCEL_JOB" && message.jobId === response.job.id));
+    assert.ok(taskRuntimeSent.some(message => message.type === "FUGUANG_TASK_RUNTIME_CANCEL_JOB" && message.jobId === response.job.id));
+    const previousRunToken = record.runToken;
+    const nextRunToken = await context.beginBrowserJobAttempt(record, "retrying");
+    assert.notEqual(nextRunToken, previousRunToken);
+    const progressBeforeLateMessage = record.job.extract.progress;
+    context.applyOffscreenWebFfmpegProgress({
+      jobId: response.job.id,
+      tabId: 1,
+      runToken: previousRunToken,
+      progress: { percent: 99 }
+    });
+    assert.equal(record.job.extract.progress, progressBeforeLateMessage);
+    context.applyOffscreenWebFfmpegProgress({
+      jobId: response.job.id,
+      tabId: 1,
+      runToken: nextRunToken,
+      progress: { percent: 25 }
+    });
+    assert.equal(record.job.extract.progress, 25);
+    await context.cancelPreload(1, response.job.id);
   } finally {
     context.runBrowserPreloadJob = originalRunBrowserPreloadJob;
   }
@@ -582,6 +1899,7 @@ vm.runInContext(source, context, { filename: "service-worker.js" });
   const originalExtract = context.extractCandidateAudioInBrowser;
   const originalFunAsr = context.transcribeDashScopeFunAsrFile;
   const originalTranslate = context.translateBrowserSegments;
+  const originalStartBrowserJobInOffscreen = context.startBrowserJobInOffscreen;
   const originalEnsureSubtitleOverlay = context.ensureSubtitleOverlay;
   const originalAttachBrowserJobVttIfReady = context.attachBrowserJobVttIfReady;
   let extractRunning = false;
@@ -638,6 +1956,7 @@ vm.runInContext(source, context, { filename: "service-worker.js" });
     translationCalls += 1;
     return segments.map(segment => ({ ...segment, text: `译文 ${translationCalls}` }));
   };
+  context.startBrowserJobInOffscreen = async () => ({ status: "unavailable" });
   context.ensureSubtitleOverlay = async () => {};
   context.attachBrowserJobVttIfReady = async () => {};
   context.recordForFunAsrStreamingTest = record;
@@ -657,6 +1976,7 @@ vm.runInContext(source, context, { filename: "service-worker.js" });
     context.extractCandidateAudioInBrowser = originalExtract;
     context.transcribeDashScopeFunAsrFile = originalFunAsr;
     context.translateBrowserSegments = originalTranslate;
+    context.startBrowserJobInOffscreen = originalStartBrowserJobInOffscreen;
     context.ensureSubtitleOverlay = originalEnsureSubtitleOverlay;
     context.attachBrowserJobVttIfReady = originalAttachBrowserJobVttIfReady;
   }
@@ -9840,8 +11160,10 @@ function add(tabId, candidate) {
     assert.equal(response.audioFiles.length, 1);
     assert.equal(response.audioFiles[0].path, "audio/chunk-0000-chunk-001.mp3");
     assert.equal(response.audioFiles[0].mime, "audio/mpeg");
-    assert.equal(response.audioFiles[0].base64, "BQYH");
-    assert.equal(JSON.parse(JSON.stringify(response)).audioFiles[0].base64, "BQYH");
+    assert.equal(response.audioFiles[0].cacheName, "fuguang-web-ffmpeg-audio");
+    assert.equal(response.audioFiles[0].cacheUrl, cacheUrl);
+    assert.equal(Object.hasOwn(response.audioFiles[0], "base64"), false);
+    assert.equal(new Uint8Array(await (await cache.match(response.audioFiles[0].cacheUrl)).arrayBuffer()).join(","), "5,6,7");
     assert.equal(response.diagnostics.audioExport.files[0].included, true);
     assert.equal(response.diagnostics.audioExport.files[0].path, "audio/chunk-0000-chunk-001.mp3");
     assert.equal(JSON.stringify(response.diagnostics).includes("do-not-export"), false);
@@ -9867,4 +11189,606 @@ function add(tabId, candidate) {
     /翻译模型请求超时/
   );
   context.requestOpenAiCompatibleChat = originalRequest;
+}
+
+{
+  const tabId = 990;
+  seedPage(tabId, {
+    title: "Untrusted page candidate",
+    url: "https://attacker.example.test/watch",
+    duration: 30
+  });
+  context.addPageMediaCandidate(tabId, {
+    url: "http://192.168.1.9/private.mp4",
+    kind: "video",
+    ext: "mp4",
+    source: "response",
+    href: "https://attacker.example.test/watch"
+  }, 0);
+  const [candidate] = context.getDisplayCandidates(tabId);
+  assert.equal(candidate.source, "page", "页面桥接候选不能伪装成 webRequest 观测来源");
+  const resolved = context.resolvePreloadCandidateForStart(context.getState(tabId), candidate);
+  assert.equal(resolved.executionAllowed, false);
+  assert.equal(resolved.trustReason, "private-network-source-not-observed");
+}
+
+{
+  const tabId = 991;
+  const url = "http://192.168.1.10/media.mp4";
+  seedPage(tabId, {
+    title: "Observed private media",
+    url: "http://192.168.1.10/player",
+    duration: 30
+  });
+  context.noteActiveDocument(tabId, 0, "document-private-media", { authoritative: true });
+  webRequestBeforeSendHeadersListeners[0]({
+    tabId,
+    url,
+    requestId: "private-media-request",
+    requestHeaders: [{ name: "Accept", value: "video/*" }],
+    type: "media",
+    statusCode: 206
+  });
+  let [candidate] = context.getDisplayCandidates(tabId);
+  assert.equal(candidate.source, "request-headers");
+  assert.equal(candidate.responseStatus, undefined, "request headers must not attest a future response status");
+  assert.equal(context.resolvePreloadCandidateForStart(context.getState(tabId), candidate).executionAllowed, false);
+
+  webRequestHeadersReceivedListeners[0]({
+    tabId,
+    url,
+    requestId: "private-media-request",
+    frameId: 0,
+    documentId: "document-private-media",
+    parentFrameId: -1,
+    ip: "192.168.1.10",
+    responseHeaders: [
+      { name: "Content-Type", value: "video/mp4" },
+      { name: "Content-Range", value: "bytes 0-1023/4096" }
+    ],
+    type: "media",
+    statusCode: 206
+  });
+  [candidate] = context.getDisplayCandidates(tabId);
+  assert.equal(candidate.source, "response");
+  assert.equal(candidate.responseStatus, 206);
+  assert.equal(candidate.responseIp, "192.168.1.10");
+  assert.equal(candidate.documentId, "document-private-media");
+  const resolved = context.resolvePreloadCandidateForStart(context.getState(tabId), candidate);
+  assert.equal(resolved.executionAllowed, true);
+  assert.equal(resolved.trustReason, "browser-observed-response");
+}
+
+{
+  const tabId = 992;
+  const url = "http://192.168.1.11/missing.mp4";
+  seedPage(tabId, {
+    title: "Failed private media",
+    url: "http://192.168.1.11/player",
+    duration: 30
+  });
+  webRequestHeadersReceivedListeners[0]({
+    tabId,
+    url,
+    requestId: "failed-private-media-request",
+    responseHeaders: [{ name: "Content-Type", value: "video/mp4" }],
+    type: "media",
+    statusCode: 404
+  });
+  const [candidate] = context.getDisplayCandidates(tabId);
+  assert.equal(candidate.responseStatus, 404);
+  assert.equal(context.resolvePreloadCandidateForStart(context.getState(tabId), candidate).executionAllowed, false);
+}
+
+{
+  const tabId = 993;
+  const url = "http://192.168.1.12/late.mp4";
+  seedPage(tabId, { url: "https://example.test/new-page", duration: 30 });
+  context.noteActiveDocument(tabId, 0, "document-new", { authoritative: true });
+  webRequestHeadersReceivedListeners[0]({
+    tabId,
+    url,
+    requestId: "late-old-document-response",
+    frameId: 0,
+    documentId: "document-old",
+    responseHeaders: [{ name: "Content-Type", value: "video/mp4" }],
+    type: "media",
+    statusCode: 206,
+    ip: "192.168.1.12"
+  });
+  const [candidate] = context.getDisplayCandidates(tabId);
+  assert.equal(
+    context.resolvePreloadCandidateForStart(context.getState(tabId), candidate).executionAllowed,
+    false,
+    "a late response from the previous document must not authorize the new page"
+  );
+}
+
+{
+  const tabId = 994;
+  seedPage(tabId, { url: "https://example.test/new-document", duration: 30 });
+  context.noteActiveDocument(tabId, 0, "document-new", { authoritative: true });
+  await context.handleMessage({
+    type: "FUGUANG_PAGE_CONTEXT_FOUND",
+    context: { href: "https://example.test/old-document", duration: 30 }
+  }, {
+    tab: { id: tabId },
+    frameId: 0,
+    documentId: "document-old"
+  });
+  assert.equal(
+    context.getState(tabId).documentIdsByFrame.get(0),
+    "document-new",
+    "a late content-script message must not roll authoritative document identity back"
+  );
+
+  context.addCandidate(tabId, {
+    url: "http://192.168.1.13/no-document.mp4",
+    source: "response",
+    responseStatus: 206,
+    frameId: 0,
+    documentId: "",
+    kind: "video",
+    ext: "mp4",
+    seenAt: Date.now()
+  });
+  const [candidate] = context.getDisplayCandidates(tabId);
+  assert.equal(
+    context.resolvePreloadCandidateForStart(context.getState(tabId), candidate).executionAllowed,
+    false,
+    "private-network response proof without an authoritative document id must fail closed"
+  );
+}
+
+{
+  const tabId = 995;
+  const frameKey = `${tabId}:0`;
+  webNavigationFrames.set(frameKey, { documentId: "document-hydrated", url: "https://example.test/hydrated" });
+  try {
+    const response = await context.handleMessage({
+      type: "FUGUANG_PAGE_CONTEXT_FOUND",
+      context: { href: "https://example.test/hydrated", duration: 30 }
+    }, {
+      tab: { id: tabId },
+      frameId: 0,
+      documentId: "document-hydrated"
+    });
+    assert.deepEqual(JSON.parse(JSON.stringify(response)), {});
+    assert.equal(
+      context.getState(tabId).documentIdsByFrame.get(0),
+      "document-hydrated",
+      "a restarted worker must hydrate current document identity through webNavigation.getFrame"
+    );
+  } finally {
+    webNavigationFrames.delete(frameKey);
+  }
+}
+
+{
+  const tabId = 996;
+  const url = "http://192.168.1.14/nested-frame.mp4";
+  seedPage(tabId, { url: "https://example.test/frame-tree", duration: 30 });
+  context.noteActiveDocument(tabId, 0, "top-current", { authoritative: true });
+  context.noteActiveDocument(tabId, 1, "parent-old", { authoritative: true });
+  context.noteActiveDocument(tabId, 2, "child-old", { authoritative: true });
+  webRequestHeadersReceivedListeners[0]({
+    tabId,
+    url,
+    requestId: "nested-frame-response",
+    frameId: 2,
+    documentId: "child-old",
+    parentFrameId: 1,
+    parentDocumentId: "parent-old",
+    responseHeaders: [{ name: "Content-Type", value: "video/mp4" }],
+    type: "media",
+    statusCode: 206,
+    ip: "192.168.1.14"
+  });
+  let [candidate] = context.getDisplayCandidates(tabId);
+  assert.equal(context.resolvePreloadCandidateForStart(context.getState(tabId), candidate).executionAllowed, true);
+
+  await webNavigationCommittedListeners[0]({
+    tabId,
+    frameId: 1,
+    documentId: "parent-new",
+    parentFrameId: 0,
+    parentDocumentId: "top-current",
+    url: "https://example.test/replaced-parent"
+  });
+  [candidate] = context.getDisplayCandidates(tabId);
+  assert.equal(
+    context.resolvePreloadCandidateForStart(context.getState(tabId), candidate).executionAllowed,
+    false,
+    "a child response proof must become stale when its parent frame commits a new document"
+  );
+}
+
+{
+  const tabId = 997;
+  const candidate = {
+    frameId: 2,
+    documentId: "child-current",
+    parentFrameId: 0,
+    parentDocumentId: "top-current"
+  };
+  webNavigationFrames.set(`${tabId}:0`, { documentId: "top-current", url: "https://example.test/top" });
+  webNavigationFrames.set(`${tabId}:2`, { documentId: "child-current", url: "https://example.test/child" });
+  try {
+    assert.equal(await context.isCandidateDocumentStillCurrent(tabId, candidate), true);
+    assert.equal(
+      await context.isCandidateDocumentStillCurrent(tabId, { ...candidate, parentDocumentId: "" }),
+      false,
+      "a nested candidate without a parent document identity must fail closed"
+    );
+    webNavigationFrames.delete(`${tabId}:2`);
+    assert.equal(
+      await context.isCandidateDocumentStillCurrent(tabId, candidate),
+      false,
+      "a removed iframe must fail the final authoritative document check"
+    );
+  } finally {
+    webNavigationFrames.delete(`${tabId}:0`);
+    webNavigationFrames.delete(`${tabId}:2`);
+  }
+}
+
+{
+  const sourceRecord = {
+    runToken: "run-ledger-v2",
+    metadata: { duration: 900 },
+    modelConfig: { chunkSeconds: 900 },
+    browserAsrChunkToTranslationGroup: new Map([[0, 0], [1, 0]]),
+    audioChunks: [
+      {
+        index: 0,
+        start: 0,
+        end: 30,
+        coreStart: 0,
+        coreEnd: 30,
+        file: { cacheUrl: "https://fuguang.local/__fuguang_audio_cache/job-ledger-v2/0.mp3" }
+      },
+      {
+        index: 1,
+        start: 30,
+        end: 60,
+        coreStart: 30,
+        coreEnd: 60,
+        file: {
+          parts: [
+            { index: 10, start: 30, end: 45, file: { cacheUrl: "https://fuguang.local/__fuguang_audio_cache/job-ledger-v2/1a.mp3" } },
+            { index: 11, start: 45, end: 60, file: { cacheUrl: "https://fuguang.local/__fuguang_audio_cache/job-ledger-v2/1b.mp3" } }
+          ]
+        }
+      }
+    ],
+    sourceSegmentsByChunk: new Map([[0, [{ start: 1, end: 2, text: "source" }]]]),
+    translatedSegmentsByChunk: new Map([[0, [{ start: 1, end: 2, text: "translated" }]]]),
+    job: {
+      id: "job-ledger-v2",
+      runToken: "run-ledger-v2",
+      status: "running",
+      stage: "translation",
+      createdAt: 100,
+      updatedAt: 200,
+      extract: { status: "completed", duration: 900, asrChunkSeconds: 30 },
+      translation: {
+        status: "running",
+        chunksTotal: 1,
+        chunkStatuses: [{ index: 0, stage: "completed", updatedAt: 190 }]
+      }
+    }
+  };
+  const ledger = context.FuguangJobContract.createJobLedgerEntry(sourceRecord, {
+    pageIdentity: "https://example.test/watch/ledger-v2"
+  });
+  const entries = context.FuguangJobContract.createChunkLedgerEntries(sourceRecord);
+  const recovered = context.recoverBrowserJobRecord(ledger, entries, sourceRecord.modelConfig);
+
+  assert.equal(recovered.job.translation.chunkStatuses.filter(Boolean).length, 1);
+  assert.equal(recovered.job.translation.chunksTotal, 1);
+  assert.equal(recovered.audioChunks.length, 2);
+  assert.equal(recovered.browserAsrChunkToTranslationGroup.get(0), 0);
+  assert.equal(recovered.browserAsrChunkToTranslationGroup.get(1), 0);
+  assert.equal(recovered.browserTranslationGroups.size, 1);
+  assert.equal(recovered.audioChunks[1].file.parts.length, 2);
+  assert.deepEqual(
+    Array.from(recovered.sourceSegmentsByChunk.get(0), segment => segment.text),
+    ["source"]
+  );
+
+  const activeLedger = {
+    ...ledger,
+    status: "running",
+    stage: "asr",
+    executionRunToken: ledger.runToken,
+    executionStartedAt: 150
+  };
+  const activeRecovered = context.recoverBrowserJobRecord(activeLedger, entries, sourceRecord.modelConfig);
+  assert.equal(activeRecovered.job.status, "running");
+  assert.equal(activeRecovered.offscreenExecution, true);
+  assert.equal(activeRecovered.job.error, "");
+}
+
+await assert.rejects(
+  context.beginBrowserJobAttempt({
+    job: { id: "already-running-job", status: "running" }
+  }, "retrying"),
+  /任务正在运行/
+);
+
+{
+  const originalFetch = context.fetch;
+  context.fetch = async (_url, options = {}) => ({
+    ok: true,
+    status: 200,
+    headers: {},
+    body: { cancel: async () => {} },
+    json: () => new Promise((_resolve, reject) => {
+      options.signal?.addEventListener?.("abort", () => {
+        const error = new Error("aborted response body");
+        error.name = "AbortError";
+        reject(error);
+      }, { once: true });
+    })
+  });
+  try {
+    const request = context.requestBrowserAsrTranscription({
+      endpoint: "https://asr.example.test/v1/audio/transcriptions",
+      timeoutMs: 20,
+      asrConfig: { providerType: "openai", apiKey: "test", model: "whisper-1", vadFilter: "off" },
+      supportedRequestFields: new Set(),
+      effectiveChunk: { file: { mime: "audio/mpeg" }, speechIntervalsReliable: false },
+      fileBuffer: new ArrayBuffer(1),
+      fileName: "timeout.mp3",
+      clipTimestamps: "",
+      matureAsrPlan: null
+    });
+    await assert.rejects(
+      Promise.race([
+        request,
+        new Promise((_resolve, reject) => setTimeout(() => reject(new Error("response body timeout was not enforced")), 100))
+      ]),
+      /ASR 请求超时/
+    );
+  } finally {
+    context.fetch = originalFetch;
+  }
+}
+{
+  const originalTranscribeBrowserAudioChunk = context.transcribeBrowserAudioChunk;
+  const record = {
+    tabId: 1001,
+    runToken: "run-stale-operation",
+    pipeline: "browser",
+    startedAt: Date.now(),
+    cancelled: false,
+    abortController: new AbortController(),
+    candidate: { url: "https://media.example.test/stale-operation.mp3", kind: "audio", ext: "mp3" },
+    metadata: { pageUrl: "https://example.test/watch/stale-operation", duration: 30 },
+    modelConfig: { asr: {}, translation: {}, targetLanguage: "zh-CN", asrWorkers: 1, workers: 1, chunkSeconds: 900 },
+    sourceSegmentsByChunk: new Map(),
+    translatedSegmentsByChunk: new Map(),
+    job: {
+      id: "job-stale-operation",
+      runToken: "run-stale-operation",
+      pipeline: "browser",
+      status: "running",
+      stage: "asr",
+      createdAt: 100,
+      updatedAt: 200,
+      extract: { status: "completed", progress: 100, duration: 30 },
+      translation: { status: "running", chunksTotal: 0, chunksDone: 0, chunkStatuses: [] }
+    }
+  };
+  context.enqueueBrowserLogicalAudioChunk(record, {
+    index: 0,
+    start: 0,
+    end: 30,
+    coreStart: 0,
+    coreEnd: 30,
+    duration: 30,
+    file: { name: "stale-operation.mp3", mime: "audio/mpeg", buffer: new ArrayBuffer(1) }
+  });
+  context.closeAllBrowserTranslationGroups(record);
+  let markStarted;
+  let releaseTranscription;
+  const started = new Promise(resolve => { markStarted = resolve; });
+  const transcriptionGate = new Promise(resolve => { releaseTranscription = resolve; });
+  context.transcribeBrowserAudioChunk = async () => {
+    markStarted();
+    await transcriptionGate;
+    return [{ start: 1, end: 2, text: "stale source" }];
+  };
+  context.staleOperationRecord = record;
+  vm.runInContext("browserPreloadJobs.set('job-stale-operation', staleOperationRecord)", context);
+  await vm.runInContext("browserJobStore.putSnapshot({ job: staleOperationRecord.job, chunks: [] })", context);
+  const firstClaim = await vm.runInContext("browserJobStore.claimRun('job-stale-operation', 'run-stale-operation', { ownerId: 'owner-a', claimedAt: Date.now(), leaseDurationMs: 30000 })", context);
+  const firstMessage = {
+    jobId: record.job.id,
+    runToken: record.runToken,
+    executionOwnerId: "owner-a",
+    executionEpoch: firstClaim.job.executionEpoch,
+    chunkIndex: 0
+  };
+  try {
+    const oldOperation = context.processOffscreenBrowserJobChunk(firstMessage);
+    await started;
+    await vm.runInContext(`browserJobStore.releaseRun('job-stale-operation', 'run-stale-operation', 'owner-a', Date.now(), ${firstClaim.job.executionEpoch})`, context);
+    const takeover = await vm.runInContext("browserJobStore.claimRun('job-stale-operation', 'run-stale-operation', { ownerId: 'owner-b', claimedAt: Date.now(), leaseDurationMs: 30000 })", context);
+    const takeoverWork = await context.getOffscreenBrowserJobWork({
+      jobId: record.job.id,
+      runToken: record.runToken,
+      executionOwnerId: "owner-b",
+      executionEpoch: takeover.job.executionEpoch
+    });
+    releaseTranscription();
+    const oldResult = await oldOperation;
+    const durable = await vm.runInContext("browserJobStore.getJob('job-stale-operation')", context);
+    assert.equal(oldResult.stale, true);
+    assert.equal(takeoverWork.interrupted, true, "unsafe same-run takeover must stop for an explicit retry");
+    assert.equal(Boolean(record.audioChunks[0].asrCompleted), false, "a fenced operation must discard a late ASR result");
+    assert.equal(durable.executionOwnerId, "owner-b");
+    assert.equal(durable.status, "interrupted");
+  } finally {
+    releaseTranscription();
+    await vm.runInContext("browserJobStore.deleteJob('job-stale-operation')", context);
+    vm.runInContext("browserPreloadJobs.delete('job-stale-operation')", context);
+    delete context.staleOperationRecord;
+    context.transcribeBrowserAudioChunk = originalTranscribeBrowserAudioChunk;
+  }
+}
+
+{
+  const record = {
+    tabId: 998,
+    runToken: "run-translation-finalize",
+    pipeline: "funasr",
+    cancelled: false,
+    abortController: new AbortController(),
+    audioChunks: [{ index: 0, asrCompleted: true, asrFailed: false, sourceSegments: [] }],
+    sourceSegmentsByChunk: new Map(),
+    translatedSegmentsByChunk: new Map(),
+    job: {
+      id: "job-translation-finalize",
+      runToken: "run-translation-finalize",
+      pipeline: "funasr",
+      status: "running",
+      stage: "translation",
+      createdAt: 100,
+      updatedAt: 200,
+      extract: { status: "completed", progress: 100 },
+      translation: { status: "running", chunksTotal: 1, chunksDone: 0, chunkStatuses: [] }
+    }
+  };
+  context.translationFinalizeRecord = record;
+  vm.runInContext("browserPreloadJobs.set('job-translation-finalize', translationFinalizeRecord)", context);
+  await vm.runInContext("browserJobStore.putSnapshot({ job: translationFinalizeRecord.job, chunks: [] })", context);
+  const claim = await vm.runInContext("browserJobStore.claimRun('job-translation-finalize', 'run-translation-finalize', { ownerId: 'translation-owner', claimedAt: Date.now(), leaseDurationMs: 30000 })", context);
+  vm.runInContext("offscreenBrowserChunkOperations.set('job-translation-finalize:run-translation-finalize:1:0', { jobId: 'job-translation-finalize', runToken: 'run-translation-finalize', chunkIndex: 0, executionOwnerId: 'translation-owner', executionEpoch: 1, controller: new AbortController(), stale: false })", context);
+  try {
+    const result = await context.finalizeOffscreenBrowserJob({
+      jobId: record.job.id,
+      runToken: record.runToken,
+      executionOwnerId: "translation-owner",
+      executionEpoch: claim.job.executionEpoch
+    });
+    assert.equal(result.inProgress, true, "the Service Worker must independently reject finalize while translation is active");
+    assert.equal(record.job.status, "running");
+  } finally {
+    vm.runInContext("offscreenBrowserChunkOperations.delete('job-translation-finalize:run-translation-finalize:1:0')", context);
+    await vm.runInContext("browserJobStore.deleteJob('job-translation-finalize')", context);
+    vm.runInContext("browserPreloadJobs.delete('job-translation-finalize')", context);
+    delete context.translationFinalizeRecord;
+  }
+}
+
+{
+  const record = {
+    tabId: 999,
+    runToken: "run-fenced-write-race",
+    pipeline: "browser",
+    cancelled: false,
+    abortController: new AbortController(),
+    audioChunks: [],
+    job: {
+      id: "job-fenced-write-race",
+      runToken: "run-fenced-write-race",
+      pipeline: "browser",
+      status: "running",
+      stage: "asr",
+      createdAt: 100,
+      updatedAt: 200,
+      extract: { status: "completed" },
+      translation: { status: "running", chunkStatuses: [] }
+    }
+  };
+  context.fencedWriteRaceRecord = record;
+  vm.runInContext("browserPreloadJobs.set('job-fenced-write-race', fencedWriteRaceRecord)", context);
+  await vm.runInContext("browserJobStore.putSnapshot({ job: fencedWriteRaceRecord.job, chunks: [] })", context);
+  const firstClaim = await vm.runInContext("browserJobStore.claimRun('job-fenced-write-race', 'run-fenced-write-race', { ownerId: 'owner-a', claimedAt: Date.now(), leaseDurationMs: 30000 })", context);
+  const originalGetJob = await vm.runInContext("browserJobStore.getJob", context);
+  context.fencedWriteSwappedOwner = false;
+  context.fencedWriteOriginalGetJob = originalGetJob;
+  context.fencedWriteFirstEpoch = firstClaim.job.executionEpoch;
+  vm.runInContext(`browserJobStore.getJob = async jobId => {
+    const snapshot = await fencedWriteOriginalGetJob(jobId);
+    if (!fencedWriteSwappedOwner && jobId === 'job-fenced-write-race') {
+      fencedWriteSwappedOwner = true;
+      await browserJobStore.releaseRun(jobId, 'run-fenced-write-race', 'owner-a', Date.now(), fencedWriteFirstEpoch);
+      await browserJobStore.claimRun(jobId, 'run-fenced-write-race', { ownerId: 'owner-b', claimedAt: Date.now(), leaseDurationMs: 30000 });
+    }
+    return snapshot;
+  }`, context);
+  try {
+    const result = await context.failOffscreenBrowserJob({
+      jobId: record.job.id,
+      runToken: record.runToken,
+      executionOwnerId: "owner-a",
+      executionEpoch: firstClaim.job.executionEpoch,
+      error: "old owner failure"
+    });
+    const durable = await originalGetJob(record.job.id);
+    assert.equal(result.stale, true, "a takeover between validation and write must fence the old mutation");
+    assert.equal(record.job.status, "running");
+    assert.equal(durable.status, "running");
+    assert.equal(durable.executionOwnerId, "owner-b");
+  } finally {
+    vm.runInContext("browserJobStore.getJob = fencedWriteOriginalGetJob", context);
+    await vm.runInContext("browserJobStore.deleteJob('job-fenced-write-race')", context);
+    vm.runInContext("browserPreloadJobs.delete('job-fenced-write-race')", context);
+    delete context.fencedWriteRaceRecord;
+    delete context.fencedWriteOriginalGetJob;
+    delete context.fencedWriteFirstEpoch;
+    delete context.fencedWriteSwappedOwner;
+  }
+}
+
+{
+  const record = {
+    tabId: 1000,
+    runToken: "run-local-handoff",
+    pipeline: "browser",
+    cancelled: false,
+    recoveryBlocked: false,
+    abortController: new AbortController(),
+    localExecutionLease: {
+      ownerId: "local-owner",
+      runToken: "run-local-handoff",
+      executionEpoch: 1,
+      expiresAt: Date.now() - 1,
+      timer: null
+    },
+    audioChunks: [{ index: 0, asrCompleted: false }],
+    job: {
+      id: "job-local-handoff",
+      runToken: "run-local-handoff",
+      pipeline: "browser",
+      status: "running",
+      stage: "asr",
+      createdAt: 100,
+      updatedAt: 200,
+      extract: { status: "completed" },
+      translation: { status: "running", chunkStatuses: [] }
+    }
+  };
+  const originalStartBrowserJobInOffscreen = context.startBrowserJobInOffscreen;
+  let offscreenStarts = 0;
+  context.startBrowserJobInOffscreen = async () => {
+    offscreenStarts += 1;
+    return { status: "started", duplicate: false };
+  };
+  context.localHandoffRecord = record;
+  vm.runInContext("browserPreloadJobs.set('job-local-handoff', localHandoffRecord)", context);
+  await vm.runInContext("browserJobStore.putSnapshot({ job: localHandoffRecord.job, chunks: [] })", context);
+  await vm.runInContext("browserJobStore.claimRun('job-local-handoff', 'run-local-handoff', { ownerId: 'local-owner', claimedAt: Date.now() - 1000, leaseDurationMs: 10 })", context);
+  try {
+    const result = await context.recoverExpiredBrowserJobLease(record.job.id);
+    assert.equal(offscreenStarts, 0, "automatic recovery must not overlap a still-settling local pipeline");
+    assert.notEqual(result.recovered, true);
+  } finally {
+    context.startBrowserJobInOffscreen = originalStartBrowserJobInOffscreen;
+    await vm.runInContext("browserJobStore.deleteJob('job-local-handoff')", context);
+    vm.runInContext("browserPreloadJobs.delete('job-local-handoff')", context);
+    delete context.localHandoffRecord;
+  }
 }

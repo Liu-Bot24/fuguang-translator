@@ -263,11 +263,11 @@ export const FuguangBrowserAsrProvider = (() => {
     return false;
   }
 
-  async function resolveBrowserAsrSupportedRequestFields(asrConfig = {}) {
+  async function resolveBrowserAsrSupportedRequestFields(asrConfig = {}, options = {}) {
     if (!shouldProbeBrowserAsrCapabilities(asrConfig)) {
       return new Set();
     }
-    return browserAsrOpenApiSupportedRequestFields(asrConfig?.baseUrl);
+    return browserAsrOpenApiSupportedRequestFields(asrConfig?.baseUrl, options);
   }
 
   function shouldProbeBrowserAsrCapabilities(asrConfig = {}) {
@@ -279,7 +279,7 @@ export const FuguangBrowserAsrProvider = (() => {
     return Boolean(baseUrl && !isKnownStandardAsrBaseUrl(baseUrl));
   }
 
-  async function browserAsrOpenApiSupportedRequestFields(baseUrl) {
+  async function browserAsrOpenApiSupportedRequestFields(baseUrl, options = {}) {
     const cacheKey = String(baseUrl || "").trim();
     if (!cacheKey) {
       return new Set();
@@ -290,7 +290,7 @@ export const FuguangBrowserAsrProvider = (() => {
     if (browserAsrVadCapabilityCache.has(cacheKey)) {
       return new Set(browserAsrVadCapabilityCache.get(cacheKey) ? ["vad_filter"] : []);
     }
-    const schema = await browserAsrOpenApiSchema(cacheKey);
+    const schema = await browserAsrOpenApiSchema(cacheKey, options);
     if (schema) {
       const fields = schemaAudioTranscriptionRequestProperties(schema);
       if (fields.size) {
@@ -305,7 +305,7 @@ export const FuguangBrowserAsrProvider = (() => {
     return fields;
   }
 
-  async function resolveBrowserAsrSpeechTimestampsEndpoint(asrConfig = {}) {
+  async function resolveBrowserAsrSpeechTimestampsEndpoint(asrConfig = {}, options = {}) {
     if (!shouldProbeBrowserAsrCapabilities(asrConfig)) {
       return "";
     }
@@ -316,13 +316,13 @@ export const FuguangBrowserAsrProvider = (() => {
     if (browserAsrSpeechTimestampsEndpointCache.has(baseUrl)) {
       return browserAsrSpeechTimestampsEndpointCache.get(baseUrl);
     }
-    const schema = await browserAsrOpenApiSchema(baseUrl);
+    const schema = await browserAsrOpenApiSchema(baseUrl, options);
     const endpoint = schemaAudioSpeechTimestampsEndpoint(schema, baseUrl);
     browserAsrSpeechTimestampsEndpointCache.set(baseUrl, endpoint);
     return endpoint;
   }
 
-  async function browserAsrOpenApiSchema(baseUrl) {
+  async function browserAsrOpenApiSchema(baseUrl, options = {}) {
     const cacheKey = String(baseUrl || "").trim();
     if (!cacheKey) {
       return null;
@@ -333,12 +333,14 @@ export const FuguangBrowserAsrProvider = (() => {
     for (const openApiUrl of browserAsrOpenApiUrlCandidates(cacheKey)) {
       try {
         const controller = new AbortController();
+        const unlink = linkBrowserAsrProbeAbortSignal(options.signal, controller);
         const timer = setTimeout(() => controller.abort(), 1500);
         let response;
         try {
           response = await fetch(openApiUrl, { signal: controller.signal });
         } finally {
           clearTimeout(timer);
+          unlink();
         }
         if (!response?.ok) {
           continue;
@@ -348,12 +350,34 @@ export const FuguangBrowserAsrProvider = (() => {
           browserAsrOpenApiSchemaCache.set(cacheKey, schema);
           return schema;
         }
-      } catch {
+      } catch (error) {
+        if (options.signal?.aborted) {
+          throw browserAsrProbeAbortError(options.signal.reason);
+        }
         // Capability probing is best-effort; unknown APIs should keep the standard request shape.
       }
     }
     browserAsrOpenApiSchemaCache.set(cacheKey, null);
     return null;
+  }
+
+  function linkBrowserAsrProbeAbortSignal(signal, controller) {
+    if (!signal) {
+      return () => {};
+    }
+    if (signal.aborted) {
+      controller.abort(signal.reason);
+      return () => {};
+    }
+    const onAbort = () => controller.abort(signal.reason);
+    signal.addEventListener?.("abort", onAbort, { once: true });
+    return () => signal.removeEventListener?.("abort", onAbort);
+  }
+
+  function browserAsrProbeAbortError(reason) {
+    const error = new Error(reason?.message || "任务已停止。");
+    error.name = "AbortError";
+    return error;
   }
 
   function schemaHasAsrRelevantPaths(schema) {

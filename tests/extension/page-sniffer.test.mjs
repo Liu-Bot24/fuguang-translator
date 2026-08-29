@@ -39,6 +39,7 @@ const source = fs.readFileSync(new URL("../../extension/src/content/page-sniffer
 {
   const harness = createHarness();
   vm.runInContext(source, harness.context, { filename: "page-sniffer.js" });
+  assert.equal(harness.context.window.__fuguangPageSnifferSetMode("light"), "light");
   harness.context.JSON.parse(JSON.stringify({
     rest_id: "2059183692569071878",
     legacy: {
@@ -47,6 +48,35 @@ const source = fs.readFileSync(new URL("../../extension/src/content/page-sniffer
           sizes: {
             large: { w: 650, h: 360 }
           },
+          video_info: {
+            duration_millis: 82000,
+            variants: [{
+              url: "https://video.twimg.com/amplify_video/2058970000000000153/pl/avc1/650x360/status-82s.m3u8?tag=16",
+              content_type: "application/x-mpegURL",
+              bitrate: 832000
+            }, {
+              url: "https://video.twimg.com/amplify_video/2058970000000000153/audio/128000/audio-track.mp4",
+              content_type: "audio/mp4",
+              bitrate: 128000
+            }]
+          }
+        }]
+      }
+    }
+  }));
+
+  assert.equal(
+    harness.messages.some(message => /status-82s\.m3u8/.test(message.media?.url || "")),
+    false,
+    "light mode must not inspect every page JSON.parse result"
+  );
+  assert.equal(harness.context.window.__fuguangPageSnifferSetMode("deep"), "deep");
+  harness.context.JSON.parse(JSON.stringify({
+    rest_id: "2059183692569071878",
+    legacy: {
+      extended_entities: {
+        media: [{
+          sizes: { large: { w: 650, h: 360 } },
           video_info: {
             duration_millis: 82000,
             variants: [{
@@ -91,7 +121,8 @@ const source = fs.readFileSync(new URL("../../extension/src/content/page-sniffer
     pageFetch,
     "re-activating the sniffer must not remove a page-installed fetch wrapper"
   );
-  assert.equal(harness.context.window.__fuguangPageSnifferRevision, "20260813-safe-hooks");
+  assert.equal(harness.context.window.__fuguangPageSnifferRevision, "20260829-light-deep-modes");
+  harness.context.window.__fuguangPageSnifferSetMode("deep");
   assert.doesNotThrow(() => vm.runInContext(`
     JSON.parse('{"value":1}', (_key, value) =>
       value && value.value === 1

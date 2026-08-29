@@ -17,8 +17,12 @@ const MESSAGE = {
   ATTACH_VTT_TEXT: "FUGUANG_ATTACH_VTT_TEXT",
   DETACH_PRELOAD_VTT: "FUGUANG_DETACH_PRELOAD_VTT",
   CLEAR_PRELOAD_SUBTITLE_STATE: "FUGUANG_CLEAR_PRELOAD_SUBTITLE_STATE",
-  SEEK_MEDIA: "FUGUANG_SEEK_MEDIA"
+  SEEK_MEDIA: "FUGUANG_SEEK_MEDIA",
+  SIDEPANEL_SUBSCRIBE: "FUGUANG_SIDEPANEL_SUBSCRIBE",
+  SIDEPANEL_JOB_CHANGED: "FUGUANG_SIDEPANEL_JOB_CHANGED"
 };
+const SIDEPANEL_STATUS_PORT_NAME = "fuguang-sidepanel-status-v1";
+const STATUS_FALLBACK_POLL_MS = 15_000;
 
 const DEFAULTS = {
   sourceLanguage: "auto",
@@ -161,6 +165,7 @@ const I18N = {
     statusCompletedWarnings: "完成，有警告",
     statusCompleted: "字幕已完成",
     statusFailed: "任务失败",
+    statusInterrupted: "任务已中断，可继续处理",
     statusCancelled: "任务已停止",
     statusRunning: "处理中",
     jobExtractingTranslating: "正在边抽边译",
@@ -179,6 +184,7 @@ const I18N = {
     stageCompleted: "完成",
     stageCancelled: "已停止",
     stageFailed: "失败",
+    stageInterrupted: "后台重启中断",
     stageProcessing: "处理中",
     chunkQueued: "待识别",
     chunkAsr: "识别",
@@ -447,6 +453,7 @@ const I18N = {
     statusCompletedWarnings: "Completed, with warnings",
     statusCompleted: "Subtitles ready",
     statusFailed: "Task failed",
+    statusInterrupted: "Task interrupted; progress can be resumed",
     statusCancelled: "Stopped",
     statusRunning: "Processing",
     jobExtractingTranslating: "Extracting and translating",
@@ -465,6 +472,7 @@ const I18N = {
     stageCompleted: "Done",
     stageCancelled: "Stopped",
     stageFailed: "Failed",
+    stageInterrupted: "Interrupted by background restart",
     stageProcessing: "Processing",
     chunkQueued: "Waiting for ASR",
     chunkAsr: "ASR",
@@ -758,6 +766,8 @@ let subtitleListUserControlUntil = 0;
 let subtitleFollowTimer = 0;
 let subtitleFollowBusy = false;
 let refreshStatusInFlight = false;
+let statusPort = null;
+let statusRefreshQueued = false;
 let subtitleLoadRequestId = 0;
 let pendingSubtitleSignature = "";
 let pendingSubtitlePromise = null;
@@ -941,12 +951,61 @@ function applyLocale() {
 async function init() {
   applyLocale();
   [activeTab] = await chrome.tabs.query({ active: true, currentWindow: true });
+  connectStatusPort();
   await loadSettings();
   applyLocale();
   showTab(tabFromLocationHash());
   await activateCurrentPage();
   await refreshStatus();
-  pollTimer = window.setInterval(refreshStatus, 1500);
+  pollTimer = window.setInterval(refreshStatus, STATUS_FALLBACK_POLL_MS);
+}
+
+function connectStatusPort() {
+  if (statusPort || typeof chrome.runtime?.connect !== "function") {
+    subscribeStatusPort();
+    return statusPort;
+  }
+  try {
+    const port = chrome.runtime.connect({ name: SIDEPANEL_STATUS_PORT_NAME });
+    statusPort = port;
+    port.onMessage?.addListener?.(message => {
+      if (message?.type !== MESSAGE.SIDEPANEL_JOB_CHANGED || Number(message.tabId) !== Number(activeTab?.id)) {
+        return;
+      }
+      queueStatusRefresh();
+    });
+    port.onDisconnect?.addListener?.(() => {
+      if (statusPort === port) {
+        statusPort = null;
+      }
+    });
+    subscribeStatusPort();
+  } catch {
+    statusPort = null;
+  }
+  return statusPort;
+}
+
+function subscribeStatusPort() {
+  if (!statusPort || !activeTab?.id) {
+    return;
+  }
+  try {
+    statusPort.postMessage({ type: MESSAGE.SIDEPANEL_SUBSCRIBE, tabId: activeTab.id });
+  } catch {
+    statusPort = null;
+  }
+}
+
+function queueStatusRefresh() {
+  if (statusRefreshQueued) {
+    return;
+  }
+  statusRefreshQueued = true;
+  Promise.resolve().then(async () => {
+    statusRefreshQueued = false;
+    await refreshStatus();
+  });
 }
 
 function tabFromLocationHash() {
@@ -962,6 +1021,8 @@ async function refreshActiveTab() {
       await detachSubtitlesFromTab(previousTab.id);
     }
     activeTab = tab;
+    connectStatusPort();
+    subscribeStatusPort();
     if (changed) {
       currentJobId = "";
       currentJob = null;
@@ -1535,6 +1596,7 @@ async function saveSourceLanguageSetting() {
 }
 
 async function refreshStatus() {
+  connectStatusPort();
   if (refreshStatusInFlight) {
     return;
   }
@@ -4187,6 +4249,9 @@ function statusLabel(status) {
   if (preloadStatus === "error" || preloadStatus === "failed") {
     return t("statusFailed");
   }
+  if (preloadStatus === "interrupted") {
+    return t("statusInterrupted");
+  }
   if (preloadStatus === "cancelled") {
     return t("statusCancelled");
   }
@@ -4227,6 +4292,9 @@ function jobTitle(job) {
   if (job.status === "error" || job.status === "failed") {
     return t("statusFailed");
   }
+  if (job.status === "interrupted") {
+    return t("statusInterrupted");
+  }
   if (job.status === "cancelled") {
     return t("statusCancelled");
   }
@@ -4261,6 +4329,7 @@ function stageLabel(stage) {
     completed_with_warnings: t("statusCompletedWarnings"),
     cancelled: t("stageCancelled"),
     failed: t("stageFailed"),
+    interrupted: t("stageInterrupted"),
     done: t("stageCompleted"),
     error: t("stageFailed")
   }[stage] || t("stageProcessing");
@@ -4535,12 +4604,15 @@ function isRunningJob(job) {
   if (!job) {
     return false;
   }
-  return !["done", "completed", "error", "failed", "cancelled"].includes(job.status);
+  return !["done", "completed", "error", "failed", "cancelled", "interrupted"].includes(job.status);
 }
 
 function extractionProgressText(progress, status) {
   if (status === "error" || status === "failed") {
     return t("stageFailed");
+  }
+  if (status === "interrupted") {
+    return t("stageInterrupted");
   }
   if (progress?.status === "done" || progress?.status === "completed") {
     return t("completedPercent");
