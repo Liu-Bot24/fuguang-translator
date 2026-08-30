@@ -96,6 +96,29 @@ test("job store rejects stale snapshots and late writes from an old runToken", a
   assert.equal((await store.getJob("job-a")).executionOwnerId, undefined);
 });
 
+test("ordinary mirrors cannot regress a terminal run back to an active status", async () => {
+  const store = FuguangJobStore.createMemory();
+  await store.putSnapshot({
+    job: job({ status: "failed", stage: "failed", activeKey: "", updatedAt: 200 }),
+    chunks: []
+  });
+
+  const terminalRefresh = await store.putSnapshot({
+    job: job({ status: "failed", stage: "failed", activeKey: "", updatedAt: 250, error: "updated failure detail" }),
+    chunks: []
+  });
+  assert.equal(terminalRefresh.applied, true, "same-terminal metadata updates remain allowed");
+
+  const regressed = await store.putSnapshot({
+    job: job({ status: "running", stage: "translation", updatedAt: 300 }),
+    chunks: []
+  });
+
+  assert.equal(regressed.applied, false);
+  assert.equal(regressed.reason, "terminal-regression");
+  assert.equal((await store.getJob("job-a")).status, "failed");
+});
+
 test("cancel intent is compare-and-set and terminal compaction removes its chunks", async () => {
   const store = FuguangJobStore.createMemory();
   await store.putSnapshot({ job: job(), chunks: [chunk("run-a", 0)] });

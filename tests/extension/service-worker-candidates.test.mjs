@@ -719,6 +719,380 @@ vm.runInContext(source, context, { filename: "service-worker.js" });
 }
 
 {
+  const durableJob = {
+    id: "job-retryable-runtime-start",
+    runToken: "run-retryable-runtime-start",
+    pipeline: "browser",
+    status: "running",
+    stage: "asr",
+    createdAt: 100,
+    updatedAt: 200,
+    extract: { status: "completed", progress: 100 },
+    translation: { status: "running", chunkStatuses: [] }
+  };
+  const record = {
+    tabId: 1184,
+    runToken: durableJob.runToken,
+    pipeline: "browser",
+    startedAt: Date.now(),
+    cancelled: false,
+    recoveryBlocked: false,
+    abortController: new AbortController(),
+    candidate: { url: "https://media.example.test/retryable-runtime-start.mp3", kind: "audio", ext: "mp3" },
+    metadata: { pageUrl: "https://example.test/watch/retryable-runtime-start", duration: 30 },
+    modelConfig: { asr: {}, translation: {}, targetLanguage: "zh-CN", asrWorkers: 1, workers: 1, chunkSeconds: 900 },
+    sourceSegmentsByChunk: new Map(),
+    translatedSegmentsByChunk: new Map(),
+    audioChunks: [],
+    job: structuredClone(durableJob),
+    lastCommittedJob: structuredClone(durableJob)
+  };
+  const originalPostMessage = taskRuntimePort.postMessage;
+  const originalCreateAlarm = chrome.alarms.create;
+  const scheduledAlarms = [];
+  taskRuntimePort.postMessage = message => {
+    Promise.resolve().then(() => {
+      for (const listener of taskRuntimePortListeners) {
+        listener({
+          type: "FUGUANG_TASK_RUNTIME_ERROR",
+          commandId: message.commandId,
+          error: "injected snapshot read error",
+          retryable: true,
+          reason: "snapshot-read-error"
+        });
+      }
+    });
+  };
+  chrome.alarms.create = async (name, options) => {
+    scheduledAlarms.push({ name, options });
+  };
+  context.retryableRuntimeStartRecord = record;
+  context.retryableRuntimeStartDurableJob = durableJob;
+  vm.runInContext("browserPreloadJobs.set('job-retryable-runtime-start', retryableRuntimeStartRecord)", context);
+  await vm.runInContext("browserJobStore.putSnapshot({ job: retryableRuntimeStartDurableJob, chunks: [] })", context);
+  await vm.runInContext("browserJobStore.claimRun('job-retryable-runtime-start', 'run-retryable-runtime-start', { ownerId: 'expired-owner', claimedAt: Date.now() - 1000, leaseDurationMs: 10 })", context);
+  try {
+    const result = await context.recoverExpiredBrowserJobLease(record.job.id);
+    assert.equal(result.reason, "start-unknown", "retryable protocol errors must schedule another recovery instead of interrupting");
+    assert.equal(record.job.status, "running");
+    assert.ok(scheduledAlarms.some(item => item.name.endsWith(record.job.id)));
+  } finally {
+    taskRuntimePort.postMessage = originalPostMessage;
+    chrome.alarms.create = originalCreateAlarm;
+    await vm.runInContext("browserJobStore.deleteJob('job-retryable-runtime-start')", context);
+    vm.runInContext("browserPreloadJobs.delete('job-retryable-runtime-start')", context);
+    delete context.retryableRuntimeStartRecord;
+    delete context.retryableRuntimeStartDurableJob;
+  }
+}
+
+{
+  const durableJob = {
+    id: "job-dirty-lease-recovery",
+    runToken: "run-dirty-lease-recovery",
+    pipeline: "browser",
+    status: "running",
+    stage: "asr",
+    createdAt: 100,
+    updatedAt: 200,
+    extract: { status: "completed", progress: 100 },
+    translation: { status: "running", chunkStatuses: [] }
+  };
+  const record = {
+    tabId: 1180,
+    runToken: durableJob.runToken,
+    pipeline: "browser",
+    cancelled: false,
+    recoveryBlocked: false,
+    staleOffscreenOperationDetected: true,
+    abortController: new AbortController(),
+    lastCommittedJob: structuredClone(durableJob),
+    audioChunks: [{ index: 0, asrCompleted: true, sourceSegments: [{ text: "dirty" }] }],
+    job: {
+      ...structuredClone(durableJob),
+      status: "completed",
+      stage: "completed",
+      updatedAt: 999
+    }
+  };
+  const originalStartBrowserJobInOffscreen = context.startBrowserJobInOffscreen;
+  const originalCreateAlarm = chrome.alarms.create;
+  const scheduledAlarms = [];
+  const starts = [];
+  context.startBrowserJobInOffscreen = async (_record, options) => {
+    starts.push(options);
+    return { status: "started", duplicate: false, executionLeaseExpiresAt: Date.now() + 30_000 };
+  };
+  chrome.alarms.create = async (name, options) => {
+    scheduledAlarms.push({ name, options });
+  };
+  context.dirtyLeaseRecoveryRecord = record;
+  vm.runInContext("browserPreloadJobs.set('job-dirty-lease-recovery', dirtyLeaseRecoveryRecord)", context);
+  await vm.runInContext(`browserJobStore.putSnapshot({
+    job: ${JSON.stringify(durableJob)},
+    chunks: [{ entryType: 'audio-chunk', index: 0, asrCompleted: false }]
+  })`, context);
+  await vm.runInContext("browserJobStore.claimRun('job-dirty-lease-recovery', 'run-dirty-lease-recovery', { ownerId: 'expired-owner', claimedAt: Date.now() - 1000, leaseDurationMs: 10 })", context);
+  try {
+    const result = await context.recoverExpiredBrowserJobLease(record.job.id);
+    assert.equal(result.recovered, true, "dirty terminal memory must not suppress recovery of a durable running job");
+    assert.equal(starts.length, 1);
+    assert.equal(starts[0]?.resumeExisting, true, "automatic recovery must claim the durable snapshot without replaying memory");
+    assert.ok(scheduledAlarms.some(item => item.name.endsWith(record.job.id)), "successful recovery must schedule the next lease check from durable status");
+  } finally {
+    context.startBrowserJobInOffscreen = originalStartBrowserJobInOffscreen;
+    chrome.alarms.create = originalCreateAlarm;
+    await vm.runInContext("browserJobStore.deleteJob('job-dirty-lease-recovery')", context);
+    vm.runInContext("browserPreloadJobs.delete('job-dirty-lease-recovery')", context);
+    delete context.dirtyLeaseRecoveryRecord;
+  }
+}
+
+{
+  const durableJob = {
+    id: "job-durable-terminal-recovery",
+    runToken: "run-durable-terminal-recovery",
+    pipeline: "browser",
+    status: "completed",
+    stage: "completed",
+    createdAt: 100,
+    updatedAt: 300,
+    extract: { status: "completed", progress: 100 },
+    translation: { status: "completed", chunkStatuses: [] }
+  };
+  const record = {
+    tabId: 1181,
+    runToken: durableJob.runToken,
+    pipeline: "browser",
+    cancelled: false,
+    recoveryBlocked: false,
+    abortController: new AbortController(),
+    startedAt: Date.now(),
+    candidate: { url: "https://media.example.test/durable-terminal.mp3", kind: "audio", ext: "mp3" },
+    metadata: { pageUrl: "https://example.test/watch/durable-terminal", duration: 30 },
+    modelConfig: { asr: {}, translation: {}, targetLanguage: "zh-CN", asrWorkers: 1, workers: 1, chunkSeconds: 900 },
+    sourceSegmentsByChunk: new Map(),
+    translatedSegmentsByChunk: new Map(),
+    audioChunks: [],
+    job: { ...structuredClone(durableJob), status: "running", stage: "asr", updatedAt: 999 }
+  };
+  record.lastCommittedJob = structuredClone(record.job);
+  const originalStartBrowserJobInOffscreen = context.startBrowserJobInOffscreen;
+  let starts = 0;
+  context.startBrowserJobInOffscreen = async () => {
+    starts += 1;
+    return { status: "started", duplicate: false };
+  };
+  context.durableTerminalRecoveryRecord = record;
+  vm.runInContext("browserPreloadJobs.set('job-durable-terminal-recovery', durableTerminalRecoveryRecord)", context);
+  await vm.runInContext(`browserJobStore.putSnapshot({ job: ${JSON.stringify(durableJob)}, chunks: [] })`, context);
+  try {
+    const result = await context.recoverExpiredBrowserJobLease(record.job.id);
+    assert.equal(result.reason, "inactive");
+    assert.equal(starts, 0, "a durable terminal job must not be restarted from a dirty running draft");
+    assert.equal(record.job.status, "completed", "durable terminal state must replace the stale in-memory running view");
+    assert.equal(record.lastCommittedJob.status, "completed");
+    const polled = context.refreshBrowserPreloadJobForStatus(record.job);
+    await context.flushBrowserJobMirror(record.job.id);
+    const stored = await vm.runInContext("browserJobStore.getJob('job-durable-terminal-recovery')", context);
+    const mirrorPending = vm.runInContext("browserJobMirrorPending.has('job-durable-terminal-recovery')", context);
+    assert.equal(polled.status, "completed");
+    assert.equal(stored.status, "completed", "status polling must not regress a durable terminal job");
+    assert.equal(mirrorPending, false);
+  } finally {
+    context.startBrowserJobInOffscreen = originalStartBrowserJobInOffscreen;
+    await vm.runInContext("browserJobStore.deleteJob('job-durable-terminal-recovery')", context);
+    vm.runInContext("browserPreloadJobs.delete('job-durable-terminal-recovery')", context);
+    delete context.durableTerminalRecoveryRecord;
+  }
+}
+
+{
+  const record = {
+    tabId: 1182,
+    runToken: "run-mirror-commit-tracking",
+    pipeline: "browser",
+    startedAt: Date.now(),
+    cancelled: false,
+    abortController: new AbortController(),
+    audioChunks: [],
+    sourceSegmentsByChunk: new Map(),
+    translatedSegmentsByChunk: new Map(),
+    job: {
+      id: "job-mirror-commit-tracking",
+      runToken: "run-mirror-commit-tracking",
+      pipeline: "browser",
+      status: "queued",
+      stage: "queued",
+      createdAt: 100,
+      updatedAt: 200,
+      extract: { status: "queued", progress: 0 },
+      translation: { status: "queued", chunkStatuses: [] }
+    }
+  };
+  context.mirrorCommitTrackingRecord = record;
+  vm.runInContext("browserPreloadJobs.set('job-mirror-commit-tracking', mirrorCommitTrackingRecord)", context);
+  await vm.runInContext("scheduleBrowserJobMirror(mirrorCommitTrackingRecord); flushBrowserJobMirror('job-mirror-commit-tracking')", context);
+  assert.equal(record.lastCommittedJob?.status, "queued", "a successful mirror must advance the committed UI snapshot");
+  const originalPutSnapshot = await vm.runInContext("browserJobStore.putSnapshot", context);
+  context.mirrorCommitTrackingOriginalPutSnapshot = originalPutSnapshot;
+  record.job.status = "running";
+  record.job.stage = "asr";
+  vm.runInContext("browserJobStore.putSnapshot = async () => { throw new Error('injected-mirror-error'); }", context);
+  try {
+    await vm.runInContext("scheduleBrowserJobMirror(mirrorCommitTrackingRecord); flushBrowserJobMirror('job-mirror-commit-tracking')", context);
+    const operation = context.createOffscreenBrowserOperation(record, {
+      executionOwnerId: "mirror-owner",
+      executionEpoch: 1
+    });
+    try {
+      assert.equal(record.lastCommittedJob?.status, "queued", "a failed mirror and operation start must not bless a live draft");
+      assert.equal(context.browserPreloadJobForRead(record).status, "queued");
+    } finally {
+      context.disposeOffscreenBrowserOperation(record, operation);
+    }
+  } finally {
+    vm.runInContext("browserJobStore.putSnapshot = mirrorCommitTrackingOriginalPutSnapshot", context);
+    await vm.runInContext("browserJobStore.deleteJob('job-mirror-commit-tracking')", context);
+    vm.runInContext("browserPreloadJobs.delete('job-mirror-commit-tracking')", context);
+    delete context.mirrorCommitTrackingRecord;
+    delete context.mirrorCommitTrackingOriginalPutSnapshot;
+  }
+}
+
+{
+  const tabId = 1183;
+  seedPage(tabId, { duration: 60 });
+  context.getState(tabId).subtitleOverlayInjectedAt = Date.now();
+  const oldRecord = {
+    tabId,
+    runToken: "run-vtt-race-old",
+    cancelled: false,
+    abortController: new AbortController(),
+    metadata: { pageUrl: context.getState(tabId).page.url },
+    job: {
+      id: "job-vtt-race",
+      runToken: "run-vtt-race-old",
+      status: "completed",
+      stage: "completed",
+      translation: {
+        vttText: "WEBVTT\n\n00:00:00.000 --> 00:00:01.000\nold subtitle\n",
+        transcript: null
+      }
+    }
+  };
+  const replacement = {
+    ...oldRecord,
+    runToken: "run-vtt-race-new",
+    abortController: new AbortController(),
+    job: { ...oldRecord.job, runToken: "run-vtt-race-new", status: "interrupted", stage: "interrupted" }
+  };
+  let releaseOverlay;
+  let overlayStarted;
+  const overlayGate = new Promise(resolve => { releaseOverlay = resolve; });
+  const overlayStartedPromise = new Promise(resolve => { overlayStarted = resolve; });
+  const originalEnsureSubtitleOverlay = context.ensureSubtitleOverlay;
+  const originalSendMessageToMediaFrame = context.sendMessageToMediaFrame;
+  let attachMessages = 0;
+  context.ensureSubtitleOverlay = async () => {
+    overlayStarted();
+    await overlayGate;
+  };
+  context.sendMessageToMediaFrame = async (_tabId, message) => {
+    if (message.type === "FUGUANG_ATTACH_VTT") {
+      attachMessages += 1;
+    }
+    return { ok: true };
+  };
+  context.vttRaceOldRecord = oldRecord;
+  context.vttRaceReplacement = replacement;
+  vm.runInContext("browserPreloadJobs.set('job-vtt-race', vttRaceOldRecord)", context);
+  try {
+    const pendingAttach = context.attachBrowserJobVttIfReady(oldRecord);
+    await overlayStartedPromise;
+    vm.runInContext("browserPreloadJobs.set('job-vtt-race', vttRaceReplacement)", context);
+    releaseOverlay();
+    await pendingAttach;
+    assert.equal(attachMessages, 0, "a replaced record must be rechecked after overlay injection before sending VTT");
+    assert.equal(context.getState(tabId).attachedVttSignature, "");
+  } finally {
+    releaseOverlay();
+    context.ensureSubtitleOverlay = originalEnsureSubtitleOverlay;
+    context.sendMessageToMediaFrame = originalSendMessageToMediaFrame;
+    vm.runInContext("browserPreloadJobs.delete('job-vtt-race')", context);
+    delete context.vttRaceOldRecord;
+    delete context.vttRaceReplacement;
+  }
+}
+
+{
+  const tabId = 1185;
+  const pageUrl = "https://example.test/watch/vtt-refresh-race";
+  seedPage(tabId, { url: pageUrl, duration: 60 });
+  context.getState(tabId).subtitleOverlayInjectedAt = Date.now();
+  const record = {
+    tabId,
+    runToken: "run-vtt-refresh-race",
+    cancelled: false,
+    abortController: new AbortController(),
+    metadata: { pageUrl },
+    job: {
+      id: "job-vtt-refresh-race",
+      runToken: "run-vtt-refresh-race",
+      status: "running",
+      stage: "translation",
+      updatedAt: 100,
+      translation: {
+        vttText: "WEBVTT\n\n00:00:00.000 --> 00:00:01.000\nold subtitle\n",
+        transcript: null
+      }
+    }
+  };
+  const originalTabsGet = chrome.tabs.get;
+  const originalSendMessageToMediaFrame = context.sendMessageToMediaFrame;
+  let releaseRefresh;
+  let markRefreshStarted;
+  const refreshGate = new Promise(resolve => {
+    releaseRefresh = resolve;
+  });
+  const refreshStarted = new Promise(resolve => {
+    markRefreshStarted = resolve;
+  });
+  const attachMessages = [];
+  chrome.tabs.get = async () => {
+    markRefreshStarted();
+    await refreshGate;
+    return { id: tabId, title: "Video", url: pageUrl };
+  };
+  context.sendMessageToMediaFrame = async (_tabId, message) => {
+    if (message.type === "FUGUANG_ATTACH_VTT") {
+      attachMessages.push(structuredClone(message));
+    }
+    return { ok: true };
+  };
+  context.vttRefreshRaceRecord = record;
+  vm.runInContext("browserPreloadJobs.set('job-vtt-refresh-race', vttRefreshRaceRecord)", context);
+  try {
+    const checkedPromise = context.checkPreloadJob(record.job.id, tabId);
+    await refreshStarted;
+    record.job.updatedAt = 200;
+    record.job.translation.vttText = "WEBVTT\n\n00:00:00.000 --> 00:00:01.000\nnew subtitle\n";
+    releaseRefresh();
+    const checked = await checkedPromise;
+    assert.match(checked.job.translation.vttText, /new subtitle/);
+    assert.equal(attachMessages.length, 1);
+    assert.match(attachMessages[0].vtt, /new subtitle/, "a pre-refresh snapshot must not attach after a newer subtitle commit");
+    assert.doesNotMatch(attachMessages[0].vtt, /old subtitle/);
+  } finally {
+    releaseRefresh();
+    chrome.tabs.get = originalTabsGet;
+    context.sendMessageToMediaFrame = originalSendMessageToMediaFrame;
+    vm.runInContext("browserPreloadJobs.delete('job-vtt-refresh-race')", context);
+    delete context.vttRefreshRaceRecord;
+  }
+}
+
+{
   const record = {
     tabId: 1002,
     runToken: "run-finalize-cas-race",
@@ -11790,5 +12164,1406 @@ await assert.rejects(
     await vm.runInContext("browserJobStore.deleteJob('job-local-handoff')", context);
     vm.runInContext("browserPreloadJobs.delete('job-local-handoff')", context);
     delete context.localHandoffRecord;
+  }
+}
+
+{
+  const tabId = 3190;
+  const pageUrl = "https://example.test/watch/manual-attachment-race";
+  seedPage(tabId, { url: pageUrl, duration: 60 });
+  context.getState(tabId).subtitleOverlayInjectedAt = Date.now();
+  const record = {
+    tabId,
+    runToken: "run-manual-attachment-race",
+    cancelled: false,
+    abortController: new AbortController(),
+    metadata: { pageUrl },
+    job: {
+      id: "job-manual-attachment-race",
+      runToken: "run-manual-attachment-race",
+      status: "completed",
+      stage: "completed",
+      updatedAt: 100,
+      translation: {
+        vttText: "WEBVTT\n\n00:00:00.000 --> 00:00:01.000\nautomatic subtitle\n",
+        transcript: null
+      }
+    }
+  };
+  const originalEnsureSubtitleOverlay = context.ensureSubtitleOverlay;
+  const originalSendMessageToMediaFrame = context.sendMessageToMediaFrame;
+  let releaseAutomaticEnsure;
+  let markAutomaticEnsureStarted;
+  const automaticEnsureGate = new Promise(resolve => { releaseAutomaticEnsure = resolve; });
+  const automaticEnsureStarted = new Promise(resolve => { markAutomaticEnsureStarted = resolve; });
+  let ensureCalls = 0;
+  const attachedVtts = [];
+  context.ensureSubtitleOverlay = async () => {
+    ensureCalls += 1;
+    if (ensureCalls === 1) {
+      markAutomaticEnsureStarted();
+      await automaticEnsureGate;
+    }
+  };
+  context.sendMessageToMediaFrame = async (_tabId, message) => {
+    if (message.type === "FUGUANG_ATTACH_VTT") {
+      attachedVtts.push(message.vtt);
+    }
+    return { ok: true };
+  };
+  context.manualAttachmentRaceRecord = record;
+  vm.runInContext("browserPreloadJobs.set('job-manual-attachment-race', manualAttachmentRaceRecord)", context);
+  try {
+    const automaticAttach = context.attachBrowserJobVttIfReady(record);
+    await automaticEnsureStarted;
+    const manualVtt = "WEBVTT\n\n00:00:00.000 --> 00:00:01.000\nmanual subtitle\n";
+    await context.attachVttText(tabId, manualVtt);
+    releaseAutomaticEnsure();
+    await automaticAttach;
+
+    assert.deepEqual(attachedVtts, [manualVtt], "a manual subtitle attached while automatic rendering is in flight must win");
+    assert.match(context.getState(tabId).manualVttSignature, /^manual:/);
+  } finally {
+    releaseAutomaticEnsure();
+    context.ensureSubtitleOverlay = originalEnsureSubtitleOverlay;
+    context.sendMessageToMediaFrame = originalSendMessageToMediaFrame;
+    vm.runInContext("browserPreloadJobs.delete('job-manual-attachment-race')", context);
+    delete context.manualAttachmentRaceRecord;
+  }
+}
+
+{
+  const tabId = 3191;
+  const pageUrl = "https://example.test/watch/render-snapshot-race";
+  seedPage(tabId, { url: pageUrl, duration: 60 });
+  context.getState(tabId).subtitleOverlayInjectedAt = Date.now();
+  const sharedVtt = [
+    "WEBVTT",
+    "",
+    "00:00:00.000 --> 00:00:02.000",
+    "source first",
+    "",
+    "00:00:03.000 --> 00:00:05.000",
+    "translated second",
+    ""
+  ].join("\n");
+  const record = {
+    tabId,
+    runToken: "run-render-snapshot-race",
+    cancelled: false,
+    abortController: new AbortController(),
+    metadata: { pageUrl },
+    job: {
+      id: "job-render-snapshot-race",
+      runToken: "run-render-snapshot-race",
+      status: "running",
+      stage: "translation",
+      updatedAt: 100,
+      translation: {
+        vttText: sharedVtt,
+        transcript: {
+          source: [
+            { start: 0, end: 2, text: "source first", chunkIndex: 0, segmentIndex: 0 },
+            { start: 3, end: 5, text: "source second", chunkIndex: 0, segmentIndex: 1 }
+          ],
+          translated: [
+            { start: 3, end: 5, text: "translated second", chunkIndex: 0, segmentIndex: 1 }
+          ]
+        }
+      }
+    }
+  };
+  const originalEnsureSubtitleOverlay = context.ensureSubtitleOverlay;
+  const originalSendMessageToMediaFrame = context.sendMessageToMediaFrame;
+  let releaseRunningEnsure;
+  let markRunningEnsureStarted;
+  const runningEnsureGate = new Promise(resolve => { releaseRunningEnsure = resolve; });
+  const runningEnsureStarted = new Promise(resolve => { markRunningEnsureStarted = resolve; });
+  let ensureCalls = 0;
+  const attachedVtts = [];
+  context.ensureSubtitleOverlay = async () => {
+    ensureCalls += 1;
+    if (ensureCalls === 1) {
+      markRunningEnsureStarted();
+      await runningEnsureGate;
+    }
+  };
+  context.sendMessageToMediaFrame = async (_tabId, message) => {
+    if (message.type === "FUGUANG_ATTACH_VTT") {
+      attachedVtts.push(message.vtt);
+    }
+    return { ok: true };
+  };
+  context.renderSnapshotRaceRecord = record;
+  vm.runInContext("browserPreloadJobs.set('job-render-snapshot-race', renderSnapshotRaceRecord)", context);
+  try {
+    const runningAttach = context.attachBrowserJobVttIfReady(record);
+    await runningEnsureStarted;
+    record.job.status = "completed";
+    record.job.stage = "completed_with_warnings";
+    record.job.updatedAt = 200;
+    await context.attachBrowserJobVttIfReady(record);
+    releaseRunningEnsure();
+    await runningAttach;
+
+    assert.equal(attachedVtts.length, 1, "an older running render must not overwrite the completed render");
+    assert.match(attachedVtts[0], /source first/);
+    assert.match(attachedVtts[0], /translated second/);
+  } finally {
+    releaseRunningEnsure();
+    context.ensureSubtitleOverlay = originalEnsureSubtitleOverlay;
+    context.sendMessageToMediaFrame = originalSendMessageToMediaFrame;
+    vm.runInContext("browserPreloadJobs.delete('job-render-snapshot-race')", context);
+    delete context.renderSnapshotRaceRecord;
+  }
+}
+
+{
+  const record = {
+    tabId: 3192,
+    runToken: "run-terminal-during-resume",
+    pipeline: "browser",
+    cancelled: false,
+    abortController: new AbortController(),
+    audioChunks: [],
+    job: {
+      id: "job-terminal-during-resume",
+      runToken: "run-terminal-during-resume",
+      pipeline: "browser",
+      status: "running",
+      stage: "translation",
+      createdAt: 100,
+      updatedAt: 200,
+      extract: { status: "completed" },
+      translation: { status: "running", chunkStatuses: [] }
+    }
+  };
+  const originalStartBrowserJobInOffscreen = context.startBrowserJobInOffscreen;
+  context.terminalDuringResumeRecord = record;
+  vm.runInContext("browserPreloadJobs.set('job-terminal-during-resume', terminalDuringResumeRecord)", context);
+  await vm.runInContext("browserJobStore.putSnapshot({ job: terminalDuringResumeRecord.job, chunks: [] })", context);
+  await vm.runInContext("browserJobStore.claimRun('job-terminal-during-resume', 'run-terminal-during-resume', { ownerId: 'expired-owner', claimedAt: Date.now() - 1000, leaseDurationMs: 10 })", context);
+  context.startBrowserJobInOffscreen = async () => {
+    const claimed = await vm.runInContext("browserJobStore.getJob('job-terminal-during-resume')", context);
+    context.terminalDuringResumeSnapshot = {
+      ...claimed,
+      status: "completed",
+      stage: "completed",
+      updatedAt: Date.now(),
+      error: "",
+      executionOwnerId: "",
+      executionLeaseExpiresAt: 0,
+      translation: { ...claimed.translation, status: "completed" }
+    };
+    const stored = await vm.runInContext("browserJobStore.putSnapshot({ job: terminalDuringResumeSnapshot, chunks: [] })", context);
+    assert.equal(stored.applied, true);
+    return { status: "unavailable", reason: "terminal-job" };
+  };
+  try {
+    const result = await context.recoverExpiredBrowserJobLease(record.job.id);
+    const currentStatus = vm.runInContext("browserPreloadJobs.get('job-terminal-during-resume')?.job?.status", context);
+    const durable = await vm.runInContext("browserJobStore.getJob('job-terminal-during-resume')", context);
+    assert.equal(result.reason, "inactive");
+    assert.equal(currentStatus, "completed", "recovery must adopt a terminal state that wins while resume is in flight");
+    assert.equal(durable.status, "completed");
+  } finally {
+    context.startBrowserJobInOffscreen = originalStartBrowserJobInOffscreen;
+    await vm.runInContext("browserJobStore.deleteJob('job-terminal-during-resume')", context);
+    vm.runInContext("browserPreloadJobs.delete('job-terminal-during-resume')", context);
+    delete context.terminalDuringResumeRecord;
+    delete context.terminalDuringResumeSnapshot;
+  }
+}
+
+{
+  const record = {
+    tabId: 3193,
+    runToken: "run-terminal-reason",
+    pipeline: "browser",
+    cancelled: false,
+    modelConfig: { asrWorkers: 1 },
+    job: {
+      id: "job-terminal-reason",
+      runToken: "run-terminal-reason",
+      pipeline: "browser",
+      status: "running",
+      stage: "translation"
+    }
+  };
+  const originalPostMessage = taskRuntimePort.postMessage;
+  taskRuntimePort.postMessage = message => {
+    Promise.resolve().then(() => {
+      for (const listener of taskRuntimePortListeners) {
+        listener({
+          type: "FUGUANG_TASK_RUNTIME_ERROR",
+          commandId: message.commandId,
+          error: "Task run claim was rejected.",
+          reason: "terminal-job"
+        });
+      }
+    });
+  };
+  try {
+    const result = await context.startBrowserJobInOffscreen(record, { resumeExisting: true });
+    assert.equal(result.status, "unavailable");
+    assert.equal(
+      result.reason,
+      "terminal-job",
+      "structured terminal-job reason must survive the Service Worker command boundary"
+    );
+  } finally {
+    taskRuntimePort.postMessage = originalPostMessage;
+  }
+}
+
+{
+  const tabId = 3194;
+  seedPage(tabId, { url: "https://example.test/watch/manual-detach-race", duration: 60 });
+  context.getState(tabId).subtitleOverlayInjectedAt = Date.now();
+  const originalEnsureSubtitleOverlay = context.ensureSubtitleOverlay;
+  const originalSendMessageToMediaFrame = context.sendMessageToMediaFrame;
+  let releaseEnsure;
+  let markEnsureStarted;
+  const ensureGate = new Promise(resolve => { releaseEnsure = resolve; });
+  const ensureStarted = new Promise(resolve => { markEnsureStarted = resolve; });
+  const attachedVtts = [];
+  context.ensureSubtitleOverlay = async () => {
+    markEnsureStarted();
+    await ensureGate;
+  };
+  context.sendMessageToMediaFrame = async (_tabId, message) => {
+    if (message.type === "FUGUANG_ATTACH_VTT") {
+      attachedVtts.push(message.vtt);
+    }
+    return { ok: true };
+  };
+  try {
+    const pending = context.attachVttText(
+      tabId,
+      "WEBVTT\n\n00:00:00.000 --> 00:00:01.000\nstale manual subtitle\n"
+    );
+    await ensureStarted;
+    await context.detachPreloadVtt(tabId);
+    releaseEnsure();
+    const result = await pending;
+
+    assert.equal(result.stale, true, "an explicit detach must fence an in-flight manual attachment");
+    assert.deepEqual(attachedVtts, []);
+    assert.equal(context.getState(tabId).manualVttSignature, "");
+    assert.equal(context.getState(tabId).attachedVttSignature, "");
+  } finally {
+    releaseEnsure();
+    context.ensureSubtitleOverlay = originalEnsureSubtitleOverlay;
+    context.sendMessageToMediaFrame = originalSendMessageToMediaFrame;
+  }
+}
+
+{
+  const record = {
+    tabId: 3195,
+    runToken: "run-lease-takeover-during-resume",
+    pipeline: "browser",
+    cancelled: false,
+    recoveryBlocked: false,
+    abortController: new AbortController(),
+    audioChunks: [],
+    job: {
+      id: "job-lease-takeover-during-resume",
+      runToken: "run-lease-takeover-during-resume",
+      pipeline: "browser",
+      status: "running",
+      stage: "translation",
+      createdAt: 100,
+      updatedAt: 200,
+      extract: { status: "completed" },
+      translation: { status: "running", chunkStatuses: [] }
+    }
+  };
+  const originalStartBrowserJobInOffscreen = context.startBrowserJobInOffscreen;
+  context.leaseTakeoverDuringResumeRecord = record;
+  vm.runInContext("browserPreloadJobs.set('job-lease-takeover-during-resume', leaseTakeoverDuringResumeRecord)", context);
+  await vm.runInContext("browserJobStore.putSnapshot({ job: leaseTakeoverDuringResumeRecord.job, chunks: [] })", context);
+  await vm.runInContext("browserJobStore.claimRun('job-lease-takeover-during-resume', 'run-lease-takeover-during-resume', { ownerId: 'expired-owner', claimedAt: Date.now() - 1000, leaseDurationMs: 10 })", context);
+  context.startBrowserJobInOffscreen = async () => {
+    const takeover = await vm.runInContext("browserJobStore.claimRun('job-lease-takeover-during-resume', 'run-lease-takeover-during-resume', { ownerId: 'new-owner', claimedAt: Date.now(), leaseDurationMs: 30000 })", context);
+    assert.equal(takeover.applied, true);
+    return { status: "unavailable", reason: "injected-late-error" };
+  };
+  try {
+    const result = await context.recoverExpiredBrowserJobLease(record.job.id);
+    const durable = await vm.runInContext("browserJobStore.getJob('job-lease-takeover-during-resume')", context);
+    assert.equal(result.reason, "lease-active");
+    assert.equal(record.job.status, "running", "a newly leased run must not be interrupted by the stale recovery attempt");
+    assert.equal(durable.status, "running");
+    assert.equal(durable.executionOwnerId, "new-owner");
+  } finally {
+    context.startBrowserJobInOffscreen = originalStartBrowserJobInOffscreen;
+    await vm.runInContext("browserJobStore.deleteJob('job-lease-takeover-during-resume')", context);
+    vm.runInContext("browserPreloadJobs.delete('job-lease-takeover-during-resume')", context);
+    delete context.leaseTakeoverDuringResumeRecord;
+  }
+}
+
+
+{
+  const tabId = 3196;
+  seedPage(tabId, { url: "https://example.test/watch/manual-send-detach-race", duration: 60 });
+  context.getState(tabId).subtitleOverlayInjectedAt = Date.now();
+  const originalEnsureSubtitleOverlay = context.ensureSubtitleOverlay;
+  const originalSendMessageToMediaFrame = context.sendMessageToMediaFrame;
+  const originalBroadcastMessageToFrames = context.broadcastMessageToFrames;
+  let releaseManualSend;
+  let markManualSendStarted;
+  const manualSendGate = new Promise(resolve => { releaseManualSend = resolve; });
+  const manualSendStarted = new Promise(resolve => { markManualSendStarted = resolve; });
+  let latestPageGeneration = 0;
+  const attachedVtts = [];
+  context.ensureSubtitleOverlay = async () => {};
+  context.broadcastMessageToFrames = async (_tabId, message) => {
+    if (message.type === "FUGUANG_DETACH_PRELOAD_VTT") {
+      latestPageGeneration = Math.max(latestPageGeneration, Number(message.preloadGeneration || 0));
+    }
+  };
+  context.sendMessageToMediaFrame = async (_tabId, message) => {
+    if (message.type !== "FUGUANG_ATTACH_VTT") {
+      return { ok: true };
+    }
+    markManualSendStarted();
+    await manualSendGate;
+    const generation = Number(message.preloadGeneration || 0);
+    if (!generation || generation >= latestPageGeneration) {
+      attachedVtts.push(message.vtt);
+      return { ok: true };
+    }
+    return { ok: false, stale: true };
+  };
+  try {
+    const pending = context.attachVttText(
+      tabId,
+      "WEBVTT\n\n00:00:00.000 --> 00:00:01.000\nstale after detach\n",
+      { origin: "user-override" }
+    );
+    await manualSendStarted;
+    await context.detachPreloadVtt(tabId);
+    releaseManualSend();
+    const result = await pending;
+
+    assert.equal(result.stale, true);
+    assert.deepEqual(
+      attachedVtts,
+      [],
+      "a detach barrier that wins while the final frame send is pending must prevent the old manual subtitle from reappearing"
+    );
+  } finally {
+    releaseManualSend();
+    context.ensureSubtitleOverlay = originalEnsureSubtitleOverlay;
+    context.sendMessageToMediaFrame = originalSendMessageToMediaFrame;
+    context.broadcastMessageToFrames = originalBroadcastMessageToFrames;
+  }
+}
+
+{
+  const record = {
+    tabId: 3197,
+    runToken: "run-durable-read-error-recovery",
+    pipeline: "browser",
+    cancelled: false,
+    cancelRequested: false,
+    recoveryBlocked: false,
+    staleOffscreenOperationDetected: true,
+    abortController: new AbortController(),
+    audioChunks: [],
+    lastCommittedJob: {
+      id: "job-durable-read-error-recovery",
+      runToken: "run-durable-read-error-recovery",
+      pipeline: "browser",
+      status: "running",
+      stage: "translation",
+      extract: { status: "completed" },
+      translation: { status: "running", chunkStatuses: [] }
+    },
+    job: {
+      id: "job-durable-read-error-recovery",
+      runToken: "run-durable-read-error-recovery",
+      pipeline: "browser",
+      status: "completed",
+      stage: "completed",
+      extract: { status: "completed" },
+      translation: { status: "completed", chunkStatuses: [] }
+    }
+  };
+  const durable = {
+    ...record.lastCommittedJob,
+    executionOwnerId: "expired-owner",
+    executionEpoch: 1,
+    executionLeaseExpiresAt: Date.now() - 1000
+  };
+  const originalStartBrowserJobInOffscreen = context.startBrowserJobInOffscreen;
+  const originalGetJob = await vm.runInContext("browserJobStore.getJob", context);
+  const originalAlarmCreate = chrome.alarms.create;
+  const createdAlarms = [];
+  context.durableReadErrorRecoveryRecord = record;
+  context.durableReadErrorRecoverySnapshot = durable;
+  context.durableReadErrorOriginalGetJob = originalGetJob;
+  context.durableReads = 0;
+  vm.runInContext("browserPreloadJobs.set('job-durable-read-error-recovery', durableReadErrorRecoveryRecord)", context);
+  await vm.runInContext("browserJobStore.putSnapshot({ job: durableReadErrorRecoverySnapshot, chunks: [] })", context);
+  vm.runInContext(`browserJobStore.getJob = async jobId => {
+    durableReads += 1;
+    if (durableReads === 2) {
+      throw new Error("injected durable read error");
+    }
+    return durableReadErrorOriginalGetJob(jobId);
+  }`, context);
+  context.startBrowserJobInOffscreen = async () => ({ status: "unavailable", reason: "injected-runtime-error" });
+  chrome.alarms.create = async (name, options) => {
+    createdAlarms.push({ name, options });
+  };
+  try {
+    const result = await context.recoverExpiredBrowserJobLease(record.job.id);
+    assert.equal(result.recovered, false);
+    assert.equal(
+      createdAlarms.some(alarm => alarm.name.includes(record.job.id)),
+      true,
+      "a transient second durable read failure must reschedule recovery from the known durable running state"
+    );
+  } finally {
+    context.startBrowserJobInOffscreen = originalStartBrowserJobInOffscreen;
+    chrome.alarms.create = originalAlarmCreate;
+    vm.runInContext("browserJobStore.getJob = durableReadErrorOriginalGetJob", context);
+    await vm.runInContext("browserJobStore.deleteJob('job-durable-read-error-recovery')", context);
+    vm.runInContext("browserPreloadJobs.delete('job-durable-read-error-recovery')", context);
+    delete context.durableReadErrorRecoveryRecord;
+    delete context.durableReadErrorRecoverySnapshot;
+    delete context.durableReadErrorOriginalGetJob;
+    delete context.durableReads;
+  }
+}
+
+{
+  const tabId = 3198;
+  seedPage(tabId, { url: "https://example.test/watch/stale-projection-detach", duration: 60 });
+  context.getState(tabId).subtitleOverlayInjectedAt = Date.now();
+  const originalEnsureSubtitleOverlay = context.ensureSubtitleOverlay;
+  const originalSendMessageToMediaFrame = context.sendMessageToMediaFrame;
+  const originalBroadcastMessageToFrames = context.broadcastMessageToFrames;
+  let activeSubtitle = {
+    origin: "job-automatic",
+    jobId: "job-revision-through-background",
+    attachmentRevision: 20,
+    vtt: "latest"
+  };
+  let latestPageGeneration = 0;
+  context.ensureSubtitleOverlay = async () => {};
+  context.broadcastMessageToFrames = async (_tabId, message) => {
+    const generation = Number(message.preloadGeneration || 0);
+    if (generation && generation < latestPageGeneration) {
+      return [{ ok: false, stale: true }];
+    }
+    if (
+      activeSubtitle &&
+      ["job-automatic", "job-projection"].includes(activeSubtitle.origin) &&
+      ["job-automatic", "job-projection"].includes(message.origin) &&
+      activeSubtitle.jobId === message.jobId &&
+      Number(activeSubtitle.attachmentRevision || 0) > 0 &&
+      (
+        Number(message.attachmentRevision || 0) <= 0 ||
+        Number(message.attachmentRevision || 0) < Number(activeSubtitle.attachmentRevision || 0)
+      )
+    ) {
+      return [{ ok: false, stale: true, staleRevision: true }];
+    }
+    if (message.automaticOnly && activeSubtitle?.origin === "user-override") {
+      return [{ ok: true, preservedManual: true }];
+    }
+    latestPageGeneration = Math.max(latestPageGeneration, generation);
+    activeSubtitle = null;
+    return [{ ok: true }];
+  };
+  context.sendMessageToMediaFrame = async (_tabId, message) => {
+    const generation = Number(message.preloadGeneration || 0);
+    if (generation && generation < latestPageGeneration) {
+      return { ok: false, stale: true };
+    }
+    if (
+      activeSubtitle &&
+      ["job-automatic", "job-projection"].includes(activeSubtitle.origin) &&
+      ["job-automatic", "job-projection"].includes(message.origin) &&
+      activeSubtitle.jobId === message.jobId &&
+      Number(activeSubtitle.attachmentRevision || 0) > 0 &&
+      (
+        Number(message.attachmentRevision || 0) <= 0 ||
+        Number(message.attachmentRevision || 0) < Number(activeSubtitle.attachmentRevision || 0)
+      )
+    ) {
+      return { ok: false, stale: true, staleRevision: true };
+    }
+    latestPageGeneration = Math.max(latestPageGeneration, generation);
+    activeSubtitle = {
+      origin: message.origin,
+      jobId: message.jobId,
+      attachmentRevision: message.attachmentRevision,
+      vtt: message.vtt
+    };
+    return { ok: true };
+  };
+  try {
+    const result = await context.attachVttText(
+      tabId,
+      "WEBVTT\n\n00:00:00.000 --> 00:00:01.000\nstale projection\n",
+      {
+        origin: "job-projection",
+        jobId: "job-revision-through-background",
+        attachmentRevision: 10
+      }
+    );
+    assert.equal(result.stale, true);
+    assert.equal(
+      activeSubtitle?.attachmentRevision,
+      20,
+      "a stale sidepanel projection must not remove the newer same-job subtitle before the page can apply its revision fence"
+    );
+  } finally {
+    context.ensureSubtitleOverlay = originalEnsureSubtitleOverlay;
+    context.sendMessageToMediaFrame = originalSendMessageToMediaFrame;
+    context.broadcastMessageToFrames = originalBroadcastMessageToFrames;
+  }
+}
+
+{
+  const record = {
+    tabId: 3199,
+    runToken: "run-first-durable-read-error",
+    pipeline: "browser",
+    cancelled: false,
+    cancelRequested: false,
+    recoveryBlocked: false,
+    staleOffscreenOperationDetected: true,
+    abortController: new AbortController(),
+    audioChunks: [],
+    lastCommittedJob: {
+      id: "job-first-durable-read-error",
+      runToken: "run-first-durable-read-error",
+      pipeline: "browser",
+      status: "running",
+      stage: "translation",
+      extract: { status: "completed" },
+      translation: { status: "running", chunkStatuses: [] }
+    },
+    job: {
+      id: "job-first-durable-read-error",
+      runToken: "run-first-durable-read-error",
+      pipeline: "browser",
+      status: "completed",
+      stage: "completed",
+      extract: { status: "completed" },
+      translation: { status: "completed", chunkStatuses: [] }
+    }
+  };
+  const durable = {
+    ...record.lastCommittedJob,
+    executionOwnerId: "expired-owner",
+    executionEpoch: 1,
+    executionLeaseExpiresAt: Date.now() - 1000
+  };
+  const originalGetJob = await vm.runInContext("browserJobStore.getJob", context);
+  const originalAlarmCreate = chrome.alarms.create;
+  const createdAlarms = [];
+  context.firstDurableReadErrorRecord = record;
+  context.firstDurableReadErrorSnapshot = durable;
+  context.firstDurableReadErrorOriginalGetJob = originalGetJob;
+  context.firstDurableReads = 0;
+  vm.runInContext("browserPreloadJobs.set('job-first-durable-read-error', firstDurableReadErrorRecord)", context);
+  await vm.runInContext("browserJobStore.putSnapshot({ job: firstDurableReadErrorSnapshot, chunks: [] })", context);
+  vm.runInContext("browserJobStore.getJob = async jobId => { firstDurableReads += 1; if (firstDurableReads === 1) { throw new Error('injected first durable read error'); } return firstDurableReadErrorOriginalGetJob(jobId); }", context);
+  chrome.alarms.create = async (name, options) => {
+    createdAlarms.push({ name, options });
+  };
+  try {
+    const result = await context.recoverExpiredBrowserJobLease(record.job.id);
+    assert.equal(result.reason, "durable-read-error");
+    assert.equal(
+      createdAlarms.some(alarm => alarm.name.includes(record.job.id)),
+      true,
+      "a transient first durable read failure must reschedule the one-shot recovery alarm"
+    );
+  } finally {
+    chrome.alarms.create = originalAlarmCreate;
+    vm.runInContext("browserJobStore.getJob = firstDurableReadErrorOriginalGetJob", context);
+    await vm.runInContext("browserJobStore.deleteJob('job-first-durable-read-error')", context);
+    vm.runInContext("browserPreloadJobs.delete('job-first-durable-read-error')", context);
+    delete context.firstDurableReadErrorRecord;
+    delete context.firstDurableReadErrorSnapshot;
+    delete context.firstDurableReadErrorOriginalGetJob;
+    delete context.firstDurableReads;
+  }
+}
+
+{
+  const tabId = 3200;
+  const pageUrl = "https://example.test/watch/rejected-projection-auto-race";
+  seedPage(tabId, { url: pageUrl, duration: 60 });
+  context.getState(tabId).subtitleOverlayInjectedAt = Date.now();
+  const record = {
+    tabId,
+    runToken: "run-rejected-projection-auto-race",
+    cancelled: false,
+    abortController: new AbortController(),
+    metadata: { pageUrl },
+    job: {
+      id: "job-rejected-projection-auto-race",
+      runToken: "run-rejected-projection-auto-race",
+      status: "completed",
+      stage: "completed",
+      updatedAt: 30,
+      translation: {
+        vttText: "WEBVTT\n\n00:00:00.000 --> 00:00:01.000\nnew automatic subtitle\n",
+        transcript: null
+      }
+    }
+  };
+  const originalEnsureSubtitleOverlay = context.ensureSubtitleOverlay;
+  const originalSendMessageToMediaFrame = context.sendMessageToMediaFrame;
+  const originalBroadcastMessageToFrames = context.broadcastMessageToFrames;
+  let activeSubtitle = {
+    origin: "job-automatic",
+    jobId: record.job.id,
+    attachmentRevision: 20,
+    vtt: "previous automatic subtitle"
+  };
+  let latestPageGeneration = 0;
+  let releaseAutomaticSend;
+  let markAutomaticSendStarted;
+  const automaticSendGate = new Promise(resolve => { releaseAutomaticSend = resolve; });
+  const automaticSendStarted = new Promise(resolve => { markAutomaticSendStarted = resolve; });
+  context.ensureSubtitleOverlay = async () => {};
+  context.broadcastMessageToFrames = async (_tabId, message) => {
+    const generation = Number(message.preloadGeneration || 0);
+    if (generation && generation < latestPageGeneration) {
+      return [{ ok: false, stale: true }];
+    }
+    if (
+      activeSubtitle &&
+      ["job-automatic", "job-projection"].includes(activeSubtitle.origin) &&
+      ["job-automatic", "job-projection"].includes(message.origin) &&
+      activeSubtitle.jobId === message.jobId &&
+      Number(activeSubtitle.attachmentRevision || 0) > 0 &&
+      Number(message.attachmentRevision || 0) < Number(activeSubtitle.attachmentRevision || 0)
+    ) {
+      return [{ ok: false, stale: true, staleRevision: true }];
+    }
+    latestPageGeneration = Math.max(latestPageGeneration, generation);
+    activeSubtitle = null;
+    return [{ ok: true }];
+  };
+  context.sendMessageToMediaFrame = async (_tabId, message) => {
+    if (message.type !== "FUGUANG_ATTACH_VTT") {
+      return { ok: true };
+    }
+    if (
+      activeSubtitle &&
+      ["job-automatic", "job-projection"].includes(activeSubtitle.origin) &&
+      ["job-automatic", "job-projection"].includes(message.origin) &&
+      activeSubtitle.jobId === message.jobId &&
+      Number(activeSubtitle.attachmentRevision || 0) > 0 &&
+      Number(message.attachmentRevision || 0) < Number(activeSubtitle.attachmentRevision || 0)
+    ) {
+      return { ok: false, stale: true, staleRevision: true };
+    }
+    markAutomaticSendStarted();
+    await automaticSendGate;
+    const generation = Number(message.preloadGeneration || 0);
+    if (generation && generation < latestPageGeneration) {
+      return { ok: false, stale: true };
+    }
+    latestPageGeneration = Math.max(latestPageGeneration, generation);
+    activeSubtitle = {
+      origin: message.origin,
+      jobId: message.jobId,
+      attachmentRevision: message.attachmentRevision,
+      vtt: message.vtt
+    };
+    return { ok: true };
+  };
+  context.rejectedProjectionAutoRaceRecord = record;
+  vm.runInContext("browserPreloadJobs.set('job-rejected-projection-auto-race', rejectedProjectionAutoRaceRecord)", context);
+  try {
+    const automaticAttach = context.attachBrowserJobVttIfReady(record);
+    await automaticSendStarted;
+    const staleProjection = await context.attachVttText(
+      tabId,
+      "WEBVTT\n\n00:00:00.000 --> 00:00:01.000\nold projection\n",
+      {
+        origin: "job-projection",
+        jobId: record.job.id,
+        attachmentRevision: 10
+      }
+    );
+    assert.equal(staleProjection.stale, true);
+    releaseAutomaticSend();
+    await automaticAttach;
+    assert.equal(
+      activeSubtitle?.attachmentRevision,
+      30,
+      "a rejected stale projection must not cause the newly attached automatic subtitle to be detached"
+    );
+  } finally {
+    releaseAutomaticSend();
+    context.ensureSubtitleOverlay = originalEnsureSubtitleOverlay;
+    context.sendMessageToMediaFrame = originalSendMessageToMediaFrame;
+    context.broadcastMessageToFrames = originalBroadcastMessageToFrames;
+    vm.runInContext("browserPreloadJobs.delete('job-rejected-projection-auto-race')", context);
+    delete context.rejectedProjectionAutoRaceRecord;
+  }
+}
+
+{
+  const tabId = 3201;
+  seedPage(tabId, { url: "https://example.test/watch/user-presentation-origin", duration: 60 });
+  context.getState(tabId).subtitleOverlayInjectedAt = Date.now();
+  const originalEnsureSubtitleOverlay = context.ensureSubtitleOverlay;
+  const originalSendMessageToMediaFrame = context.sendMessageToMediaFrame;
+  const originalBroadcastMessageToFrames = context.broadcastMessageToFrames;
+  let attachedMessage = null;
+  context.ensureSubtitleOverlay = async () => {};
+  context.broadcastMessageToFrames = async () => [{ ok: true }];
+  context.sendMessageToMediaFrame = async (_tabId, message) => {
+    if (message.type === "FUGUANG_ATTACH_VTT") {
+      attachedMessage = message;
+    }
+    return { ok: true };
+  };
+  try {
+    const result = await context.attachVttText(
+      tabId,
+      "WEBVTT\n\n00:00:00.000 --> 00:00:01.000\nexplicit presentation\n",
+      {
+        origin: "user-presentation",
+        jobId: "job-user-presentation-origin",
+        attachmentRevision: 0
+      }
+    );
+    assert.equal(result.attached, true);
+    assert.equal(attachedMessage?.origin, "user-presentation");
+    assert.equal(
+      context.getState(tabId).manualVttSignature,
+      "",
+      "a one-shot presentation must not permanently suppress later automatic subtitles"
+    );
+  } finally {
+    context.ensureSubtitleOverlay = originalEnsureSubtitleOverlay;
+    context.sendMessageToMediaFrame = originalSendMessageToMediaFrame;
+    context.broadcastMessageToFrames = originalBroadcastMessageToFrames;
+  }
+}
+
+{
+  const tabId = 3202;
+  const pageUrl = "https://example.test/watch/presentation-cancels-old-mode";
+  seedPage(tabId, { url: pageUrl, duration: 60 });
+  context.getState(tabId).subtitleOverlayInjectedAt = Date.now();
+  const record = {
+    tabId,
+    runToken: "run-presentation-cancels-old-mode",
+    cancelled: false,
+    abortController: new AbortController(),
+    metadata: { pageUrl },
+    job: {
+      id: "job-presentation-cancels-old-mode",
+      runToken: "run-presentation-cancels-old-mode",
+      status: "completed",
+      stage: "completed",
+      updatedAt: 40,
+      translation: {
+        vttText: "WEBVTT\n\n00:00:00.000 --> 00:00:02.000\ntranslated old mode\n",
+        transcript: {
+          source: [
+            { start: 0, end: 2, text: "source selected mode", chunkIndex: 0, segmentIndex: 0 }
+          ],
+          translated: [
+            { start: 0, end: 2, text: "translated old mode", chunkIndex: 0, segmentIndex: 0 }
+          ]
+        }
+      }
+    }
+  };
+  const originalSyncGet = chrome.storage.sync.get;
+  const originalEnsureSubtitleOverlay = context.ensureSubtitleOverlay;
+  const originalSendMessageToMediaFrame = context.sendMessageToMediaFrame;
+  const originalBroadcastMessageToFrames = context.broadcastMessageToFrames;
+  let displayMode = "translated";
+  let activeSubtitle = null;
+  let latestPageGeneration = 0;
+  let releaseOldAutomaticEnsure;
+  let markOldAutomaticEnsureStarted;
+  const oldAutomaticEnsureGate = new Promise(resolve => { releaseOldAutomaticEnsure = resolve; });
+  const oldAutomaticEnsureStarted = new Promise(resolve => { markOldAutomaticEnsureStarted = resolve; });
+  let ensureCalls = 0;
+  chrome.storage.sync.get = async defaults => ({ ...defaults, subtitleDisplayMode: displayMode });
+  context.ensureSubtitleOverlay = async () => {
+    ensureCalls += 1;
+    if (ensureCalls === 1) {
+      markOldAutomaticEnsureStarted();
+      await oldAutomaticEnsureGate;
+    }
+  };
+  context.broadcastMessageToFrames = async (_tabId, message) => {
+    const generation = Number(message.preloadGeneration || 0);
+    if (generation && generation < latestPageGeneration) {
+      return [{ ok: false, stale: true }];
+    }
+    latestPageGeneration = Math.max(latestPageGeneration, generation);
+    activeSubtitle = null;
+    return [{ ok: true }];
+  };
+  context.sendMessageToMediaFrame = async (_tabId, message) => {
+    if (message.type !== "FUGUANG_ATTACH_VTT") {
+      return { ok: true };
+    }
+    const generation = Number(message.preloadGeneration || 0);
+    if (generation && generation < latestPageGeneration) {
+      return { ok: false, stale: true };
+    }
+    latestPageGeneration = Math.max(latestPageGeneration, generation);
+    activeSubtitle = {
+      origin: message.origin,
+      vtt: message.vtt,
+      generation
+    };
+    return { ok: true };
+  };
+  context.presentationCancelsOldModeRecord = record;
+  vm.runInContext("browserPreloadJobs.set('job-presentation-cancels-old-mode', presentationCancelsOldModeRecord)", context);
+  try {
+    const oldAutomaticAttach = context.attachBrowserJobVttIfReady(record);
+    await oldAutomaticEnsureStarted;
+    displayMode = "source";
+    const presentation = await context.attachVttText(
+      tabId,
+      "WEBVTT\n\n00:00:00.000 --> 00:00:02.000\nsource selected mode\n",
+      {
+        origin: "user-presentation",
+        jobId: record.job.id,
+        attachmentRevision: 0
+      }
+    );
+    assert.equal(presentation.attached, true);
+    releaseOldAutomaticEnsure();
+    await oldAutomaticAttach;
+    assert.match(
+      activeSubtitle?.vtt || "",
+      /source selected mode/,
+      "a user presentation must cancel an older automatic attachment that already captured the previous display mode"
+    );
+    assert.doesNotMatch(activeSubtitle?.vtt || "", /translated old mode/);
+
+    await context.attachBrowserJobVttIfReady(record);
+    assert.equal(activeSubtitle?.origin, "job-automatic");
+    assert.match(
+      activeSubtitle?.vtt || "",
+      /source selected mode/,
+      "an automatic attachment started after the presentation must still run with the new display mode"
+    );
+  } finally {
+    releaseOldAutomaticEnsure();
+    chrome.storage.sync.get = originalSyncGet;
+    context.ensureSubtitleOverlay = originalEnsureSubtitleOverlay;
+    context.sendMessageToMediaFrame = originalSendMessageToMediaFrame;
+    context.broadcastMessageToFrames = originalBroadcastMessageToFrames;
+    vm.runInContext("browserPreloadJobs.delete('job-presentation-cancels-old-mode')", context);
+    delete context.presentationCancelsOldModeRecord;
+  }
+}
+
+{
+  const tabId = 3203;
+  seedPage(tabId, { url: "https://example.test/watch/presentation-priority-race", duration: 60 });
+  context.getState(tabId).subtitleOverlayInjectedAt = Date.now();
+  const originalEnsureSubtitleOverlay = context.ensureSubtitleOverlay;
+  const originalSendMessageToMediaFrame = context.sendMessageToMediaFrame;
+  const originalBroadcastMessageToFrames = context.broadcastMessageToFrames;
+  let activeSubtitle = {
+    origin: "job-automatic",
+    jobId: "job-presentation-priority-race",
+    attachmentRevision: 20,
+    vtt: "known current subtitle"
+  };
+  let latestPageGeneration = 0;
+  let projectionFrameTouches = 0;
+  let releasePresentationAttach;
+  let markPresentationAttachStarted;
+  const presentationAttachGate = new Promise(resolve => { releasePresentationAttach = resolve; });
+  const presentationAttachStarted = new Promise(resolve => { markPresentationAttachStarted = resolve; });
+  context.ensureSubtitleOverlay = async () => {
+    markPresentationAttachStarted();
+    await presentationAttachGate;
+  };
+  context.broadcastMessageToFrames = async (_tabId, message) => {
+    const generation = Number(message.preloadGeneration || 0);
+    if (message.origin === "job-projection") {
+      projectionFrameTouches += 1;
+      if (
+        activeSubtitle &&
+        ["job-automatic", "job-projection"].includes(activeSubtitle.origin) &&
+        Number(activeSubtitle.attachmentRevision || 0) > 0 &&
+        Number(message.attachmentRevision || 0) <= 0
+      ) {
+        return [{ ok: false, stale: true, staleRevision: true }];
+      }
+    }
+    return [{ ok: true }];
+  };
+  context.sendMessageToMediaFrame = async (_tabId, message) => {
+    if (message.type !== "FUGUANG_ATTACH_VTT") {
+      return { ok: true };
+    }
+    if (message.origin === "job-projection") {
+      projectionFrameTouches += 1;
+    }
+    const generation = Number(message.preloadGeneration || 0);
+    if (generation && generation < latestPageGeneration) {
+      return { ok: false, stale: true };
+    }
+    latestPageGeneration = Math.max(latestPageGeneration, generation);
+    activeSubtitle = {
+      origin: message.origin,
+      jobId: message.jobId,
+      attachmentRevision: message.attachmentRevision,
+      vtt: message.vtt
+    };
+    return { ok: true };
+  };
+  try {
+    const presentationPromise = context.attachVttText(
+      tabId,
+      "WEBVTT\n\n00:00:00.000 --> 00:00:02.000\nuser selected source\n",
+      {
+        origin: "user-presentation",
+        jobId: "job-presentation-priority-race",
+        attachmentRevision: 0
+      }
+    );
+    await presentationAttachStarted;
+    const projection = await context.attachVttText(
+      tabId,
+      "WEBVTT\n\n00:00:00.000 --> 00:00:02.000\nroutine cached projection\n",
+      {
+        origin: "job-projection",
+        jobId: "job-presentation-priority-race",
+        attachmentRevision: 0
+      }
+    );
+    assert.equal(projection.stale, true);
+    releasePresentationAttach();
+    const presentation = await presentationPromise;
+    assert.equal(
+      presentation.attached,
+      true,
+      "a routine projection must not preempt an in-flight user presentation"
+    );
+    assert.equal(projectionFrameTouches, 0, "a lower-priority projection should be rejected before touching page frames");
+    assert.equal(activeSubtitle?.origin, "user-presentation");
+    assert.match(activeSubtitle?.vtt || "", /user selected source/);
+    assert.equal(context.getState(tabId).vttTextAttachmentPendingEpoch, 0);
+    assert.equal(context.getState(tabId).vttTextAttachmentPendingOrigin, "");
+    assert.equal(context.getState(tabId).vttTextAttachmentPendingJobId, "");
+    assert.equal(context.getState(tabId).vttTextAttachmentPendingRevision, 0);
+  } finally {
+    releasePresentationAttach();
+    context.ensureSubtitleOverlay = originalEnsureSubtitleOverlay;
+    context.sendMessageToMediaFrame = originalSendMessageToMediaFrame;
+    context.broadcastMessageToFrames = originalBroadcastMessageToFrames;
+  }
+}
+
+{
+  const tabId = 3204;
+  const jobId = "job-newer-projection-during-presentation";
+  const pageUrl = "https://example.test/watch/newer-projection-during-presentation";
+  seedPage(tabId, { url: pageUrl, duration: 60 });
+  context.getState(tabId).subtitleOverlayInjectedAt = Date.now();
+  const record = {
+    tabId,
+    runToken: "run-newer-projection-during-presentation",
+    cancelled: false,
+    abortController: new AbortController(),
+    metadata: { pageUrl },
+    job: {
+      id: jobId,
+      runToken: "run-newer-projection-during-presentation",
+      status: "completed",
+      stage: "completed",
+      updatedAt: 30,
+      translation: {
+        vttText: "WEBVTT\n\n00:00:00.000 --> 00:00:02.000\ntranslated revision 30\n",
+        transcript: {
+          source: [
+            { start: 0, end: 2, text: "source revision 30", chunkIndex: 0, segmentIndex: 0 }
+          ],
+          translated: [
+            { start: 0, end: 2, text: "translated revision 30", chunkIndex: 0, segmentIndex: 0 }
+          ]
+        }
+      }
+    }
+  };
+  const originalSyncGet = chrome.storage.sync.get;
+  const originalEnsureSubtitleOverlay = context.ensureSubtitleOverlay;
+  const originalSendMessageToMediaFrame = context.sendMessageToMediaFrame;
+  const originalBroadcastMessageToFrames = context.broadcastMessageToFrames;
+  let activeSubtitle = {
+    origin: "job-automatic",
+    jobId,
+    attachmentRevision: 20,
+    vtt: "revision 20 translated"
+  };
+  let latestPageGeneration = 0;
+  let releasePresentationAttach;
+  let markPresentationAttachStarted;
+  const presentationAttachGate = new Promise(resolve => { releasePresentationAttach = resolve; });
+  const presentationAttachStarted = new Promise(resolve => { markPresentationAttachStarted = resolve; });
+  chrome.storage.sync.get = async defaults => ({ ...defaults, subtitleDisplayMode: "source" });
+  context.ensureSubtitleOverlay = async () => {
+    markPresentationAttachStarted();
+    await presentationAttachGate;
+  };
+  context.broadcastMessageToFrames = async (_tabId, message) => {
+    const generation = Number(message.preloadGeneration || 0);
+    if (generation && generation < latestPageGeneration) {
+      return [{ ok: false, stale: true }];
+    }
+    latestPageGeneration = Math.max(latestPageGeneration, generation);
+    activeSubtitle = null;
+    return [{ ok: true }];
+  };
+  context.sendMessageToMediaFrame = async (_tabId, message) => {
+    if (message.type !== "FUGUANG_ATTACH_VTT") {
+      return { ok: true };
+    }
+    const generation = Number(message.preloadGeneration || 0);
+    if (generation && generation < latestPageGeneration) {
+      return { ok: false, stale: true };
+    }
+    latestPageGeneration = Math.max(latestPageGeneration, generation);
+    activeSubtitle = {
+      origin: message.origin,
+      jobId: message.jobId,
+      attachmentRevision: message.attachmentRevision,
+      vtt: message.vtt
+    };
+    return { ok: true };
+  };
+  context.newerProjectionRecord = record;
+  vm.runInContext("browserPreloadJobs.set('job-newer-projection-during-presentation', newerProjectionRecord)", context);
+  try {
+    const presentationPromise = context.attachVttText(
+      tabId,
+      "WEBVTT\n\n00:00:00.000 --> 00:00:02.000\nsource revision 20\n",
+      {
+        origin: "user-presentation",
+        jobId,
+        attachmentRevision: 30
+      }
+    );
+    await presentationAttachStarted;
+    const newerProjectionPromise = context.attachVttText(
+      tabId,
+      "WEBVTT\n\n00:00:00.000 --> 00:00:02.000\nsource revision 30\n",
+      {
+        origin: "job-projection",
+        jobId,
+        attachmentRevision: 30
+      }
+    );
+    await Promise.resolve();
+    releasePresentationAttach();
+    await Promise.all([presentationPromise, newerProjectionPromise]);
+    await Promise.resolve();
+    assert.equal(
+      activeSubtitle?.attachmentRevision,
+      30,
+      "new task content with the same revision must not be lost during presentation"
+    );
+    assert.match(activeSubtitle?.vtt || "", /source revision 30/);
+    assert.equal(context.getState(tabId).vttTextAttachmentPendingEpoch, 0);
+    assert.equal(context.getState(tabId).vttTextAttachmentPendingOrigin, "");
+    assert.equal(context.getState(tabId).vttTextAttachmentPendingJobId, "");
+    assert.equal(context.getState(tabId).vttTextAttachmentPendingRevision, 0);
+    assert.equal(context.getState(tabId).vttTextDeferredProjectionJobId, "");
+    assert.equal(context.getState(tabId).vttTextDeferredProjectionRevision, 0);
+  } finally {
+    releasePresentationAttach();
+    chrome.storage.sync.get = originalSyncGet;
+    context.ensureSubtitleOverlay = originalEnsureSubtitleOverlay;
+    context.sendMessageToMediaFrame = originalSendMessageToMediaFrame;
+    context.broadcastMessageToFrames = originalBroadcastMessageToFrames;
+    vm.runInContext("browserPreloadJobs.delete('job-newer-projection-during-presentation')", context);
+    delete context.newerProjectionRecord;
+  }
+}
+
+{
+  const tabId = 3205;
+  const jobId = "job-intermediate-projection-during-presentation";
+  const pageUrl = "https://example.test/watch/intermediate-projection-during-presentation";
+  seedPage(tabId, { url: pageUrl, duration: 60 });
+  context.getState(tabId).subtitleOverlayInjectedAt = Date.now();
+  const record = {
+    tabId,
+    runToken: "run-intermediate-projection-during-presentation",
+    cancelled: false,
+    abortController: new AbortController(),
+    metadata: { pageUrl },
+    job: {
+      id: jobId,
+      runToken: "run-intermediate-projection-during-presentation",
+      status: "completed",
+      stage: "completed",
+      updatedAt: 40,
+      translation: {
+        vttText: "WEBVTT\n\n00:00:00.000 --> 00:00:02.000\ntranslated revision 40\n",
+        transcript: {
+          source: [
+            { start: 0, end: 2, text: "source revision 40", chunkIndex: 0, segmentIndex: 0 }
+          ],
+          translated: [
+            { start: 0, end: 2, text: "translated revision 40", chunkIndex: 0, segmentIndex: 0 }
+          ]
+        }
+      }
+    }
+  };
+  const originalSyncGet = chrome.storage.sync.get;
+  const originalEnsureSubtitleOverlay = context.ensureSubtitleOverlay;
+  const originalSendMessageToMediaFrame = context.sendMessageToMediaFrame;
+  const originalBroadcastMessageToFrames = context.broadcastMessageToFrames;
+  let activeSubtitle = {
+    origin: "job-automatic",
+    jobId,
+    attachmentRevision: 40,
+    vtt: "translated revision 40"
+  };
+  let latestPageGeneration = 0;
+  let releasePresentationAttach;
+  let markPresentationAttachStarted;
+  const presentationAttachGate = new Promise(resolve => { releasePresentationAttach = resolve; });
+  const presentationAttachStarted = new Promise(resolve => { markPresentationAttachStarted = resolve; });
+  chrome.storage.sync.get = async defaults => ({ ...defaults, subtitleDisplayMode: "source" });
+  context.ensureSubtitleOverlay = async () => {
+    markPresentationAttachStarted();
+    await presentationAttachGate;
+  };
+  context.broadcastMessageToFrames = async (_tabId, message) => {
+    const generation = Number(message.preloadGeneration || 0);
+    if (generation && generation < latestPageGeneration) {
+      return [{ ok: false, stale: true }];
+    }
+    if (
+      activeSubtitle &&
+      ["job-automatic", "job-projection"].includes(activeSubtitle.origin) &&
+      ["job-automatic", "job-projection"].includes(message.origin) &&
+      activeSubtitle.jobId === message.jobId &&
+      Number(activeSubtitle.attachmentRevision || 0) >
+        Number(message.attachmentRevision || 0)
+    ) {
+      return [{ ok: false, stale: true, staleRevision: true }];
+    }
+    latestPageGeneration = Math.max(latestPageGeneration, generation);
+    activeSubtitle = null;
+    return [{ ok: true }];
+  };
+  context.sendMessageToMediaFrame = async (_tabId, message) => {
+    if (message.type !== "FUGUANG_ATTACH_VTT") {
+      return { ok: true };
+    }
+    const generation = Number(message.preloadGeneration || 0);
+    if (generation && generation < latestPageGeneration) {
+      return { ok: false, stale: true };
+    }
+    if (
+      activeSubtitle &&
+      ["job-automatic", "job-projection"].includes(activeSubtitle.origin) &&
+      ["job-automatic", "job-projection"].includes(message.origin) &&
+      activeSubtitle.jobId === message.jobId &&
+      Number(activeSubtitle.attachmentRevision || 0) >
+        Number(message.attachmentRevision || 0)
+    ) {
+      return { ok: false, stale: true, staleRevision: true };
+    }
+    latestPageGeneration = Math.max(latestPageGeneration, generation);
+    activeSubtitle = {
+      origin: message.origin,
+      jobId: message.jobId,
+      attachmentRevision: message.attachmentRevision,
+      vtt: message.vtt
+    };
+    return { ok: true };
+  };
+  context.intermediateProjectionRecord = record;
+  vm.runInContext("browserPreloadJobs.set('job-intermediate-projection-during-presentation', intermediateProjectionRecord)", context);
+  try {
+    const presentationPromise = context.attachVttText(
+      tabId,
+      "WEBVTT\n\n00:00:00.000 --> 00:00:02.000\nsource revision 20\n",
+      {
+        origin: "user-presentation",
+        jobId,
+        attachmentRevision: 20
+      }
+    );
+    await presentationAttachStarted;
+    const intermediateProjection = context.attachVttText(
+      tabId,
+      "WEBVTT\n\n00:00:00.000 --> 00:00:02.000\nsource revision 30\n",
+      {
+        origin: "job-projection",
+        jobId,
+        attachmentRevision: 30
+      }
+    );
+    await intermediateProjection;
+    releasePresentationAttach();
+    await presentationPromise;
+    await Promise.resolve();
+    assert.equal(
+      activeSubtitle?.attachmentRevision,
+      40,
+      "a stale intermediate projection must not replace or erase the authoritative revision"
+    );
+    assert.match(activeSubtitle?.vtt || "", /source revision 40/);
+    assert.equal(context.getState(tabId).vttTextAttachmentPendingEpoch, 0);
+    assert.equal(context.getState(tabId).vttTextAttachmentPendingOrigin, "");
+    assert.equal(context.getState(tabId).vttTextAttachmentPendingJobId, "");
+    assert.equal(context.getState(tabId).vttTextAttachmentPendingRevision, 0);
+    assert.equal(context.getState(tabId).vttTextDeferredProjectionJobId, "");
+    assert.equal(context.getState(tabId).vttTextDeferredProjectionRevision, 0);
+  } finally {
+    releasePresentationAttach();
+    chrome.storage.sync.get = originalSyncGet;
+    context.ensureSubtitleOverlay = originalEnsureSubtitleOverlay;
+    context.sendMessageToMediaFrame = originalSendMessageToMediaFrame;
+    context.broadcastMessageToFrames = originalBroadcastMessageToFrames;
+    vm.runInContext("browserPreloadJobs.delete('job-intermediate-projection-during-presentation')", context);
+    delete context.intermediateProjectionRecord;
+  }
+}
+
+{
+  const tabId = 3206;
+  const jobId = "job-running-overlay-refresh-continuity";
+  seedPage(tabId, { duration: 600 });
+  const state = context.getState(tabId);
+  state.subtitleOverlayInjectedAt = Date.now();
+  const originalSyncGet = chrome.storage.sync.get;
+  const originalEnsureSubtitleOverlay = context.ensureSubtitleOverlay;
+  const originalSendMessageToMediaFrame = context.sendMessageToMediaFrame;
+  const originalBroadcastMessageToFrames = context.broadcastMessageToFrames;
+  const events = [];
+  let rejectReplacement = false;
+  let activeSubtitle = null;
+  chrome.storage.sync.get = async defaults => ({ ...defaults, subtitleDisplayMode: "translated" });
+  context.ensureSubtitleOverlay = async () => {};
+  context.sendMessageToMediaFrame = async (_tabId, message) => {
+    if (message.type === "FUGUANG_GET_VIDEO_STATE") {
+      return {
+        ok: true,
+        state: {
+          currentTime: 1,
+          duration: 600,
+          subtitleSignature: activeSubtitle?.signature || "",
+          subtitleCueCount: activeSubtitle ? 1 : 0,
+          subtitleOrigin: activeSubtitle?.origin || "",
+          subtitleJobId: activeSubtitle?.jobId || "",
+          subtitleRevision: activeSubtitle?.attachmentRevision || 0
+        }
+      };
+    }
+    if (message.type !== "FUGUANG_ATTACH_VTT") {
+      return { ok: true };
+    }
+    events.push("attach");
+    if (rejectReplacement) {
+      return { ok: false, stale: true, staleRevision: true };
+    }
+    activeSubtitle = {
+      signature: message.signature,
+      origin: message.origin,
+      jobId: message.jobId,
+      attachmentRevision: message.attachmentRevision,
+      vtt: message.vtt
+    };
+    return { ok: true };
+  };
+  context.broadcastMessageToFrames = async (_tabId, message) => {
+    if (message.type === "FUGUANG_DETACH_PRELOAD_VTT") {
+      events.push("detach");
+      activeSubtitle = null;
+    }
+    return [{ ok: true }];
+  };
+  const record = {
+    tabId,
+    metadata: { pageUrl: state.page.url },
+    job: {
+      id: jobId,
+      status: "running",
+      stage: "translation",
+      updatedAt: 20,
+      translation: {
+        segmentCount: 1,
+        chunksDone: 1,
+        vttText: "WEBVTT\n\n00:00:00.000 --> 00:00:02.000\nautomatic revision 20\n",
+        transcript: {
+          source: [{ start: 0, end: 2, text: "source 20", chunkIndex: 0, segmentIndex: 0 }],
+          translated: [{ start: 0, end: 2, text: "automatic revision 20", chunkIndex: 0, segmentIndex: 0 }]
+        }
+      }
+    }
+  };
+  try {
+    await context.attachBrowserJobVttIfReady(record);
+    events.length = 0;
+    await context.attachVttText(
+      tabId,
+      "WEBVTT\n\n00:00:00.000 --> 00:00:02.000\nprojected revision 20\n",
+      { origin: "job-projection", jobId, attachmentRevision: 20 }
+    );
+    const successfulRefreshEvents = [...events];
+
+    record.job.updatedAt = 30;
+    record.job.translation.vttText = "WEBVTT\n\n00:00:00.000 --> 00:00:02.000\nautomatic revision 30\n";
+    record.job.translation.transcript.translated[0].text = "automatic revision 30";
+    await context.attachBrowserJobVttIfReady(record);
+    const visibleBeforeRejectedRefresh = activeSubtitle?.vtt || "";
+
+    events.length = 0;
+    rejectReplacement = true;
+    const rejectedRefresh = await context.attachVttText(
+      tabId,
+      "WEBVTT\n\n00:00:00.000 --> 00:00:02.000\nprojected revision 30\n",
+      { origin: "job-projection", jobId, attachmentRevision: 30 }
+    );
+
+    assert.equal(rejectedRefresh.stale, true);
+    assert.deepEqual(
+      {
+        successfulRefreshEvents,
+        rejectedRefreshEvents: [...events],
+        visibleBeforeRejectedRefresh,
+        visibleAfterRejectedRefresh: activeSubtitle?.vtt || ""
+      },
+      {
+        successfulRefreshEvents: ["attach"],
+        rejectedRefreshEvents: ["attach"],
+        visibleBeforeRejectedRefresh: "WEBVTT\n\n00:00:00.000 --> 00:00:02.000\nautomatic revision 30\n",
+        visibleAfterRejectedRefresh: "WEBVTT\n\n00:00:00.000 --> 00:00:02.000\nautomatic revision 30\n"
+      },
+      "incremental job subtitle refreshes must replace in place and preserve the visible subtitle if a replacement is rejected"
+    );
+  } finally {
+    chrome.storage.sync.get = originalSyncGet;
+    context.ensureSubtitleOverlay = originalEnsureSubtitleOverlay;
+    context.sendMessageToMediaFrame = originalSendMessageToMediaFrame;
+    context.broadcastMessageToFrames = originalBroadcastMessageToFrames;
   }
 }

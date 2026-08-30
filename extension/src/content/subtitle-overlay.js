@@ -41,6 +41,7 @@
   let dragOffsetY = 0;
   let savePositionTimer = 0;
   let activeVttController = null;
+  let latestPreloadGeneration = 0;
   let lastPrimaryMedia = null;
   const pendingCaptionTimers = new Set();
 
@@ -70,13 +71,63 @@
       }
     }
     if (message?.type === MESSAGE.DETACH_PRELOAD_VTT) {
+      const preloadGeneration = normalizePreloadGeneration(message.preloadGeneration);
+      const origin = normalizeSubtitleAttachmentOrigin(message.origin, preloadGeneration);
+      const jobId = String(message.jobId || "");
+      const attachmentRevision = normalizeSubtitleAttachmentRevision(message.attachmentRevision);
+      if (preloadGeneration && preloadGeneration < latestPreloadGeneration) {
+        sendResponse({ ok: false, stale: true });
+        return false;
+      }
+      if (jobSubtitleAttachmentIsStale(origin, jobId, attachmentRevision)) {
+        sendResponse({ ok: false, stale: true, staleRevision: true });
+        return false;
+      }
+      if (message.automaticOnly && activeVttController && subtitleAttachmentIsUserOverride(activeVttController.origin)) {
+        sendResponse({ ok: true, preservedManual: true });
+        return false;
+      }
+      if (preloadGeneration) {
+        latestPreloadGeneration = Math.max(latestPreloadGeneration, preloadGeneration);
+      }
       detachActiveVttController();
       clearCaption();
       sendResponse({ ok: true });
       return false;
     }
     if (message?.type === MESSAGE.ATTACH_VTT) {
-      sendResponse({ ok: attachVtt(message.vtt, message.label || "流声字幕", message.signature || "") });
+      const preloadGeneration = normalizePreloadGeneration(message.preloadGeneration);
+      const origin = normalizeSubtitleAttachmentOrigin(message.origin, preloadGeneration);
+      const jobId = String(message.jobId || "");
+      const attachmentRevision = normalizeSubtitleAttachmentRevision(message.attachmentRevision);
+      if (preloadGeneration && preloadGeneration < latestPreloadGeneration) {
+        sendResponse({ ok: false, stale: true });
+        return false;
+      }
+      if (jobSubtitleAttachmentIsStale(origin, jobId, attachmentRevision)) {
+        sendResponse({ ok: false, stale: true, staleRevision: true });
+        return false;
+      }
+      if (
+        subtitleAttachmentPreservesUserOverride(origin) &&
+        activeVttController &&
+        subtitleAttachmentIsUserOverride(activeVttController.origin)
+      ) {
+        sendResponse({ ok: true, preservedManual: true });
+        return false;
+      }
+      if (preloadGeneration) {
+        latestPreloadGeneration = Math.max(latestPreloadGeneration, preloadGeneration);
+      }
+      sendResponse({
+        ok: attachVtt(
+          message.vtt,
+          message.label || "流声字幕",
+          message.signature || "",
+          preloadGeneration,
+          { origin, jobId, attachmentRevision }
+        )
+      });
       return false;
     }
     if (message?.type === MESSAGE.GET_VIDEO_STATE) {
@@ -643,7 +694,54 @@
     return Math.min(max, Math.max(min, value));
   }
 
-  function attachVtt(vtt, label, signature = "") {
+  function normalizePreloadGeneration(value) {
+    const generation = Number(value);
+    return Number.isSafeInteger(generation) && generation > 0 ? generation : 0;
+  }
+
+  function normalizeSubtitleAttachmentRevision(value) {
+    const revision = Number(value);
+    return Number.isFinite(revision) && revision > 0 ? Math.floor(revision) : 0;
+  }
+
+  function normalizeSubtitleAttachmentOrigin(value, preloadGeneration = 0) {
+    if (["job-automatic", "job-projection", "user-presentation", "user-override"].includes(value)) {
+      return value;
+    }
+    return preloadGeneration ? "job-automatic" : "user-override";
+  }
+
+  function subtitleAttachmentIsJobOwned(origin) {
+    return origin === "job-automatic" || origin === "job-projection";
+  }
+
+  function subtitleAttachmentIsUserOverride(origin) {
+    return origin === "user-override";
+  }
+
+  function subtitleAttachmentPreservesUserOverride(origin) {
+    return subtitleAttachmentIsJobOwned(origin) || origin === "user-presentation";
+  }
+
+  function jobSubtitleAttachmentIsStale(origin, jobId, attachmentRevision) {
+    if (
+      !subtitleAttachmentIsJobOwned(origin) ||
+      !subtitleAttachmentIsJobOwned(activeVttController?.origin) ||
+      !activeVttController.attachmentRevision
+    ) {
+      return false;
+    }
+    if (origin === "job-projection" && !attachmentRevision) {
+      return true;
+    }
+    return Boolean(
+      jobId &&
+      activeVttController.jobId === jobId &&
+      (!attachmentRevision || attachmentRevision < activeVttController.attachmentRevision)
+    );
+  }
+
+  function attachVtt(vtt, label, signature = "", preloadGeneration = 0, metadata = {}) {
     if (!vtt || !captionSettings.subtitleOverlayEnabled) {
       detachActiveVttController();
       clearCaption();
@@ -668,6 +766,10 @@
       pendingSeekUntil: 0,
       label: String(label || "流声字幕"),
       signature: String(signature || ""),
+      preloadGeneration: normalizePreloadGeneration(preloadGeneration),
+      origin: normalizeSubtitleAttachmentOrigin(metadata.origin, preloadGeneration),
+      jobId: String(metadata.jobId || ""),
+      attachmentRevision: normalizeSubtitleAttachmentRevision(metadata.attachmentRevision),
       mediaSignature: "",
       nativeTrack: null,
       nativeTrackMedia: null,
@@ -947,6 +1049,10 @@
       paused: media.paused,
       playbackRate: media.playbackRate,
       subtitleSignature: activeVttController?.signature || "",
+      subtitleGeneration: activeVttController?.preloadGeneration || 0,
+      subtitleOrigin: activeVttController?.origin || "",
+      subtitleJobId: activeVttController?.jobId || "",
+      subtitleRevision: activeVttController?.attachmentRevision || 0,
       mediaSignature: activeVttController?.mediaSignature || mediaElementSignature(media),
       subtitleCueCount: activeVttController?.cues?.length || 0
     };

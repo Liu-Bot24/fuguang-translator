@@ -489,6 +489,11 @@
         }
         await addPacketToLocalMediaMuxSession(session, packet, decoderConfig);
       }
+      if (!session.packetCount) {
+        session.source.close();
+        await session.output.cancel?.().catch?.(() => {});
+        return null;
+      }
       return finalizeLocalMediaMuxSession(session);
     }
 
@@ -509,14 +514,17 @@
           await reloadWebFfmpegFrame(message.webFfmpegUrl);
           recyclePolicy.noteRecycle(index);
         }
-      const encoded = await localMediaOverride("muxLocalMediaAudioWindow", muxLocalMediaAudioWindow)(
-        mediabunny,
-        sink,
-        codec,
-        decoderConfig,
-        outputSpec,
-        spec
-      );
+        const encoded = await localMediaOverride("muxLocalMediaAudioWindow", muxLocalMediaAudioWindow)(
+          mediabunny,
+          sink,
+          codec,
+          decoderConfig,
+          outputSpec,
+          spec
+        );
+        if (!encoded) {
+          continue;
+        }
         const chunk = await extractLocalMediaAudioWindowWithWebFfmpegWithRetry(
           message,
           recyclePolicy,

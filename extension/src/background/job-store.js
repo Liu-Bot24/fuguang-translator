@@ -52,6 +52,10 @@ export const FuguangJobStore = (() => {
         if (current?.runToken && current.runToken !== job.runToken) {
           return { applied: false, reason: "stale-run", currentRunToken: current.runToken };
         }
+        const terminalRegression = rejectTerminalRegression(current, job);
+        if (terminalRegression) {
+          return terminalRegression;
+        }
         if (Number(current?.updatedAt || 0) > Number(job.updatedAt || 0)) {
           return { applied: false, reason: "stale-snapshot", currentRunToken: current.runToken };
         }
@@ -280,6 +284,10 @@ export const FuguangJobStore = (() => {
       const current = jobs.get(job.id);
       if (current?.runToken && current.runToken !== job.runToken) {
         return { applied: false, reason: "stale-run", currentRunToken: current.runToken };
+      }
+      const terminalRegression = rejectTerminalRegression(current, job);
+      if (terminalRegression) {
+        return terminalRegression;
       }
       if (Number(current?.updatedAt || 0) > Number(job.updatedAt || 0)) {
         return { applied: false, reason: "stale-snapshot", currentRunToken: current.runToken };
@@ -513,6 +521,21 @@ export const FuguangJobStore = (() => {
       applied: true,
       tookOver: Boolean(current.executionRunToken === runToken && current.executionStartedAt && !activeLease),
       job: next
+    };
+  }
+
+  function rejectTerminalRegression(current, job) {
+    if (!current ||
+        String(current.runToken || "") !== String(job?.runToken || "") ||
+        !FuguangJobContract.isTerminalStatus(current.status) ||
+        FuguangJobContract.isTerminalStatus(job?.status)) {
+      return null;
+    }
+    return {
+      applied: false,
+      reason: "terminal-regression",
+      currentRunToken: current.runToken,
+      currentStatus: current.status
     };
   }
 

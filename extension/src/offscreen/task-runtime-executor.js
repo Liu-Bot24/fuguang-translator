@@ -35,6 +35,10 @@ export function createOffscreenTaskExecutor(options = {}) {
           runToken,
           ...executionFence
         }, context.signal);
+        if (work?.retryable) {
+          await delay(retryBaseMs, context.signal);
+          continue;
+        }
         if (work?.cancelled || work?.stale || work?.terminal) {
           return work;
         }
@@ -44,13 +48,14 @@ export function createOffscreenTaskExecutor(options = {}) {
           .filter(chunk => !chunk?.asrCompleted && !chunk?.processing)
           .sort((left, right) => Number(left.index || 0) - Number(right.index || 0));
         let stopResponse = null;
+        let retryRequested = false;
         const queue = [...chunks];
         const concurrency = Math.max(1, Math.min(
           Number(runtime.asrWorkers || 1) || 1,
           queue.length || 1
         ));
         const workers = Array.from({ length: concurrency }, async () => {
-          while (queue.length && !stopResponse) {
+          while (queue.length && !stopResponse && !retryRequested) {
             const chunk = queue.shift();
             if (!chunk) {
               return;
@@ -63,12 +68,20 @@ export function createOffscreenTaskExecutor(options = {}) {
               chunkIndex: Number(chunk.index || 0),
               pipeline: String(runtime.pipeline || context.job?.pipeline || "browser")
             }, context.signal);
+            if (response?.retryable) {
+              retryRequested = true;
+              return;
+            }
             if (response?.cancelled || response?.stale) {
               stopResponse = response;
             }
           }
         });
         await Promise.all(workers);
+        if (retryRequested) {
+          await delay(retryBaseMs, context.signal);
+          continue;
+        }
         if (stopResponse) {
           return stopResponse;
         }
@@ -80,6 +93,10 @@ export function createOffscreenTaskExecutor(options = {}) {
             runToken,
             ...executionFence
           }, context.signal);
+          if (finalized?.retryable) {
+            await delay(retryBaseMs, context.signal);
+            continue;
+          }
           if (!finalized?.inProgress) {
             return finalized;
           }

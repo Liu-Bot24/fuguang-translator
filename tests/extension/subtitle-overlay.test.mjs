@@ -634,6 +634,69 @@ later cue
   const video = new FakeMedia({ currentTime: 1, paused: true });
   const harness = createHarness({ videos: [video] });
   await harness.ready();
+  const newer = await harness.send({
+    type: "FUGUANG_ATTACH_VTT",
+    vtt: OVERLAPPING_VTT,
+    signature: "newer-generation",
+    preloadGeneration: 20
+  });
+  assert.equal(newer.ok, true);
+  assert.equal(harness.overlayText(), "stale long cue");
+
+  const stale = await harness.send({
+    type: "FUGUANG_ATTACH_VTT",
+    vtt: SAMPLE_VTT,
+    signature: "older-generation",
+    preloadGeneration: 19
+  });
+  assert.equal(stale.ok, false);
+  assert.equal(stale.stale, true);
+  assert.equal(harness.overlayText(), "stale long cue");
+  const stateAfterStale = await harness.send({ type: "FUGUANG_GET_VIDEO_STATE" });
+  assert.equal(stateAfterStale.state.subtitleSignature, "newer-generation");
+  assert.equal(stateAfterStale.state.subtitleGeneration, 20);
+
+  const barrier = await harness.send({
+    type: "FUGUANG_DETACH_PRELOAD_VTT",
+    preloadGeneration: 21,
+    automaticOnly: true
+  });
+  assert.equal(barrier.ok, true);
+  assert.equal(harness.overlayText(), "");
+  const afterBarrier = await harness.send({
+    type: "FUGUANG_ATTACH_VTT",
+    vtt: SAMPLE_VTT,
+    signature: "late-generation",
+    preloadGeneration: 20
+  });
+  assert.equal(afterBarrier.ok, false);
+  assert.equal(afterBarrier.stale, true);
+  assert.equal(harness.overlayText(), "");
+}
+
+{
+  const video = new FakeMedia({ currentTime: 1, paused: true });
+  const harness = createHarness({ videos: [video] });
+  await harness.ready();
+  assert.equal((await harness.send({
+    type: "FUGUANG_ATTACH_VTT",
+    vtt: SAMPLE_VTT,
+    signature: "manual-without-generation"
+  })).ok, true);
+  const barrier = await harness.send({
+    type: "FUGUANG_DETACH_PRELOAD_VTT",
+    preloadGeneration: 30,
+    automaticOnly: true
+  });
+  assert.equal(barrier.ok, true);
+  assert.equal(barrier.preservedManual, true);
+  assert.equal(harness.overlayText(), "first cue", "automatic invalidation must preserve a manual attachment");
+}
+
+{
+  const video = new FakeMedia({ currentTime: 1, paused: true });
+  const harness = createHarness({ videos: [video] });
+  await harness.ready();
   assert.equal((await harness.send({ type: "FUGUANG_ATTACH_VTT", vtt: SAMPLE_VTT, signature: "sample-signature" })).ok, true);
   harness.clearOverlayOnly();
   assert.equal(harness.overlayHidden(), true);
@@ -872,4 +935,314 @@ later cue
   const stateResponse = await harness.send({ type: "FUGUANG_GET_VIDEO_STATE" });
   assert.equal(stateResponse.ok, true);
   assert.equal(stateResponse.state.currentTime, 1);
+}
+
+{
+  const video = new FakeMedia({ currentTime: 1, paused: true });
+  const harness = createHarness({ videos: [video] });
+  await harness.ready();
+  const manual = await harness.send({
+    type: "FUGUANG_ATTACH_VTT",
+    vtt: SAMPLE_VTT,
+    signature: "manual-attachment-race"
+  });
+  assert.equal(manual.ok, true);
+
+  const automatic = await harness.send({
+    type: "FUGUANG_ATTACH_VTT",
+    vtt: OVERLAPPING_VTT,
+    signature: "automatic-attachment-race",
+    preloadGeneration: 31
+  });
+  assert.equal(automatic.ok, true);
+  assert.equal(automatic.preservedManual, true, "automatic attachment must preserve a newer manual subtitle");
+  assert.equal(harness.overlayText(), "first cue");
+  const state = await harness.send({ type: "FUGUANG_GET_VIDEO_STATE" });
+  assert.equal(state.state.subtitleSignature, "manual-attachment-race");
+  assert.equal(state.state.subtitleGeneration, 0);
+}
+
+
+{
+  const video = new FakeMedia({ currentTime: 1, paused: true });
+  const harness = createHarness({ videos: [video] });
+  await harness.ready();
+  const projection = await harness.send({
+    type: "FUGUANG_ATTACH_VTT",
+    vtt: SAMPLE_VTT,
+    signature: "job-projection-before-worker-restart",
+    origin: "job-projection",
+    jobId: "job-worker-restart",
+    attachmentRevision: 10
+  });
+  assert.equal(projection.ok, true);
+
+  const automatic = await harness.send({
+    type: "FUGUANG_ATTACH_VTT",
+    vtt: OVERLAPPING_VTT,
+    signature: "job-final-after-worker-restart",
+    origin: "job-automatic",
+    jobId: "job-worker-restart",
+    attachmentRevision: 20,
+    preloadGeneration: 41
+  });
+  assert.equal(automatic.ok, true);
+  assert.notEqual(
+    automatic.preservedManual,
+    true,
+    "a normal job projection left in the page must not block the same job's final automatic subtitle after worker restart"
+  );
+  assert.equal(harness.overlayText(), "stale long cue");
+  const state = await harness.send({ type: "FUGUANG_GET_VIDEO_STATE" });
+  assert.equal(state.state.subtitleSignature, "job-final-after-worker-restart");
+}
+
+
+{
+  const video = new FakeMedia({ currentTime: 1, paused: true });
+  const harness = createHarness({ videos: [video] });
+  await harness.ready();
+  const userOverride = await harness.send({
+    type: "FUGUANG_ATTACH_VTT",
+    vtt: SAMPLE_VTT,
+    signature: "generated-user-override",
+    origin: "user-override",
+    jobId: "job-origin-fence",
+    attachmentRevision: 30,
+    preloadGeneration: 50
+  });
+  assert.equal(userOverride.ok, true);
+  const automatic = await harness.send({
+    type: "FUGUANG_ATTACH_VTT",
+    vtt: OVERLAPPING_VTT,
+    signature: "automatic-after-generated-user-override",
+    origin: "job-automatic",
+    jobId: "job-origin-fence",
+    attachmentRevision: 40,
+    preloadGeneration: 51
+  });
+  assert.equal(automatic.ok, true);
+  assert.equal(automatic.preservedManual, true);
+  const presentation = await harness.send({
+    type: "FUGUANG_ATTACH_VTT",
+    vtt: OVERLAPPING_VTT,
+    signature: "presentation-after-generated-user-override",
+    origin: "user-presentation",
+    jobId: "job-origin-fence",
+    attachmentRevision: 40,
+    preloadGeneration: 52
+  });
+  assert.equal(presentation.ok, true);
+  assert.equal(presentation.preservedManual, true);
+  const state = await harness.send({ type: "FUGUANG_GET_VIDEO_STATE" });
+  assert.equal(state.state.subtitleSignature, "generated-user-override");
+  assert.equal(state.state.subtitleGeneration, 50);
+  assert.equal(state.state.subtitleOrigin, "user-override");
+}
+
+{
+  const video = new FakeMedia({ currentTime: 1, paused: true });
+  const harness = createHarness({ videos: [video] });
+  await harness.ready();
+  const latest = await harness.send({
+    type: "FUGUANG_ATTACH_VTT",
+    vtt: OVERLAPPING_VTT,
+    signature: "latest-job-revision",
+    origin: "job-automatic",
+    jobId: "job-revision-fence",
+    attachmentRevision: 20,
+    preloadGeneration: 60
+  });
+  assert.equal(latest.ok, true);
+  const staleDetach = await harness.send({
+    type: "FUGUANG_DETACH_PRELOAD_VTT",
+    automaticOnly: true,
+    origin: "job-projection",
+    jobId: "job-revision-fence",
+    attachmentRevision: 10,
+    preloadGeneration: 61
+  });
+  assert.equal(staleDetach.ok, false);
+  assert.equal(staleDetach.stale, true);
+  assert.equal(staleDetach.staleRevision, true);
+  const stale = await harness.send({
+    type: "FUGUANG_ATTACH_VTT",
+    vtt: SAMPLE_VTT,
+    signature: "stale-job-revision",
+    origin: "job-projection",
+    jobId: "job-revision-fence",
+    attachmentRevision: 10,
+    preloadGeneration: 61
+  });
+  assert.equal(stale.ok, false);
+  assert.equal(stale.stale, true);
+  assert.equal(stale.staleRevision, true);
+  const state = await harness.send({ type: "FUGUANG_GET_VIDEO_STATE" });
+  assert.equal(state.state.subtitleSignature, "latest-job-revision");
+  assert.equal(state.state.subtitleRevision, 20);
+}
+
+{
+  const video = new FakeMedia({ currentTime: 1, paused: true });
+  const harness = createHarness({ videos: [video] });
+  await harness.ready();
+  assert.equal((await harness.send({
+    type: "FUGUANG_ATTACH_VTT",
+    vtt: SAMPLE_VTT,
+    signature: "generation-order-current",
+    origin: "job-automatic",
+    jobId: "job-generation-order",
+    attachmentRevision: 20,
+    preloadGeneration: 100
+  })).ok, true);
+
+  const staleDetach = await harness.send({
+    type: "FUGUANG_DETACH_PRELOAD_VTT",
+    automaticOnly: true,
+    origin: "job-projection",
+    jobId: "job-generation-order",
+    attachmentRevision: 10,
+    preloadGeneration: 102
+  });
+  assert.equal(staleDetach.staleRevision, true);
+  const staleAttach = await harness.send({
+    type: "FUGUANG_ATTACH_VTT",
+    vtt: OVERLAPPING_VTT,
+    signature: "generation-order-stale",
+    origin: "job-projection",
+    jobId: "job-generation-order",
+    attachmentRevision: 10,
+    preloadGeneration: 102
+  });
+  assert.equal(staleAttach.staleRevision, true);
+
+  const newer = await harness.send({
+    type: "FUGUANG_ATTACH_VTT",
+    vtt: OVERLAPPING_VTT,
+    signature: "generation-order-newer",
+    origin: "job-automatic",
+    jobId: "job-generation-order",
+    attachmentRevision: 30,
+    preloadGeneration: 101
+  });
+  assert.equal(
+    newer.ok,
+    true,
+    "a rejected stale revision must not advance the generation barrier past a genuinely newer job revision"
+  );
+  const state = await harness.send({ type: "FUGUANG_GET_VIDEO_STATE" });
+  assert.equal(state.state.subtitleSignature, "generation-order-newer");
+  assert.equal(state.state.subtitleRevision, 30);
+}
+
+{
+  const video = new FakeMedia({ currentTime: 1, paused: true });
+  const harness = createHarness({ videos: [video] });
+  await harness.ready();
+  assert.equal((await harness.send({
+    type: "FUGUANG_ATTACH_VTT",
+    vtt: SAMPLE_VTT,
+    signature: "known-revision-current",
+    origin: "job-automatic",
+    jobId: "job-unknown-revision",
+    attachmentRevision: 20,
+    preloadGeneration: 200
+  })).ok, true);
+
+  const unknownDetach = await harness.send({
+    type: "FUGUANG_DETACH_PRELOAD_VTT",
+    automaticOnly: true,
+    origin: "job-projection",
+    jobId: "job-unknown-revision",
+    attachmentRevision: 0,
+    preloadGeneration: 201
+  });
+  assert.equal(unknownDetach.staleRevision, true);
+  const unknownAttach = await harness.send({
+    type: "FUGUANG_ATTACH_VTT",
+    vtt: OVERLAPPING_VTT,
+    signature: "unknown-revision-stale",
+    origin: "job-projection",
+    jobId: "job-unknown-revision",
+    attachmentRevision: 0,
+    preloadGeneration: 201
+  });
+  assert.equal(unknownAttach.staleRevision, true);
+  const state = await harness.send({ type: "FUGUANG_GET_VIDEO_STATE" });
+  assert.equal(
+    state.state.subtitleSignature,
+    "known-revision-current",
+    "an unknown-revision cache projection must not replace a known newer subtitle for the same job"
+  );
+  assert.equal(state.state.subtitleRevision, 20);
+}
+
+{
+  const video = new FakeMedia({ currentTime: 1, paused: true });
+  const harness = createHarness({ videos: [video] });
+  await harness.ready();
+  assert.equal((await harness.send({
+    type: "FUGUANG_ATTACH_VTT",
+    vtt: SAMPLE_VTT,
+    signature: "new-job-known-revision",
+    origin: "job-automatic",
+    jobId: "job-cache-newer",
+    attachmentRevision: 20,
+    preloadGeneration: 300
+  })).ok, true);
+
+  const oldCacheDetach = await harness.send({
+    type: "FUGUANG_DETACH_PRELOAD_VTT",
+    automaticOnly: true,
+    origin: "job-projection",
+    jobId: "job-cache-older",
+    attachmentRevision: 0,
+    preloadGeneration: 301
+  });
+  assert.equal(
+    oldCacheDetach.staleRevision,
+    true,
+    "an unknown-revision cache projection must not remove a known-revision subtitle from a newer job"
+  );
+  let state = await harness.send({ type: "FUGUANG_GET_VIDEO_STATE" });
+  assert.equal(state.state.subtitleSignature, "new-job-known-revision");
+  assert.equal(state.state.subtitleJobId, "job-cache-newer");
+  assert.equal(state.state.subtitleRevision, 20);
+
+  const presentationDetach = await harness.send({
+    type: "FUGUANG_DETACH_PRELOAD_VTT",
+    automaticOnly: true,
+    origin: "user-presentation",
+    jobId: "job-cache-older",
+    attachmentRevision: 0,
+    preloadGeneration: 302
+  });
+  assert.equal(presentationDetach.ok, true);
+  const presentationAttach = await harness.send({
+    type: "FUGUANG_ATTACH_VTT",
+    vtt: OVERLAPPING_VTT,
+    signature: "explicit-cached-presentation",
+    origin: "user-presentation",
+    jobId: "job-cache-older",
+    attachmentRevision: 0,
+    preloadGeneration: 302
+  });
+  assert.equal(presentationAttach.ok, true);
+  state = await harness.send({ type: "FUGUANG_GET_VIDEO_STATE" });
+  assert.equal(state.state.subtitleSignature, "explicit-cached-presentation");
+  assert.equal(state.state.subtitleOrigin, "user-presentation");
+
+  const laterAutomatic = await harness.send({
+    type: "FUGUANG_ATTACH_VTT",
+    vtt: SAMPLE_VTT,
+    signature: "later-automatic-after-presentation",
+    origin: "job-automatic",
+    jobId: "job-cache-newer",
+    attachmentRevision: 30,
+    preloadGeneration: 303
+  });
+  assert.equal(laterAutomatic.ok, true);
+  state = await harness.send({ type: "FUGUANG_GET_VIDEO_STATE" });
+  assert.equal(state.state.subtitleSignature, "later-automatic-after-presentation");
+  assert.equal(state.state.subtitleOrigin, "job-automatic");
 }

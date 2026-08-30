@@ -84,6 +84,107 @@ test("offscreen executor retries a transient worker restart without duplicating 
   assert.equal(sent.filter(message => message.type === FuguangTaskRuntimeProtocol.MESSAGE.FINALIZE_JOB).length, 1);
 });
 
+test("offscreen executor re-polls durable work after a retryable chunk result", async () => {
+  const sent = [];
+  let polls = 0;
+  const execute = createOffscreenTaskExecutor({
+    retryBaseMs: 0,
+    pollIntervalMs: 0,
+    async sendMessage(message) {
+      sent.push(message);
+      if (message.type === FuguangTaskRuntimeProtocol.MESSAGE.GET_JOB_WORK) {
+        polls += 1;
+        return polls === 1
+          ? { ok: true, extractionDone: true, chunks: [{ index: 0, asrCompleted: false }] }
+          : { ok: true, terminal: true, interrupted: true };
+      }
+      if (message.type === FuguangTaskRuntimeProtocol.MESSAGE.PROCESS_JOB_CHUNK) {
+        return { ok: true, stale: true, retryable: true, reason: "owned-write-error" };
+      }
+      return { ok: true, accepted: true };
+    }
+  });
+  const result = await execute({}, {
+    job: { id: "job-retryable-chunk", runToken: "run-retryable-chunk" },
+    executionOwnerId: "offscreen-retryable",
+    executionEpoch: 1,
+    chunks: [{ entryType: "audio-chunk", index: 0 }],
+    signal: new AbortController().signal
+  });
+  assert.equal(result.interrupted, true);
+  assert.deepEqual(sent.map(message => message.type), [
+    FuguangTaskRuntimeProtocol.MESSAGE.GET_JOB_WORK,
+    FuguangTaskRuntimeProtocol.MESSAGE.PROCESS_JOB_CHUNK,
+    FuguangTaskRuntimeProtocol.MESSAGE.GET_JOB_WORK
+  ]);
+});
+
+test("offscreen executor re-polls after a retryable work response", async () => {
+  const sent = [];
+  let polls = 0;
+  const execute = createOffscreenTaskExecutor({
+    retryBaseMs: 0,
+    pollIntervalMs: 0,
+    async sendMessage(message) {
+      sent.push(message);
+      if (message.type === FuguangTaskRuntimeProtocol.MESSAGE.GET_JOB_WORK) {
+        polls += 1;
+        return polls === 1
+          ? { ok: true, stale: true, retryable: true, reason: "snapshot-read-error" }
+          : { ok: true, terminal: true, interrupted: true };
+      }
+      return { ok: true, accepted: true };
+    }
+  });
+  const result = await execute({}, {
+    job: { id: "job-retryable-work", runToken: "run-retryable-work" },
+    executionOwnerId: "offscreen-retryable",
+    executionEpoch: 2,
+    chunks: [],
+    signal: new AbortController().signal
+  });
+  assert.equal(result.interrupted, true);
+  assert.deepEqual(sent.map(message => message.type), [
+    FuguangTaskRuntimeProtocol.MESSAGE.GET_JOB_WORK,
+    FuguangTaskRuntimeProtocol.MESSAGE.GET_JOB_WORK
+  ]);
+});
+
+test("offscreen executor re-polls durable work after a retryable finalization", async () => {
+  const sent = [];
+  let polls = 0;
+  const execute = createOffscreenTaskExecutor({
+    retryBaseMs: 0,
+    pollIntervalMs: 0,
+    async sendMessage(message) {
+      sent.push(message);
+      if (message.type === FuguangTaskRuntimeProtocol.MESSAGE.GET_JOB_WORK) {
+        polls += 1;
+        return polls === 1
+          ? { ok: true, extractionDone: true, chunks: [] }
+          : { ok: true, terminal: true, interrupted: true };
+      }
+      if (message.type === FuguangTaskRuntimeProtocol.MESSAGE.FINALIZE_JOB) {
+        return { ok: true, stale: true, retryable: true, reason: "owned-write-error" };
+      }
+      return { ok: true, accepted: true };
+    }
+  });
+  const result = await execute({}, {
+    job: { id: "job-retryable-finalize", runToken: "run-retryable-finalize" },
+    executionOwnerId: "offscreen-retryable",
+    executionEpoch: 2,
+    chunks: [],
+    signal: new AbortController().signal
+  });
+  assert.equal(result.interrupted, true);
+  assert.deepEqual(sent.map(message => message.type), [
+    FuguangTaskRuntimeProtocol.MESSAGE.GET_JOB_WORK,
+    FuguangTaskRuntimeProtocol.MESSAGE.FINALIZE_JOB,
+    FuguangTaskRuntimeProtocol.MESSAGE.GET_JOB_WORK
+  ]);
+});
+
 test("offscreen executor aborts a pending runtime message when its lease is lost", async () => {
   let markStarted;
   const started = new Promise(resolve => {

@@ -732,6 +732,7 @@ let currentLocale = resolveInitialLocale();
 let currentJobId = "";
 let currentJob = null;
 let renderedSubtitleJobId = "";
+let renderedSubtitleRevision = 0;
 let pollTimer = 0;
 let candidates = [];
 let selectedCandidateKey = "";
@@ -1741,6 +1742,8 @@ async function startPreloadFromSidePanel() {
     clearSubtitles(t("waitingNewSubtitles"), currentJobId);
     setMessage(t("taskSubmitted"));
     renderJob(response.job);
+  } catch (error) {
+    setMessage(formatRuntimeError(error?.message || error));
   } finally {
     startRequestInFlight = false;
     updateActionButtons(currentJob);
@@ -2128,6 +2131,7 @@ function renderJob(job) {
       taskDetailsExpanded = false;
       taskDetailsManuallyCollapsed = false;
       renderedSubtitleSignature = "";
+      renderedSubtitleRevision = 0;
       manualSubtitleOverride = null;
       activeCueIndex = -1;
       currentTranscript = null;
@@ -2409,6 +2413,7 @@ async function renderSubtitles(jobId, job = null) {
   const signature = subtitleSignature(jobId, job);
   const needsTranscriptRetry = subtitleDisplayModeRequiresTranscript(subtitleDisplayMode) && subtitleCues.length && subtitleCueSource !== "transcript";
   if (signature && renderedSubtitleSignature === signature && renderedSubtitleJobId === jobId && subtitleCues.length && !needsTranscriptRetry) {
+    renderedSubtitleRevision = subtitleAttachmentRevision(jobId, job);
     startSubtitleFollow();
     await attachCurrentSubtitlesToPage();
     return;
@@ -2437,6 +2442,7 @@ async function renderSubtitles(jobId, job = null) {
   const cues = result.cues;
   renderedSubtitleJobId = jobId || renderedSubtitleJobId;
   renderedSubtitleSignature = signature || "";
+  renderedSubtitleRevision = subtitleAttachmentRevision(jobId, job);
   subtitleCueSource = result.source;
   currentTranscript = result.transcript || (result.source === "transcript" ? transcriptFromCues(cues) : null);
   subtitleCues = cues;
@@ -2529,7 +2535,7 @@ function renderSubtitleCueList(options = {}) {
     item.addEventListener("dblclick", () => seekToCue(cue.start, index));
     item.append(timeRow, textWrap);
     if (subtitleEditMode) {
-      item.appendChild(renderSubtitleCueDeleteButton(index));
+      item.appendChild(renderSubtitleCueDeleteButton(cue, index));
     }
     elements.subtitleList.appendChild(item);
   }
@@ -2692,12 +2698,12 @@ function renderSubtitleCueTextRow(cue, index) {
   return row;
 }
 
-function renderSubtitleCueDeleteButton(index) {
+function renderSubtitleCueDeleteButton(cue, index) {
   return createCueEditButton({
     className: "cue-edit-button cue-delete",
     icon: "delete",
     title: t("deleteSubtitleCue"),
-    onClick: () => deleteSubtitleCueAtIndex(index)
+    onClick: () => deleteSubtitleCueAtIndex(index, cue)
   });
 }
 
@@ -2736,6 +2742,7 @@ function clearSubtitles(text, jobId = "") {
   pendingSubtitleSignature = "";
   renderedSubtitleJobId = jobId || "";
   renderedSubtitleSignature = "";
+  renderedSubtitleRevision = 0;
   manualSubtitleOverride = null;
   attachedSubtitleTabId = 0;
   attachedSubtitleSignature = "";
@@ -2927,6 +2934,19 @@ async function toggleSubtitleMode() {
     subtitleDisplayMode = "bilingual";
   }
   await chrome.storage.sync.set({ subtitleDisplayMode }).catch(() => {});
+  const currentRevision = subtitleAttachmentRevision(renderedSubtitleJobId, currentJob);
+  if (
+    !manualSubtitleOverrideMatches(renderedSubtitleJobId) &&
+    currentRevision > renderedSubtitleRevision
+  ) {
+    await renderSubtitles(renderedSubtitleJobId, currentJob);
+    if (
+      String(currentJob?.id || "") !== String(renderedSubtitleJobId || "") ||
+      subtitleAttachmentRevision(renderedSubtitleJobId, currentJob) > renderedSubtitleRevision
+    ) {
+      return;
+    }
+  }
   renderSubtitleCueList({ preserveScroll: subtitleEditMode });
   if (subtitleDisplayModeRequiresTranscript(subtitleDisplayMode) && renderedSubtitleJobId && subtitleCueSource !== "transcript") {
     renderedSubtitleSignature = "";
@@ -2937,7 +2957,7 @@ async function toggleSubtitleMode() {
     activeCueIndex = -1;
     setActiveCueIndex(index, subtitleEditMode ? { suppressScroll: true } : { forceScroll: true });
   }
-  await attachCurrentSubtitlesToPage();
+  await attachCurrentSubtitlesToPage({ userPresentation: true });
 }
 
 async function toggleSubtitleEditMode() {
@@ -3165,18 +3185,22 @@ function subtitleCueTimeRangeCanBeSaved(index, start, end) {
   return true;
 }
 
-async function deleteSubtitleCueAtIndex(index) {
-  if (!subtitleCues[index]) {
+async function deleteSubtitleCueAtIndex(index, expectedCue = null) {
+  const cueIndex = expectedCue && subtitleCues[index] !== expectedCue
+    ? subtitleCues.indexOf(expectedCue)
+    : index;
+  const cue = subtitleCues[cueIndex];
+  if (!cue || (expectedCue && cue !== expectedCue)) {
     return;
   }
   const scrollState = captureSubtitleScrollState();
   ensureEditableTranscript();
-  removeTranscriptSegment("source", index, subtitleCues[index]);
-  removeTranscriptSegment("translated", index, subtitleCues[index]);
-  subtitleCues.splice(index, 1);
-  if (activeCueIndex === index) {
+  removeTranscriptSegment("source", cueIndex, cue);
+  removeTranscriptSegment("translated", cueIndex, cue);
+  subtitleCues.splice(cueIndex, 1);
+  if (activeCueIndex === cueIndex) {
     activeCueIndex = -1;
-  } else if (activeCueIndex > index) {
+  } else if (activeCueIndex > cueIndex) {
     activeCueIndex -= 1;
   }
   subtitleEditingTextIndex = -1;
@@ -3184,8 +3208,8 @@ async function deleteSubtitleCueAtIndex(index) {
   if (!subtitleCues.length) {
     subtitleEditMode = false;
   }
-  await persistSubtitleEdits();
   renderSubtitleCueList({ preserveScroll: true, scrollState });
+  await persistSubtitleEdits();
 }
 
 function ensureEditableTranscript() {
@@ -3644,7 +3668,7 @@ function chunkNeedsAsrRetry(status) {
   return Number(status?.asrFailures || status?.asr_failures || 0) > 0;
 }
 
-async function attachCurrentSubtitlesToPage() {
+async function attachCurrentSubtitlesToPage(options = {}) {
   if (!activeTab?.id || !subtitleCues.length) {
     return;
   }
@@ -3660,9 +3684,18 @@ async function attachCurrentSubtitlesToPage() {
   }
   const requestContext = captureSidepanelRequestContext();
   const signature = subtitleAttachSignature(requestContext.tabId, vtt);
-  const response = await send({ type: MESSAGE.ATTACH_VTT_TEXT, tabId: requestContext.tabId, vtt });
+  const attachmentMetadata = currentSubtitleAttachmentMetadata(options);
+  const response = await send({
+    type: MESSAGE.ATTACH_VTT_TEXT,
+    tabId: requestContext.tabId,
+    vtt,
+    ...attachmentMetadata
+  });
   if (!response.ok) {
     renderSubtitleNotice(response.error || t("noPlayer"));
+    return;
+  }
+  if (response.stale || response.attached === false) {
     return;
   }
   if (!sidepanelRequestContextStillCurrent(requestContext)) {
@@ -3672,6 +3705,46 @@ async function attachCurrentSubtitlesToPage() {
   attachedSubtitleTabId = requestContext.tabId;
   attachedSubtitleSignature = signature;
   renderSubtitleNotice();
+}
+
+function subtitleAttachmentRevision(jobId, job = null) {
+  const normalizedJobId = String(jobId || "");
+  if (
+    !normalizedJobId ||
+    (job?.id && String(job.id) !== normalizedJobId)
+  ) {
+    return 0;
+  }
+  const revision = Number(job?.updatedAt || 0);
+  return Number.isFinite(revision) && revision > 0 ? Math.floor(revision) : 0;
+}
+
+function currentSubtitleAttachmentMetadata(options = {}) {
+  const jobId = String(
+    currentJob?.id ||
+    currentJobId ||
+    renderedSubtitleJobId ||
+    currentSubtitleCacheEntry?.jobId ||
+    ""
+  );
+  const origin = manualSubtitleOverrideMatches(jobId)
+    ? "user-override"
+    : options.userPresentation
+      ? "user-presentation"
+      : "job-projection";
+  const currentJobRevision = String(currentJob?.id || "") === jobId
+    ? subtitleAttachmentRevision(jobId, currentJob)
+    : 0;
+  const cueRevision = String(renderedSubtitleJobId || "") === jobId
+    ? renderedSubtitleRevision
+    : 0;
+  return {
+    origin,
+    jobId,
+    attachmentRevision: origin === "user-override"
+      ? currentJobRevision || cueRevision
+      : cueRevision
+  };
 }
 
 async function ensureCurrentSubtitlesAttachedToPage() {
@@ -3833,6 +3906,7 @@ async function importSubtitleFile() {
     subtitleCueSource = "transcript";
     renderedSubtitleJobId = entry.jobId || `imported-${Date.now()}`;
     renderedSubtitleSignature = `${entry.id}:${cues.length}`;
+    renderedSubtitleRevision = 0;
     markManualSubtitleOverride(renderedSubtitleSignature);
     activeCueIndex = -1;
     renderSubtitleCueList();
@@ -4004,6 +4078,7 @@ async function tryLoadCachedSubtitleForCurrentPage() {
     subtitleCueSource = "transcript";
     renderedSubtitleJobId = entry.jobId || `cache-${key}`;
     renderedSubtitleSignature = `${key}:${cues.length}`;
+    renderedSubtitleRevision = 0;
     activeCueIndex = -1;
     renderSubtitleCueList();
     await ensureCurrentSubtitlesAttachedToPage();

@@ -44,8 +44,12 @@ export function createTaskRuntimeHost(options = {}) {
   }
 
   async function startJob(command) {
-    const snapshot = command.snapshot || {};
-    const job = snapshot.job || {};
+    const suppliedSnapshot = command.snapshot || {};
+    const suppliedJob = suppliedSnapshot.job || {};
+    const resumeExisting = Boolean(command.resumeExisting);
+    let snapshotApplied = false;
+    let snapshot = suppliedSnapshot;
+    let job = suppliedJob;
     if (!job.id || !job.runToken) {
       return FuguangTaskRuntimeProtocol.response(FuguangTaskRuntimeProtocol.MESSAGE.ERROR, command, {
         error: "Task start requires job id and runToken."
@@ -66,6 +70,8 @@ export function createTaskRuntimeHost(options = {}) {
         return FuguangTaskRuntimeProtocol.response(FuguangTaskRuntimeProtocol.MESSAGE.ACK, command, {
           accepted: true,
           duplicate: true,
+          snapshotApplied: false,
+          resumed: resumeExisting,
           jobId: job.id,
           runToken: job.runToken,
           executionOwnerId: ownerId,
@@ -75,13 +81,39 @@ export function createTaskRuntimeHost(options = {}) {
       }
       fenceActiveRun(runKey, activeRun, "Task execution lease is no longer owned by this runtime.");
     }
-    const result = await jobStore.putSnapshot(snapshot);
-    if (result.applied === false && result.reason !== "stale-snapshot") {
-      return FuguangTaskRuntimeProtocol.response(FuguangTaskRuntimeProtocol.MESSAGE.ERROR, command, {
-        error: result.reason || "Task start was rejected.",
-        jobId: job.id,
-        runToken: job.runToken
-      });
+    if (resumeExisting) {
+      let durableSnapshot;
+      try {
+        durableSnapshot = await jobStore.getSnapshot(job.id, job.runToken);
+      } catch (error) {
+        return FuguangTaskRuntimeProtocol.response(FuguangTaskRuntimeProtocol.MESSAGE.ERROR, command, {
+          error: String(error?.message || error || "Task resume snapshot read failed."),
+          reason: "snapshot-read-error",
+          retryable: true,
+          jobId: job.id,
+          runToken: job.runToken
+        });
+      }
+      if (!durableSnapshot?.job || String(durableSnapshot.job.runToken || "") !== String(job.runToken || "")) {
+        return FuguangTaskRuntimeProtocol.response(FuguangTaskRuntimeProtocol.MESSAGE.ERROR, command, {
+          error: "Task resume could not load the durable snapshot.",
+          jobId: job.id,
+          runToken: job.runToken
+        });
+      }
+      snapshot = durableSnapshot;
+      job = durableSnapshot.job;
+    } else {
+      const result = await jobStore.putSnapshot(snapshot);
+      if (result.applied === false && result.reason !== "stale-snapshot") {
+        return FuguangTaskRuntimeProtocol.response(FuguangTaskRuntimeProtocol.MESSAGE.ERROR, command, {
+          error: result.reason || "Task start was rejected.",
+          reason: result.reason || "",
+          jobId: job.id,
+          runToken: job.runToken
+        });
+      }
+      snapshotApplied = result.applied !== false;
     }
     const claim = await jobStore.claimRun(job.id, job.runToken, {
       ownerId,
@@ -92,6 +124,8 @@ export function createTaskRuntimeHost(options = {}) {
       return FuguangTaskRuntimeProtocol.response(FuguangTaskRuntimeProtocol.MESSAGE.ACK, command, {
         accepted: true,
         duplicate: true,
+        snapshotApplied,
+        resumed: resumeExisting,
         jobId: job.id,
         runToken: job.runToken,
         executionOwnerId: claim.executionOwnerId || "",
@@ -102,6 +136,7 @@ export function createTaskRuntimeHost(options = {}) {
     if (claim.applied === false) {
       return FuguangTaskRuntimeProtocol.response(FuguangTaskRuntimeProtocol.MESSAGE.ERROR, command, {
         error: claim.reason || "Task run claim was rejected.",
+        reason: claim.reason || "",
         jobId: job.id,
         runToken: job.runToken
       });
@@ -169,6 +204,8 @@ export function createTaskRuntimeHost(options = {}) {
     return FuguangTaskRuntimeProtocol.response(FuguangTaskRuntimeProtocol.MESSAGE.ACK, command, {
       accepted: true,
       duplicate: false,
+      snapshotApplied,
+      resumed: resumeExisting,
       jobId: job.id,
       runToken: job.runToken,
       executionOwnerId: ownerId,

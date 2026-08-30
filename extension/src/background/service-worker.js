@@ -164,6 +164,7 @@ let offscreenDocumentCreationPromise = null;
 let offscreenTaskRuntimePort = null;
 let offscreenTaskRuntimeConnectionPromise = null;
 let browserJobRecoveryPromise = null;
+let browserVttAttachmentGeneration = Date.now() * 1000;
 
 const tabState = new Map();
 const activeDocumentIdsByTab = new Map();
@@ -332,6 +333,10 @@ chrome.tabs.onRemoved.addListener(tabId => {
 });
 
 async function clearTopLevelNavigationState(tabId, { detachSubtitles = false } = {}) {
+  const state = tabState.get(tabId);
+  if (state) {
+    invalidateManualVttAttachment(state);
+  }
   try {
     if (detachSubtitles) {
       await broadcastMessageToFrames(tabId, { type: MESSAGE.DETACH_PRELOAD_VTT });
@@ -355,11 +360,16 @@ async function clearFrameNavigationState(tabId, frameId) {
   if (!ownsCurrentMedia) {
     return;
   }
-  if (state.attachedVttSignature || state.manualVttSignature) {
-    await chrome.tabs.sendMessage(tabId, { type: MESSAGE.DETACH_PRELOAD_VTT }, { frameId: numericFrameId }).catch(() => null);
+  const hadAttachedVtt = Boolean(state.attachedVttSignature || state.manualVttSignature);
+  invalidateManualVttAttachment(state);
+  if (hadAttachedVtt) {
+    await chrome.tabs.sendMessage(tabId, {
+      type: MESSAGE.DETACH_PRELOAD_VTT,
+      preloadGeneration: nextBrowserVttAttachmentGeneration()
+    }, { frameId: numericFrameId }).catch(() => null);
   }
   state.attachedVttSignature = "";
-  state.manualVttSignature = "";
+  state.attachedVttGeneration = 0;
   if (state.subtitleFrameId === numericFrameId) {
     state.subtitleFrameId = null;
   }
@@ -444,7 +454,11 @@ async function handleMessage(message, sender) {
     case MESSAGE.GET_VIDEO_STATE:
       return getVideoState(message.tabId);
     case MESSAGE.ATTACH_VTT_TEXT:
-      return attachVttText(message.tabId, message.vtt);
+      return attachVttText(message.tabId, message.vtt, {
+        origin: message.origin,
+        jobId: message.jobId,
+        attachmentRevision: message.attachmentRevision
+      });
     case MESSAGE.DETACH_PRELOAD_VTT:
       await detachPreloadVtt(message.tabId);
       return {};
@@ -493,6 +507,7 @@ async function getStatus(tabId) {
     state.preload = "idle";
     state.preloadJob = null;
     state.attachedVttSignature = "";
+    state.attachedVttGeneration = 0;
     preloadJob = null;
   }
   if (!preloadJob) {
@@ -654,7 +669,6 @@ async function startPreload(tabId, candidate) {
   }
   state.preloadStartLockUntil = now + 2500;
   clearPreloadSubtitleSuppression(tabId);
-  state.manualVttSignature = "";
   await detachPreloadVtt(tabId);
   await refreshTabInfo(tabId);
   const modelConfig = await getModelConfig();
@@ -670,7 +684,8 @@ async function startPreload(tabId, candidate) {
     preload: payload.status || "queued",
     preloadJob: payload.job || null,
     error: "",
-    attachedVttSignature: ""
+    attachedVttSignature: "",
+    attachedVttGeneration: 0
   });
   setTabStatus(tabId, { lastPreloadCandidate: preloadCandidate });
   return { preload: payload.status || "queued", job: payload.job, result: payload.result };
@@ -4661,68 +4676,171 @@ function segmentsToVtt(segments) {
 }
 
 async function attachBrowserJobVttIfReady(record, job = record?.job) {
-  const mappedRecord = browserPreloadJobs.get(String(job?.id || record?.job?.id || ""));
-  if (record?.superseded || (mappedRecord && mappedRecord !== record) ||
-      !record.tabId || !job?.translation?.vttText || !(await isSubtitleOverlayEnabled())) {
+  const snapshot = cloneBrowserJobState(job);
+  const jobId = String(snapshot?.id || record?.job?.id || "");
+  if (!record?.tabId || !snapshot?.translation?.vttText ||
+      !browserVttAttachmentSnapshotIsCurrent(record, snapshot)) {
     return;
   }
-  if (!browserPreloadRecordMatchesCurrentPage(record)) {
-    return;
-  }
-  if (hasManualVttAttachment(record.tabId)) {
-    return;
-  }
-  if (isPreloadSubtitleAttachmentSuppressed(record.tabId, record.job.id)) {
-    return;
-  }
-  const attachment = await buildBrowserVttAttachment(job);
-  if (!attachment.vtt) {
-    return;
-  }
-  const signature = browserVttAttachmentSignature(job, attachment);
   const state = getState(record.tabId);
-  if (state.attachedVttSignature === signature && await hasAttachedSubtitleSignature(record.tabId, signature)) {
+  const interventionEpoch = currentAutomaticVttInterventionEpoch(state);
+  const attachmentIsCurrent = attachment => {
+    if (
+      currentAutomaticVttInterventionEpoch(state) !== interventionEpoch ||
+      state.manualVttSignature ||
+      !browserVttAttachmentSnapshotIsCurrent(record, snapshot)
+    ) {
+      return false;
+    }
+    return !attachment || browserVttAttachmentRenderIsCurrent(record, snapshot, attachment);
+  };
+  if (!attachmentIsCurrent() || !(await isSubtitleOverlayEnabled()) || !attachmentIsCurrent()) {
     return;
   }
-  const latestRecord = browserPreloadJobs.get(String(job?.id || record?.job?.id || ""));
-  if (record?.superseded || (latestRecord && latestRecord !== record)) {
+  if (isPreloadSubtitleAttachmentSuppressed(record.tabId, jobId)) {
+    return;
+  }
+  const attachment = await buildBrowserVttAttachment(snapshot);
+  if (!attachment.vtt || !attachmentIsCurrent(attachment)) {
+    return;
+  }
+  const signature = browserVttAttachmentSignature(snapshot, attachment);
+  if (state.attachedVttSignature === signature) {
+    const attached = await hasAttachedSubtitleSignature(record.tabId, signature);
+    if (!attachmentIsCurrent(attachment) || attached) {
+      return;
+    }
+  }
+  if (!attachmentIsCurrent(attachment)) {
     return;
   }
   await ensureSubtitleOverlay(record.tabId);
+  if (!attachmentIsCurrent(attachment)) {
+    return;
+  }
+  const attachmentGeneration = nextBrowserVttAttachmentGeneration();
   const response = await sendMessageToMediaFrame(record.tabId, {
     type: MESSAGE.ATTACH_VTT,
     vtt: attachment.vtt,
     label: "流声字幕",
-    signature
+    signature,
+    origin: "job-automatic",
+    jobId,
+    attachmentRevision: normalizeSubtitleAttachmentRevision(snapshot.updatedAt),
+    preloadGeneration: attachmentGeneration
   });
+  if (!attachmentIsCurrent(attachment)) {
+    await invalidateBrowserPreloadVttAttachment(record.tabId, attachmentGeneration);
+    return;
+  }
+  if (response?.preservedManual) {
+    return;
+  }
   if (response?.ok) {
     state.attachedVttSignature = signature;
-    state.manualVttSignature = "";
+    state.attachedVttGeneration = attachmentGeneration;
   }
 }
 
+function browserVttAttachmentRecordIsCurrent(record, jobId) {
+  if (!record || isBrowserJobCancelled(record) || !browserPreloadRecordMatchesCurrentPage(record)) {
+    return false;
+  }
+  const mappedRecord = browserPreloadJobs.get(String(jobId || ""));
+  if (mappedRecord) {
+    return mappedRecord === record;
+  }
+  return !String(record.runToken || record.job?.runToken || "");
+}
+
+function browserVttAttachmentSnapshotIsCurrent(record, job) {
+  const jobId = String(job?.id || record?.job?.id || "");
+  if (!browserVttAttachmentRecordIsCurrent(record, jobId)) {
+    return false;
+  }
+  const currentJob = browserPreloadJobForRead(record);
+  return Boolean(
+    currentJob &&
+    String(currentJob.id || "") === jobId &&
+    String(currentJob.runToken || "") === String(job?.runToken || "") &&
+    String(currentJob.translation?.vttText || "") === String(job?.translation?.vttText || "")
+  );
+}
+
+function browserVttAttachmentRenderIsCurrent(record, job, attachment) {
+  if (!browserVttAttachmentSnapshotIsCurrent(record, job)) {
+    return false;
+  }
+  const currentJob = browserPreloadJobForRead(record);
+  const currentAttachment = buildBrowserVttAttachmentForMode(
+    currentJob,
+    attachment?.requestedMode || attachment?.mode
+  );
+  return Boolean(
+    currentAttachment.vtt &&
+    browserVttAttachmentSignature(currentJob, currentAttachment) ===
+      browserVttAttachmentSignature(job, attachment)
+  );
+}
+
+function nextBrowserVttAttachmentGeneration() {
+  browserVttAttachmentGeneration = Math.max(
+    browserVttAttachmentGeneration + 1,
+    Date.now() * 1000
+  );
+  return browserVttAttachmentGeneration;
+}
+
+async function invalidateBrowserPreloadVttAttachment(tabId, invalidatedGeneration = 0) {
+  if (!tabId) {
+    return;
+  }
+  const barrierGeneration = Number(invalidatedGeneration || 0) || nextBrowserVttAttachmentGeneration();
+  const state = getState(tabId);
+  if (!state.manualVttSignature && Number(state.attachedVttGeneration || 0) <= barrierGeneration) {
+    state.attachedVttSignature = "";
+    state.attachedVttGeneration = 0;
+    state.subtitleFrameId = null;
+  }
+  await broadcastMessageToFrames(tabId, {
+    type: MESSAGE.DETACH_PRELOAD_VTT,
+    preloadGeneration: barrierGeneration,
+    automaticOnly: true
+  }).catch(() => {});
+}
+
 async function buildBrowserVttAttachment(job) {
-  const mode = await getSubtitleDisplayMode();
+  return buildBrowserVttAttachmentForMode(job, await getSubtitleDisplayMode());
+}
+
+function buildBrowserVttAttachmentForMode(job, mode) {
+  const requestedMode = ["translated", "source", "bilingual"].includes(mode)
+    ? mode
+    : "translated";
   const transcript = job.translation?.transcript;
   const allowSourceFallback = browserJobAllowsOverlaySourceFallback(job);
-  if (mode === "source") {
+  if (requestedMode === "source") {
     const source = transcriptToSourceVtt(transcript);
     if (source) {
-      return { mode, vtt: source };
+      return { requestedMode, mode: requestedMode, vtt: source };
     }
-    return { mode, vtt: "" };
+    return { requestedMode, mode: requestedMode, vtt: "" };
   }
-  if (mode === "bilingual") {
+  if (requestedMode === "bilingual") {
     const bilingual = transcriptToBilingualVtt(transcript, { allowSourcePreview: allowSourceFallback });
     if (bilingual) {
-      return { mode, vtt: bilingual };
+      return { requestedMode, mode: requestedMode, vtt: bilingual };
     }
   }
   const translated = transcriptToTranslatedVtt(transcript, { allowSourcePreview: allowSourceFallback });
   if (translated) {
-    return { mode: "translated", vtt: translated };
+    return { requestedMode, mode: "translated", vtt: translated };
   }
-  return { mode: "translated", vtt: transcript ? "" : (job.translation?.vttText || "") };
+  return {
+    requestedMode,
+    mode: "translated",
+    vtt: transcript ? "" : (job.translation?.vttText || "")
+  };
 }
 
 function browserJobAllowsOverlaySourceFallback(job) {
@@ -4890,7 +5008,11 @@ function scheduleBrowserJobMirror(record) {
     return null;
   }
   const snapshot = createBrowserJobLedgerSnapshot(record);
-  browserJobMirrorPending.set(record.job.id, snapshot);
+  browserJobMirrorPending.set(record.job.id, {
+    snapshot,
+    record,
+    committedJob: cloneBrowserJobState(record.job)
+  });
   return startBrowserJobMirrorFlush(record.job.id);
 }
 
@@ -4912,9 +5034,12 @@ function startBrowserJobMirrorFlush(jobId) {
     .then(async () => {
       let result = null;
       while (browserJobMirrorPending.has(jobId)) {
-        const snapshot = browserJobMirrorPending.get(jobId);
+        const pending = browserJobMirrorPending.get(jobId);
         browserJobMirrorPending.delete(jobId);
-        result = await browserJobStore.putSnapshot(snapshot);
+        result = await browserJobStore.putSnapshot(pending.snapshot);
+        if (result?.applied !== false && isCurrentBrowserPreloadRecord(pending.record)) {
+          pending.record.lastCommittedJob = cloneBrowserJobState(pending.committedJob);
+        }
       }
       return result;
     })
@@ -5159,6 +5284,7 @@ function recoverBrowserJobRecord(ledger, chunks = [], modelConfig = null, option
     browserAsrChunkToTranslationGroup,
     pipeline: ledger.pipeline || "browser",
     offscreenExecution: offscreenExecutionActive,
+    lastCommittedJob: cloneBrowserJobState(job),
     recoveryBlocked: Boolean(recoveryError),
     recoveryError,
     recovered: true
@@ -5328,16 +5454,24 @@ async function restoreRecoveredBrowserJobToTab(record) {
   });
 }
 
-async function startBrowserJobInOffscreen(record) {
+async function startBrowserJobInOffscreen(record, options = {}) {
   if (!record?.job?.id || !record.runToken || typeof chrome.runtime?.connect !== "function") {
     return { status: "unavailable", reason: "runtime-unavailable" };
   }
+  const resumeExisting = Boolean(options.resumeExisting);
   record.offscreenExecution = true;
-  scheduleBrowserJobMirror(record);
-  await flushBrowserJobMirror(record.job.id).catch(() => null);
+  if (!resumeExisting) {
+    scheduleBrowserJobMirror(record);
+    await flushBrowserJobMirror(record.job.id).catch(() => null);
+  }
+  const startSnapshot = resumeExisting
+    ? { job: { id: record.job.id, runToken: record.runToken }, chunks: [] }
+    : createBrowserJobLedgerSnapshot(record);
+  const startJob = resumeExisting ? null : cloneBrowserJobState(record.job);
   try {
     const response = await sendOffscreenTaskRuntimeCommand(FuguangTaskRuntimeProtocol.MESSAGE.START_JOB, {
-      snapshot: createBrowserJobLedgerSnapshot(record),
+      snapshot: startSnapshot,
+      resumeExisting,
       runtime: {
         pipeline: record.pipeline || record.job.pipeline || "browser",
         asrWorkers: record.pipeline === "funasr"
@@ -5346,6 +5480,9 @@ async function startBrowserJobInOffscreen(record) {
       }
     });
     if (response?.accepted) {
+      if (!resumeExisting && response.snapshotApplied) {
+        record.lastCommittedJob = startJob;
+      }
       const result = {
         status: "started",
         duplicate: Boolean(response.duplicate),
@@ -5357,6 +5494,9 @@ async function startBrowserJobInOffscreen(record) {
       return result;
     }
     record.offscreenExecution = false;
+    if (response?.retryable) {
+      return { status: "unknown", reason: String(response?.reason || "start-retryable") };
+    }
     return { status: "unavailable", reason: String(response?.reason || "start-rejected") };
   } catch (error) {
     if (error?.deliveryUnknown) {
@@ -5364,7 +5504,13 @@ async function startBrowserJobInOffscreen(record) {
       return { status: "unknown", reason: "ack-timeout" };
     }
     record.offscreenExecution = false;
-    return { status: "unavailable", reason: String(error?.message || error || "runtime-unavailable") };
+    if (error?.retryable) {
+      return { status: "unknown", reason: String(error.reason || "start-retryable") };
+    }
+    return {
+      status: "unavailable",
+      reason: String(error?.reason || error?.message || error || "runtime-unavailable")
+    };
   }
 }
 
@@ -5446,9 +5592,69 @@ async function claimBrowserJobForLocalExecution(record) {
   return claim;
 }
 
-function scheduleBrowserJobLeaseRecovery(record, leaseExpiresAt = 0) {
+function adoptDurableTerminalBrowserJob(record, durable) {
+  const jobId = String(durable?.id || record?.job?.id || "");
+  if (!jobId || browserPreloadJobs.get(jobId) !== record) {
+    return browserPreloadJobs.get(jobId) || null;
+  }
+  browserJobMirrorPending.delete(jobId);
+  stopLocalBrowserExecutionHeartbeat(record);
+  delete record.localExecutionUnleased;
+  record.abortController?.abort?.(new Error("任务已收敛到持久化终态。"));
+  cancelBrowserRecordQueues(record);
+
+  const durableStatus = String(durable.status || record.job?.status || "failed");
+  const nextJob = {
+    ...(record.job || {}),
+    id: jobId,
+    runToken: String(durable.runToken || record.runToken || record.job?.runToken || ""),
+    pipeline: String(durable.pipeline || record.pipeline || record.job?.pipeline || "browser"),
+    status: durableStatus,
+    stage: String(durable.stage || durableStatus),
+    cancelRequested: Boolean(durable.cancelRequested),
+    createdAt: Number(durable.createdAt || record.job?.createdAt || Date.now()),
+    updatedAt: Number(durable.updatedAt || record.job?.updatedAt || Date.now()),
+    error: String(durable.error || ""),
+    extract: {
+      ...(record.job?.extract || {}),
+      ...(durable.extract || {})
+    },
+    translation: {
+      ...(record.job?.translation || {}),
+      ...(durable.translation || {})
+    }
+  };
+  record.job = cloneBrowserJobState(nextJob);
+  record.lastCommittedJob = cloneBrowserJobState(nextJob);
+  record.staleOffscreenOperationDetected = true;
+  record.offscreenExecution = false;
+
+  const replacement = {
+    ...record,
+    job: cloneBrowserJobState(nextJob),
+    lastCommittedJob: cloneBrowserJobState(nextJob),
+    abortController: new AbortController(),
+    cancelRequested: Boolean(durable.cancelRequested),
+    cancelled: durableStatus === "cancelled" || Boolean(durable.cancelRequested),
+    offscreenExecution: false,
+    recovered: true
+  };
+  delete replacement.staleOffscreenOperationDetected;
+  delete replacement.localExecutionLease;
+  delete replacement.localExecutionUnleased;
+  delete replacement.browserPipelinePromise;
+  delete replacement.browserFunAsrPipelinePromise;
+  if (replacement.cancelled) {
+    replacement.abortController.abort(new Error("任务已停止。"));
+  }
+  browserPreloadJobs.set(jobId, replacement);
+  publishBrowserPreloadJobUi(replacement, replacement.job);
+  return replacement;
+}
+
+function scheduleBrowserJobLeaseRecovery(record, leaseExpiresAt = 0, effectiveStatus = record?.job?.status) {
   const jobId = String(record?.job?.id || "");
-  if (!jobId || FuguangJobContract.isTerminalStatus(record?.job?.status) || record?.cancelRequested) {
+  if (!jobId || FuguangJobContract.isTerminalStatus(effectiveStatus) || record?.cancelRequested) {
     return;
   }
   const requestedExpiry = Number(leaseExpiresAt || 0) || 0;
@@ -5464,25 +5670,54 @@ function scheduleBrowserJobLeaseRecovery(record, leaseExpiresAt = 0) {
 async function recoverExpiredBrowserJobLease(jobId) {
   await browserJobRecoveryPromise;
   const record = browserPreloadJobs.get(String(jobId || ""));
-  if (!record || record.cancelRequested || FuguangJobContract.isTerminalStatus(record.job?.status)) {
+  if (!record || record.cancelRequested) {
+    return { recovered: false, reason: "inactive" };
+  }
+  if (!record.staleOffscreenOperationDetected && FuguangJobContract.isTerminalStatus(record.job?.status)) {
     return { recovered: false, reason: "inactive" };
   }
   if (record.recoveryBlocked) {
     return { recovered: false, reason: "configuration-unavailable" };
   }
-  const durable = await browserJobStore.getJob(record.job.id).catch(() => null);
-  if (!durable || String(durable.runToken || "") !== String(record.runToken || "")) {
+  let durable;
+  try {
+    durable = await browserJobStore.getJob(record.job.id);
+  } catch {
+    const effectiveStatus = record.lastCommittedJob?.status ||
+      (record.staleOffscreenOperationDetected ? "running" : record.job?.status);
+    scheduleBrowserJobLeaseRecovery(
+      record,
+      Date.now() + BROWSER_JOB_EXECUTION_LEASE_MS,
+      effectiveStatus
+    );
+    return { recovered: false, reason: "durable-read-error" };
+  }
+  if (!durable) {
+    return { recovered: false, reason: "missing-job" };
+  }
+  if (String(durable.runToken || "") !== String(record.runToken || "")) {
     return { recovered: false, reason: "stale-run" };
+  }
+  if (FuguangJobContract.isTerminalStatus(durable.status)) {
+    adoptDurableTerminalBrowserJob(record, durable);
+    return { recovered: false, reason: "inactive" };
   }
   const now = Date.now();
   const leaseExpiresAt = Number(durable.executionLeaseExpiresAt || 0) || 0;
   if (leaseExpiresAt > now) {
-    scheduleBrowserJobLeaseRecovery(record, leaseExpiresAt);
+    scheduleBrowserJobLeaseRecovery(record, leaseExpiresAt, durable.status);
     return { recovered: false, reason: "lease-active" };
   }
   if (String(durable.extract?.status || "") !== "completed") {
-    await interruptRecoveredBrowserJob(record, durable, "offscreen 执行器在音频抽取完成前中断。请重新抽取。");
-    return { recovered: false, reason: "extraction-interrupted" };
+    const interruption = await interruptRecoveredBrowserJob(
+      record,
+      durable,
+      "offscreen 执行器在音频抽取完成前中断。请重新抽取。"
+    );
+    return {
+      recovered: false,
+      reason: interruption.interrupted ? "extraction-interrupted" : interruption.reason
+    };
   }
   const localExecutionMayStillBeSettling = Boolean(
     record.localExecutionLease ||
@@ -5493,42 +5728,99 @@ async function recoverExpiredBrowserJobLease(jobId) {
   if (localExecutionMayStillBeSettling) {
     record.abortController?.abort?.(new Error("本地执行租约已失效，已停止自动接管。"));
     cancelBrowserRecordQueues(record);
-    await interruptRecoveredBrowserJob(
+    const interruption = await interruptRecoveredBrowserJob(
       record,
       durable,
       "本地执行租约已失效。为避免与 offscreen 重叠处理，已中断任务；请明确重试。"
     );
-    return { recovered: false, reason: "local-execution-interrupted" };
+    return {
+      recovered: false,
+      reason: interruption.interrupted ? "local-execution-interrupted" : interruption.reason
+    };
   }
-  const start = await startBrowserJobInOffscreen(record);
+  const start = await startBrowserJobInOffscreen(record, { resumeExisting: true });
   if (start.status === "started") {
+    scheduleBrowserJobLeaseRecovery(
+      record,
+      Number(start.executionLeaseExpiresAt || 0) || (now + BROWSER_JOB_EXECUTION_LEASE_MS),
+      durable.status
+    );
     return { recovered: true, duplicate: Boolean(start.duplicate) };
   }
   if (start.status === "unknown") {
-    scheduleBrowserJobLeaseRecovery(record, now + BROWSER_JOB_EXECUTION_LEASE_MS);
+    scheduleBrowserJobLeaseRecovery(record, now + BROWSER_JOB_EXECUTION_LEASE_MS, durable.status);
     return { recovered: false, reason: "start-unknown" };
   }
-  await interruptRecoveredBrowserJob(record, durable, "offscreen 执行器无法恢复。已保留完成分段，请明确重试。");
-  return { recovered: false, reason: "runtime-unavailable" };
+  const interruption = await interruptRecoveredBrowserJob(
+    record,
+    durable,
+    "offscreen 执行器无法恢复。已保留完成分段，请明确重试。"
+  );
+  return {
+    recovered: false,
+    reason: interruption.interrupted ? "runtime-unavailable" : interruption.reason
+  };
 }
 
 async function interruptRecoveredBrowserJob(record, durable, message) {
+  let latest;
+  try {
+    latest = await browserJobStore.getJob(record.job.id);
+  } catch {
+    scheduleBrowserJobLeaseRecovery(
+      record,
+      Date.now() + BROWSER_JOB_EXECUTION_LEASE_MS,
+      durable?.status
+    );
+    return { interrupted: false, reason: "durable-read-error" };
+  }
+  if (!latest) {
+    return { interrupted: false, reason: "missing-job" };
+  }
+  if (String(latest.runToken || "") !== String(record.runToken || "")) {
+    return { interrupted: false, reason: "stale-run" };
+  }
+  if (FuguangJobContract.isTerminalStatus(latest.status)) {
+    adoptDurableTerminalBrowserJob(record, latest);
+    return { interrupted: false, reason: "inactive" };
+  }
+  const leaseExpiresAt = Number(latest.executionLeaseExpiresAt || 0) || 0;
+  const leaseChanged =
+    String(latest.executionOwnerId || "") !== String(durable?.executionOwnerId || "") ||
+    Number(latest.executionEpoch || 0) !== Number(durable?.executionEpoch || 0);
+  if (leaseExpiresAt > Date.now() || leaseChanged) {
+    scheduleBrowserJobLeaseRecovery(record, leaseExpiresAt, latest.status);
+    return {
+      interrupted: false,
+      reason: leaseExpiresAt > Date.now() ? "lease-active" : "lease-changed"
+    };
+  }
+
   record.offscreenExecution = false;
   record.job.status = "interrupted";
   record.job.stage = "interrupted";
   record.job.error = message;
   record.job.updatedAt = Date.now();
   publishBrowserPreloadJob(record);
-  await flushBrowserJobMirror(record.job.id).catch(() => null);
-  if (durable?.executionOwnerId) {
+  const mirrored = await flushBrowserJobMirror(record.job.id).catch(() => null);
+  if (
+    mirrored &&
+    String(mirrored.runToken || "") === String(record.runToken || "") &&
+    FuguangJobContract.isTerminalStatus(mirrored.status)
+  ) {
+    adoptDurableTerminalBrowserJob(record, mirrored);
+    return { interrupted: false, reason: "inactive" };
+  }
+  if (latest.executionOwnerId) {
     await browserJobStore.releaseRun(
       record.job.id,
       record.runToken,
-      durable.executionOwnerId,
+      latest.executionOwnerId,
       Date.now(),
-      Number(durable.executionEpoch || 0) || 0
+      Number(latest.executionEpoch || 0) || 0
     ).catch(() => null);
   }
+  return { interrupted: true, reason: "interrupted" };
 }
 
 function stopLocalBrowserExecutionHeartbeat(record) {
@@ -5765,9 +6057,6 @@ function abortOffscreenBrowserChunkOperations(jobId, runToken, executionOwnerId,
 
 function createOffscreenBrowserOperation(record, fence, details = {}) {
   const controller = new AbortController();
-  if (!record.offscreenMirrorSuppressionCount) {
-    record.lastCommittedJob = cloneBrowserJobState(record.job);
-  }
   const operation = {
     jobId: String(record?.job?.id || ""),
     runToken: String(record?.runToken || ""),
@@ -6206,7 +6495,12 @@ function settleOffscreenTaskRuntimeCommand(message = {}) {
   clearTimeout(pending.timer);
   offscreenTaskRuntimeCommands.delete(commandId);
   if (message.type === FuguangTaskRuntimeProtocol.MESSAGE.ERROR) {
-    pending.reject(new Error(message.error || "Offscreen task runtime command failed."));
+    const error = new Error(message.error || "Offscreen task runtime command failed.");
+    error.retryable = Boolean(message.retryable);
+    error.reason = String(message.reason || "");
+    error.jobId = String(message.jobId || "");
+    error.runToken = String(message.runToken || "");
+    pending.reject(error);
   } else {
     pending.resolve(message);
   }
@@ -6284,6 +6578,7 @@ function supersedeBrowserPreloadRecord(record, message = "任务运行实例已�
     jobId: record.job?.id || "",
     runToken: record.runToken || ""
   })?.catch?.(() => {});
+  invalidateBrowserPreloadVttAttachment(record.tabId).catch(() => {});
 }
 
 function cloneBrowserJobState(job) {
@@ -7587,10 +7882,14 @@ async function detachPreloadVtt(tabId) {
     return;
   }
   const state = getState(tabId);
+  invalidateManualVttAttachment(state);
   state.attachedVttSignature = "";
-  state.manualVttSignature = "";
+  state.attachedVttGeneration = 0;
   state.subtitleFrameId = null;
-  await broadcastMessageToFrames(tabId, { type: MESSAGE.DETACH_PRELOAD_VTT }).catch(() => {});
+  await broadcastMessageToFrames(tabId, {
+    type: MESSAGE.DETACH_PRELOAD_VTT,
+    preloadGeneration: nextBrowserVttAttachmentGeneration()
+  }).catch(() => {});
 }
 
 async function clearPreloadSubtitleState(tabId, jobId) {
@@ -7650,6 +7949,7 @@ function suppressPreloadSubtitleAttachment(tabId, jobId) {
   }
   state.suppressedSubtitleJobIds.add(String(jobId));
   state.attachedVttSignature = "";
+  state.attachedVttGeneration = 0;
 }
 
 function clearPreloadSubtitleSuppression(tabId, jobId = "") {
@@ -7688,11 +7988,16 @@ async function checkPreloadJob(jobId, tabId) {
   if (!jobId) {
     throw new Error("没有可查询的预加载任务。");
   }
-  const browserRecord = browserPreloadJobs.get(jobId);
+  let browserRecord = browserPreloadJobs.get(jobId);
   if (browserRecord) {
-    const visibleJob = browserPreloadJobForRead(browserRecord);
+    let visibleJob = browserPreloadJobForRead(browserRecord);
     if (tabId) {
       await refreshTabInfo(tabId);
+      browserRecord = browserPreloadJobs.get(jobId);
+      if (!browserRecord) {
+        return { job: null, missing: true };
+      }
+      visibleJob = browserPreloadJobForRead(browserRecord);
       if (!browserPreloadRecordMatchesPageUrl(browserRecord, getState(tabId).page?.url || getState(tabId).context?.href || "")) {
         return { job: null, missing: true, pageMismatch: true };
       }
@@ -7708,6 +8013,7 @@ async function checkPreloadJob(jobId, tabId) {
       preload: "idle",
       preloadJob: null,
       attachedVttSignature: "",
+      attachedVttGeneration: 0,
       error: "这个浏览器内任务状态已失效。请重新提交任务。"
     });
   }
@@ -7725,42 +8031,358 @@ async function getPreloadVtt(jobId) {
   throw new Error("这个任务的字幕不在当前浏览器内任务中。请使用本地字幕缓存或重新生成。");
 }
 
-async function attachVttText(tabId, vtt) {
+function normalizeVttTextAttachmentOrigin(value) {
+  if (["job-projection", "user-presentation", "user-override"].includes(value)) {
+    return value;
+  }
+  return "user-override";
+}
+
+function normalizeSubtitleAttachmentRevision(value) {
+  const revision = Number(value);
+  return Number.isFinite(revision) && revision > 0 ? Math.floor(revision) : 0;
+}
+
+async function attachVttText(tabId, vtt, options = {}) {
   if (!tabId || !vtt) {
     throw new Error("没有可挂载的字幕。");
   }
   const state = getState(tabId);
-  const signature = `manual:${vttContentSignature(vtt)}`;
+  const signature = "manual:" + vttContentSignature(vtt);
+  const origin = normalizeVttTextAttachmentOrigin(options.origin);
+  const isUserOverride = origin === "user-override";
+  const isUserIntervention = isUserOverride || origin === "user-presentation";
+  const jobId = String(options.jobId || "");
+  const attachmentRevision = normalizeSubtitleAttachmentRevision(options.attachmentRevision);
+  const pendingAttachment = currentVttTextAttachmentPending(state);
   if (
-    state.attachedVttSignature === signature
-    && state.manualVttSignature === signature
-    && await hasAttachedSubtitleSignature(tabId, signature)
+    pendingAttachment &&
+    !vttTextAttachmentCanPreemptPending(
+      { origin, jobId, attachmentRevision },
+      pendingAttachment
+    )
   ) {
+    const deferred = deferVttTextProjection(
+      state,
+      { origin, jobId, attachmentRevision },
+      pendingAttachment
+    );
+    return deferred
+      ? { attached: false, stale: true, deferred: true }
+      : { attached: false, stale: true };
+  }
+  const attachmentGeneration = nextBrowserVttAttachmentGeneration();
+  const attachmentEpoch = nextManualVttAttachmentEpoch(state);
+  setVttTextAttachmentPending(state, attachmentEpoch, origin, jobId, attachmentRevision);
+  if (isUserOverride) {
+    clearDeferredVttProjection(state);
+  }
+  if (isUserIntervention) {
+    nextAutomaticVttInterventionEpoch(state);
+  }
+  state.vttTextAttachmentSignature = signature;
+  if (isUserOverride) {
+    state.manualVttSignature = signature;
+  }
+  try {
+    if (state.attachedVttSignature === signature) {
+      const attached = await hasAttachedSubtitleSignature(tabId, signature, {
+        origin,
+        jobId,
+        attachmentRevision
+      });
+      if (!manualVttAttachmentIsCurrent(state, attachmentEpoch, signature)) {
+        return { attached: false, stale: true };
+      }
+      if (attached) {
+        return { attached: true };
+      }
+    }
+    if (!manualVttAttachmentIsCurrent(state, attachmentEpoch, signature)) {
+      return { attached: false, stale: true };
+    }
+    if (isUserOverride) {
+      const detachResponses = await broadcastMessageToFrames(tabId, {
+        type: MESSAGE.DETACH_PRELOAD_VTT,
+        preloadGeneration: attachmentGeneration,
+        automaticOnly: false,
+        origin,
+        jobId,
+        attachmentRevision
+      }).catch(() => []);
+      if (!manualVttAttachmentIsCurrent(state, attachmentEpoch, signature)) {
+        return { attached: false, stale: true };
+      }
+      if (Array.isArray(detachResponses) && detachResponses.some(response => response?.preservedManual)) {
+        state.vttTextAttachmentSignature = state.manualVttSignature || "";
+        return { attached: false, preservedManual: true };
+      }
+      if (Array.isArray(detachResponses) && detachResponses.some(response => response?.staleRevision)) {
+        invalidateCurrentVttTextAttachment(state, attachmentEpoch, signature, {
+          clearManual: true
+        });
+        return { attached: false, stale: true };
+      }
+      state.attachedVttSignature = "";
+      state.attachedVttGeneration = 0;
+      state.subtitleFrameId = null;
+    }
+    await ensureSubtitleOverlay(tabId);
+    if (!manualVttAttachmentIsCurrent(state, attachmentEpoch, signature)) {
+      return { attached: false, stale: true };
+    }
+    const response = await sendMessageToMediaFrame(tabId, {
+      type: MESSAGE.ATTACH_VTT,
+      vtt,
+      label: "流声字幕",
+      signature,
+      origin,
+      jobId,
+      attachmentRevision,
+      preloadGeneration: attachmentGeneration
+    });
+    if (!manualVttAttachmentIsCurrent(state, attachmentEpoch, signature)) {
+      return { attached: false, stale: true };
+    }
+    if (response?.preservedManual) {
+      state.vttTextAttachmentSignature = state.manualVttSignature || "";
+      return { attached: false, preservedManual: true };
+    }
+    if (response?.stale) {
+      invalidateCurrentVttTextAttachment(state, attachmentEpoch, signature, {
+        clearManual: isUserOverride
+      });
+      return { attached: false, stale: true };
+    }
+    if (!response?.ok) {
+      invalidateCurrentVttTextAttachment(state, attachmentEpoch, signature, {
+        clearManual: isUserOverride
+      });
+      throw new Error("当前页面没有可挂载字幕的播放器。");
+    }
+    state.attachedVttSignature = signature;
+    state.attachedVttGeneration = attachmentGeneration;
+    state.manualVttSignature = isUserOverride ? signature : "";
+    state.vttTextAttachmentSignature = signature;
     return { attached: true };
+  } catch (error) {
+    if (manualVttAttachmentIsCurrent(state, attachmentEpoch, signature)) {
+      invalidateCurrentVttTextAttachment(state, attachmentEpoch, signature, {
+        clearManual: isUserOverride
+      });
+    }
+    throw error;
+  } finally {
+    clearVttTextAttachmentPending(state, attachmentEpoch);
+    if (
+      origin === "user-presentation" &&
+      !currentVttTextAttachmentPending(state)
+    ) {
+      await replayDeferredVttProjection(tabId, state, jobId);
+    }
   }
-  await broadcastMessageToFrames(tabId, { type: MESSAGE.DETACH_PRELOAD_VTT }).catch(() => {});
-  state.attachedVttSignature = "";
-  state.manualVttSignature = "";
-  state.subtitleFrameId = null;
-  await ensureSubtitleOverlay(tabId);
-  const response = await sendMessageToMediaFrame(tabId, {
-    type: MESSAGE.ATTACH_VTT,
-    vtt,
-    label: "流声字幕",
-    signature
-  });
-  if (!response?.ok) {
-    throw new Error("当前页面没有可挂载字幕的播放器。");
-  }
-  state.attachedVttSignature = signature;
-  state.manualVttSignature = signature;
-  return { attached: true };
 }
 
-function hasManualVttAttachment(tabId) {
-  const state = getState(tabId);
-  return Boolean(state.manualVttSignature);
+function currentManualVttAttachmentEpoch(state) {
+  const epoch = Number(state?.manualVttAttachmentEpoch || 0);
+  return Number.isSafeInteger(epoch) && epoch >= 0 ? epoch : 0;
 }
+
+function nextManualVttAttachmentEpoch(state) {
+  const epoch = Math.max(
+    currentManualVttAttachmentEpoch(state) + 1,
+    Date.now() * 1000
+  );
+  state.manualVttAttachmentEpoch = epoch;
+  return epoch;
+}
+
+function vttTextAttachmentOriginPriority(origin) {
+  if (origin === "user-override") {
+    return 3;
+  }
+  if (origin === "user-presentation") {
+    return 2;
+  }
+  return origin === "job-projection" ? 1 : 0;
+}
+
+function currentVttTextAttachmentPending(state) {
+  const epoch = Number(state?.vttTextAttachmentPendingEpoch || 0);
+  if (
+    !Number.isSafeInteger(epoch) ||
+    epoch <= 0 ||
+    epoch !== currentManualVttAttachmentEpoch(state)
+  ) {
+    return null;
+  }
+  const origin = String(state?.vttTextAttachmentPendingOrigin || "");
+  if (!vttTextAttachmentOriginPriority(origin)) {
+    return null;
+  }
+  return {
+    origin,
+    jobId: String(state?.vttTextAttachmentPendingJobId || ""),
+    attachmentRevision: normalizeSubtitleAttachmentRevision(
+      state?.vttTextAttachmentPendingRevision
+    )
+  };
+}
+
+function vttTextAttachmentCanPreemptPending(request, pending) {
+  return (
+    vttTextAttachmentOriginPriority(request?.origin) >=
+    vttTextAttachmentOriginPriority(pending?.origin)
+  );
+}
+
+function deferVttTextProjection(state, request, pending) {
+  const jobId = String(request?.jobId || "");
+  const attachmentRevision = normalizeSubtitleAttachmentRevision(
+    request?.attachmentRevision
+  );
+  if (
+    request?.origin !== "job-projection" ||
+    pending?.origin !== "user-presentation" ||
+    !jobId ||
+    jobId !== pending.jobId ||
+    !attachmentRevision ||
+    attachmentRevision <
+      normalizeSubtitleAttachmentRevision(pending.attachmentRevision)
+  ) {
+    return false;
+  }
+  const currentJobId = String(state?.vttTextDeferredProjectionJobId || "");
+  const currentRevision = normalizeSubtitleAttachmentRevision(
+    state?.vttTextDeferredProjectionRevision
+  );
+  if (currentJobId === jobId && currentRevision >= attachmentRevision) {
+    return true;
+  }
+  state.vttTextDeferredProjectionJobId = jobId;
+  state.vttTextDeferredProjectionRevision = attachmentRevision;
+  return true;
+}
+
+function clearDeferredVttProjection(state) {
+  if (!state) {
+    return;
+  }
+  state.vttTextDeferredProjectionJobId = "";
+  state.vttTextDeferredProjectionRevision = 0;
+}
+
+function takeDeferredVttProjection(state) {
+  const jobId = String(state?.vttTextDeferredProjectionJobId || "");
+  const attachmentRevision = normalizeSubtitleAttachmentRevision(
+    state?.vttTextDeferredProjectionRevision
+  );
+  clearDeferredVttProjection(state);
+  return jobId && attachmentRevision
+    ? { jobId, attachmentRevision }
+    : null;
+}
+
+async function replayDeferredVttProjection(tabId, state, presentationJobId = "") {
+  const deferred = takeDeferredVttProjection(state);
+  if (
+    !deferred ||
+    deferred.jobId !== String(presentationJobId || "")
+  ) {
+    return false;
+  }
+  const record = browserPreloadJobs.get(deferred.jobId);
+  const currentJob = browserPreloadJobForRead(record);
+  if (
+    !record ||
+    Number(record.tabId || 0) !== Number(tabId || 0) ||
+    String(currentJob?.id || "") !== deferred.jobId ||
+    normalizeSubtitleAttachmentRevision(currentJob?.updatedAt) <
+      deferred.attachmentRevision
+  ) {
+    return false;
+  }
+  await attachBrowserJobVttIfReady(record, currentJob);
+  return true;
+}
+
+function setVttTextAttachmentPending(
+  state,
+  epoch,
+  origin,
+  jobId = "",
+  attachmentRevision = 0
+) {
+  state.vttTextAttachmentPendingEpoch = Number(epoch || 0);
+  state.vttTextAttachmentPendingOrigin = origin;
+  state.vttTextAttachmentPendingJobId = String(jobId || "");
+  state.vttTextAttachmentPendingRevision = normalizeSubtitleAttachmentRevision(
+    attachmentRevision
+  );
+}
+
+function clearVttTextAttachmentPending(state, epoch = 0) {
+  if (
+    !state ||
+    (epoch && Number(state.vttTextAttachmentPendingEpoch || 0) !== Number(epoch))
+  ) {
+    return false;
+  }
+  state.vttTextAttachmentPendingEpoch = 0;
+  state.vttTextAttachmentPendingOrigin = "";
+  state.vttTextAttachmentPendingJobId = "";
+  state.vttTextAttachmentPendingRevision = 0;
+  return true;
+}
+
+function currentAutomaticVttInterventionEpoch(state) {
+  const epoch = Number(state?.automaticVttInterventionEpoch || 0);
+  return Number.isSafeInteger(epoch) && epoch >= 0 ? epoch : 0;
+}
+
+function nextAutomaticVttInterventionEpoch(state) {
+  const epoch = Math.max(
+    currentAutomaticVttInterventionEpoch(state) + 1,
+    Date.now() * 1000
+  );
+  state.automaticVttInterventionEpoch = epoch;
+  return epoch;
+}
+
+function invalidateManualVttAttachment(state) {
+  if (!state) {
+    return 0;
+  }
+  const epoch = nextManualVttAttachmentEpoch(state);
+  nextAutomaticVttInterventionEpoch(state);
+  clearVttTextAttachmentPending(state);
+  clearDeferredVttProjection(state);
+  state.manualVttSignature = "";
+  state.vttTextAttachmentSignature = "";
+  return epoch;
+}
+
+function invalidateCurrentVttTextAttachment(state, epoch, signature, options = {}) {
+  if (!manualVttAttachmentIsCurrent(state, epoch, signature)) {
+    return false;
+  }
+  clearVttTextAttachmentPending(state, epoch);
+  nextManualVttAttachmentEpoch(state);
+  state.vttTextAttachmentSignature = "";
+  if (options.clearManual && state.manualVttSignature === signature) {
+    state.manualVttSignature = "";
+  }
+  return true;
+}
+
+function manualVttAttachmentIsCurrent(state, epoch, signature) {
+  return Boolean(
+    state &&
+    currentManualVttAttachmentEpoch(state) === Number(epoch || 0) &&
+    state.vttTextAttachmentSignature === signature
+  );
+}
+
 
 function vttContentSignature(vtt) {
   const text = String(vtt || "");
@@ -8095,14 +8717,28 @@ async function getVideoState(tabId) {
   return { state: null };
 }
 
-async function hasAttachedSubtitleSignature(tabId, signature) {
+async function hasAttachedSubtitleSignature(tabId, signature, metadata = {}) {
   if (!tabId || !signature) {
     return false;
   }
   const response = await sendMessageToMediaFrame(tabId, {
     type: MESSAGE.GET_VIDEO_STATE
   });
-  return response?.state?.subtitleSignature === signature;
+  const subtitleState = response?.state;
+  if (subtitleState?.subtitleSignature !== signature) {
+    return false;
+  }
+  if (metadata.origin && subtitleState.subtitleOrigin !== metadata.origin) {
+    return false;
+  }
+  if (metadata.jobId && subtitleState.subtitleJobId !== metadata.jobId) {
+    return false;
+  }
+  const attachmentRevision = normalizeSubtitleAttachmentRevision(metadata.attachmentRevision);
+  if (attachmentRevision && Number(subtitleState.subtitleRevision || 0) !== attachmentRevision) {
+    return false;
+  }
+  return true;
 }
 
 async function seekMedia(tabId, time) {
@@ -8163,7 +8799,9 @@ async function getCandidateMediaFrameIds(tabId) {
 
 async function broadcastMessageToFrames(tabId, message) {
   const frameIds = await getCandidateMediaFrameIds(tabId);
-  await Promise.all(frameIds.map(frameId => chrome.tabs.sendMessage(tabId, message, { frameId }).catch(() => null)));
+  return Promise.all(
+    frameIds.map(frameId => chrome.tabs.sendMessage(tabId, message, { frameId }).catch(() => null))
+  );
 }
 
 async function ensureSubtitleOverlay(tabId) {
@@ -8726,7 +9364,17 @@ function getState(tabId) {
       page: {},
       context: {},
       attachedVttSignature: "",
+      attachedVttGeneration: 0,
       manualVttSignature: "",
+      manualVttAttachmentEpoch: 0,
+      automaticVttInterventionEpoch: 0,
+      vttTextAttachmentPendingEpoch: 0,
+      vttTextAttachmentPendingOrigin: "",
+      vttTextAttachmentPendingJobId: "",
+      vttTextAttachmentPendingRevision: 0,
+      vttTextDeferredProjectionJobId: "",
+      vttTextDeferredProjectionRevision: 0,
+      vttTextAttachmentSignature: "",
       subtitleFrameId: null,
       lastPreloadCandidate: null,
       documentIdsByFrame: activeDocumentIdsByTab.get(tabId) || new Map()

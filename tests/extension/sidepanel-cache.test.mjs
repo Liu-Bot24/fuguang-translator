@@ -4705,6 +4705,65 @@ assert.equal(subtitleEditAutosaveState.taskMessageTextAfterDelete, "");
 assert.equal(subtitleEditAutosaveState.cacheWrites >= 3, true);
 assert.equal(subtitleEditAutosaveState.attachWrites >= 3, true);
 
+const rapidSubtitleDeletesUseCueIdentityState = await vm.runInContext(`
+  (async () => {
+    function findAllByClassName(root, className) {
+      if (!root) {
+        return [];
+      }
+      const own = String(root.className || "").split(/\\s+/).includes(className) ? [root] : [];
+      return own.concat((root.children || []).flatMap(child => findAllByClassName(child, className)));
+    }
+    const originalPersistSubtitleEdits = persistSubtitleEdits;
+    const persistResolvers = [];
+    persistSubtitleEdits = async () => new Promise(resolve => persistResolvers.push(resolve));
+    try {
+      activeTab = { id: 1, url: "https://example.test/rapid-delete" };
+      currentJobId = "job-rapid-delete";
+      currentJob = null;
+      renderedSubtitleJobId = currentJobId;
+      subtitleDisplayMode = "translated";
+      subtitleCueSource = "transcript";
+      subtitleEditMode = true;
+      subtitleEditingTextIndex = -1;
+      subtitleEditingTimeIndex = -1;
+      activeCueIndex = -1;
+      subtitleCues = ["A", "B", "C", "D"].map((text, index) => ({
+        start: index * 2,
+        end: index * 2 + 1,
+        time: formatCueTime(index * 2, index * 2 + 1),
+        text
+      }));
+      currentTranscript = {
+        source: subtitleCues.map(cue => ({ start: cue.start, end: cue.end, text: cue.text })),
+        translated: subtitleCues.map(cue => ({ start: cue.start, end: cue.end, text: cue.text })),
+        chunkStatuses: []
+      };
+      renderSubtitleCueList();
+      const staleDeleteB = findAllByClassName(elements.subtitleList.children[1], "cue-delete")[0];
+      const staleDeleteC = findAllByClassName(elements.subtitleList.children[2], "cue-delete")[0];
+      const firstDelete = staleDeleteB.listeners.get("click")({ preventDefault() {}, stopPropagation() {} });
+      const secondDelete = staleDeleteC.listeners.get("click")({ preventDefault() {}, stopPropagation() {} });
+      persistResolvers.splice(0).forEach(resolve => resolve());
+      await Promise.all([firstDelete, secondDelete]);
+      return {
+        cueTexts: subtitleCues.map(cue => cue.text),
+        sourceTexts: currentTranscript.source.map(segment => segment.text),
+        translatedTexts: currentTranscript.translated.map(segment => segment.text)
+      };
+    } finally {
+      persistSubtitleEdits = originalPersistSubtitleEdits;
+      subtitleEditMode = false;
+    }
+  })()
+`, context);
+
+assert.deepEqual(JSON.parse(JSON.stringify(rapidSubtitleDeletesUseCueIdentityState)), {
+  cueTexts: ["A", "D"],
+  sourceTexts: ["A", "D"],
+  translatedTexts: ["A", "D"]
+});
+
 const sourcePreviewNoticeText = await vm.runInContext(`
   (() => {
     currentJob = null;
@@ -5238,6 +5297,98 @@ assert.deepEqual(JSON.parse(JSON.stringify(staleSubtitleLoadIgnoredState)), {
   renderedSubtitleSignature: ""
 });
 
+const staleCuesWaitForNewerSubtitleLoadState = await vm.runInContext(`
+  (async () => {
+    const originalLoadSubtitleCues = loadSubtitleCues;
+    const originalSendMessage = chrome.runtime.sendMessage;
+    let resolveLoad;
+    const attachments = [];
+    activeTab = { id: 1, title: "Revision race", url: "https://example.test/watch/revision-race" };
+    currentJobId = "job-revision-race";
+    currentJob = {
+      id: currentJobId,
+      updatedAt: 40,
+      translation: {
+        segmentCount: 1,
+        chunksDone: 1,
+        chunksFailed: 0,
+        vttPath: "browser-memory",
+        contentHash: "revision-40"
+      }
+    };
+    renderedSubtitleJobId = currentJobId;
+    renderedSubtitleRevision = 20;
+    renderedSubtitleSignature = "job-revision-race:1:1:0:contentHash:revision-20";
+    manualSubtitleOverride = null;
+    subtitleOverlayEnabled = true;
+    subtitleDisplayMode = "translated";
+    subtitleCueSource = "transcript";
+    subtitleCues = [
+      { start: 0, end: 2, time: "00:00:00.000 --> 00:00:02.000", text: "old revision 20", sourceText: "old source 20" }
+    ];
+    pendingSubtitlePromise = null;
+    pendingSubtitleSignature = "";
+    loadSubtitleCues = async () => new Promise(resolve => {
+      resolveLoad = resolve;
+    });
+    chrome.runtime.sendMessage = async message => {
+      if (message.type === "FUGUANG_ATTACH_VTT_TEXT") {
+        attachments.push({
+          origin: message.origin,
+          attachmentRevision: message.attachmentRevision,
+          vtt: message.vtt
+        });
+      }
+      return { ok: true, attached: true };
+    };
+    try {
+      const refresh = renderSubtitles(currentJobId, currentJob);
+      await Promise.resolve();
+      let modeChangeSettled = false;
+      const modeChange = toggleSubtitleMode().then(() => {
+        modeChangeSettled = true;
+      });
+      await Promise.resolve();
+      await Promise.resolve();
+      const beforeLoad = {
+        modeChangeSettled,
+        presentations: attachments.filter(item => item.origin === "user-presentation")
+      };
+      resolveLoad({
+        cues: [
+          { start: 0, end: 2, time: "00:00:00.000 --> 00:00:02.000", text: "new revision 40", sourceText: "new source 40" }
+        ],
+        source: "transcript",
+        transcript: {
+          source: [{ start: 0, end: 2, text: "new source 40" }],
+          translated: [{ start: 0, end: 2, text: "new revision 40" }]
+        }
+      });
+      await Promise.all([refresh, modeChange]);
+      stopSubtitleFollow();
+      return {
+        beforeLoad,
+        attachments,
+        renderedSubtitleRevision,
+        cueText: subtitleCues[0]?.text || ""
+      };
+    } finally {
+      loadSubtitleCues = originalLoadSubtitleCues;
+      chrome.runtime.sendMessage = originalSendMessage;
+      stopSubtitleFollow();
+    }
+  })()
+`, context);
+
+assert.equal(staleCuesWaitForNewerSubtitleLoadState.beforeLoad.modeChangeSettled, false);
+assert.equal(staleCuesWaitForNewerSubtitleLoadState.beforeLoad.presentations.length, 0);
+assert.equal(staleCuesWaitForNewerSubtitleLoadState.renderedSubtitleRevision, 40);
+assert.equal(staleCuesWaitForNewerSubtitleLoadState.cueText, "new revision 40");
+const finalRevisionPresentation = staleCuesWaitForNewerSubtitleLoadState.attachments.find(
+  item => item.origin === "user-presentation"
+);
+assert.equal(finalRevisionPresentation?.attachmentRevision, 40);
+assert.match(finalRevisionPresentation?.vtt || "", /new source 40/);
 const startPreloadRefreshesCandidatesState = await vm.runInContext(`
   (async () => {
     const originalTabsQuery = chrome.tabs.query;
@@ -5604,6 +5755,62 @@ const localStartPreloadCancelsIfTabChangesDuringFilePickState = await vm.runInCo
 assert.equal(localStartPreloadCancelsIfTabChangesDuringFilePickState.messages.includes("FUGUANG_START_PRELOAD_AUTO"), false);
 assert.equal(localStartPreloadCancelsIfTabChangesDuringFilePickState.message, "当前标签页已经变化，已取消提交。请确认媒体源后再开始。");
 assert.equal(localStartPreloadCancelsIfTabChangesDuringFilePickState.activeTabId, 2);
+
+const localStartPickerCancellationState = await vm.runInContext(`
+  (async () => {
+    const originalTabsQuery = chrome.tabs.query;
+    const originalSendMessage = chrome.runtime.sendMessage;
+    const originalLocalMediaFiles = globalThis.FuguangLocalMediaFiles;
+    const originalSetMessage = setMessage;
+    activeTab = { id: 1, title: "Local video", url: "file:///Volumes/share/Movie.mp4" };
+    currentJobId = "";
+    currentJob = null;
+    startRequestInFlight = false;
+    candidates = [
+      { kind: "media", role: "audio", url: "file:///Volumes/share/Movie.mp4", title: "Movie.mp4" }
+    ];
+    selectedCandidateKey = candidateKey(candidates[0], 0);
+    selectedCandidatePinned = false;
+    renderedCandidateSignature = "local-picker-cancel";
+    chrome.tabs.query = async () => [{ id: 1, title: "Local video", url: "file:///Volumes/share/Movie.mp4" }];
+    chrome.runtime.sendMessage = async () => ({ ok: true });
+    globalThis.FuguangLocalMediaFiles = {
+      localMediaFileNameFromUrl: () => "Movie.mp4",
+      pickLocalMediaFileForSource: async () => {
+        throw new Error("已取消选择本地媒体文件。");
+      }
+    };
+    setMessage = text => {
+      globalThis.localPickerCancellationMessage = text;
+    };
+    let rejection = "";
+    try {
+      await startPreloadFromSidePanel();
+    } catch (error) {
+      rejection = error?.message || String(error);
+    }
+    try {
+      return {
+        rejection,
+        message: globalThis.localPickerCancellationMessage || "",
+        startRequestInFlight
+      };
+    } finally {
+      chrome.tabs.query = originalTabsQuery;
+      chrome.runtime.sendMessage = originalSendMessage;
+      globalThis.FuguangLocalMediaFiles = originalLocalMediaFiles;
+      setMessage = originalSetMessage;
+      startRequestInFlight = false;
+      delete globalThis.localPickerCancellationMessage;
+    }
+  })()
+`, context);
+
+assert.deepEqual(JSON.parse(JSON.stringify(localStartPickerCancellationState)), {
+  rejection: "",
+  message: "已取消选择本地媒体文件。",
+  startRequestInFlight: false
+});
 
 const unchangedSubtitleReattachState = await vm.runInContext(`
   (async () => {
@@ -6131,3 +6338,139 @@ const chunkMessageState = await vm.runInContext(`
 `, context);
 
 assert.match(chunkMessageState, /第 2\/4 批/);
+
+
+const subtitleAttachmentOriginState = await vm.runInContext(`
+  (async () => {
+    const messages = [];
+    activeTab = { id: 1 };
+    currentJobId = "job-origin-contract";
+    currentJob = {
+      id: "job-origin-contract",
+      status: "running",
+      stage: "translation",
+      updatedAt: 12345
+    };
+    renderedSubtitleJobId = currentJobId;
+    renderedSubtitleRevision = 12345;
+    renderedSubtitleSignature = "job-origin-contract:partial";
+    manualSubtitleOverride = null;
+    subtitleOverlayEnabled = true;
+    subtitleCues = [
+      { start: 0, end: 2, time: "00:00:00.000 --> 00:00:02.000", text: "partial job cue" }
+    ];
+    attachedSubtitleTabId = 0;
+    attachedSubtitleSignature = "";
+    chrome.runtime.sendMessage = async message => {
+      messages.push(message);
+      return { ok: true, attached: true };
+    };
+    await attachCurrentSubtitlesToPage();
+    markManualSubtitleOverride("edited-origin-contract");
+    await attachCurrentSubtitlesToPage();
+    return messages.filter(message => message.type === "FUGUANG_ATTACH_VTT_TEXT").map(message => ({
+      origin: message.origin,
+      jobId: message.jobId,
+      attachmentRevision: message.attachmentRevision
+    }));
+  })()
+`, context);
+
+assert.deepEqual(JSON.parse(JSON.stringify(subtitleAttachmentOriginState)), [
+  { origin: "job-projection", jobId: "job-origin-contract", attachmentRevision: 12345 },
+  { origin: "user-override", jobId: "job-origin-contract", attachmentRevision: 12345 }
+]);
+
+const staleSubtitleAttachResponseState = await vm.runInContext(`
+  (async () => {
+    activeTab = { id: 1 };
+    currentJobId = "job-stale-attach-response";
+    currentJob = {
+      id: "job-stale-attach-response",
+      status: "running",
+      stage: "translation",
+      updatedAt: 500
+    };
+    renderedSubtitleJobId = currentJobId;
+    renderedSubtitleSignature = "job-stale-attach-response:partial";
+    manualSubtitleOverride = null;
+    subtitleOverlayEnabled = true;
+    subtitleCues = [
+      { start: 0, end: 2, time: "00:00:00.000 --> 00:00:02.000", text: "stale cue" }
+    ];
+    attachedSubtitleTabId = 0;
+    attachedSubtitleSignature = "";
+    chrome.runtime.sendMessage = async message => {
+      if (message.type === "FUGUANG_ATTACH_VTT_TEXT") {
+        return { ok: true, attached: false, stale: true };
+      }
+      return { ok: true };
+    };
+    await attachCurrentSubtitlesToPage();
+    return { attachedSubtitleTabId, attachedSubtitleSignature };
+  })()
+`, context);
+
+assert.deepEqual(JSON.parse(JSON.stringify(staleSubtitleAttachResponseState)), {
+  attachedSubtitleTabId: 0,
+  attachedSubtitleSignature: ""
+});
+
+const cachedSubtitleModeChangeState = await vm.runInContext(`
+  (async () => {
+    activeTab = { id: 1 };
+    currentJobId = "";
+    currentJob = null;
+    currentSubtitleCacheEntry = { jobId: "job-cached-mode-change" };
+    renderedSubtitleJobId = "job-cached-mode-change";
+    renderedSubtitleSignature = "job-cached-mode-change:cached";
+    manualSubtitleOverride = null;
+    subtitleOverlayEnabled = true;
+    subtitleDisplayMode = "translated";
+    subtitleCueSource = "transcript";
+    currentTranscript = {
+      source: [
+        { start: 0, end: 2, text: "cached source line", chunkIndex: 0, segmentIndex: 0 }
+      ],
+      translated: [
+        { start: 0, end: 2, text: "cached translated line", chunkIndex: 0, segmentIndex: 0 }
+      ]
+    };
+    subtitleCues = cuesFromTranscript(currentTranscript);
+    attachedSubtitleTabId = 0;
+    attachedSubtitleSignature = "";
+    let pageVtt = "WEBVTT\\n\\n00:00:00.000 --> 00:00:02.000\\ncached translated line\\n";
+    let sentOrigin = "";
+    const pageAttachment = {
+      origin: "job-automatic",
+      jobId: "job-cached-mode-change",
+      attachmentRevision: 20
+    };
+    chrome.runtime.sendMessage = async message => {
+      if (message.type !== "FUGUANG_ATTACH_VTT_TEXT") {
+        return { ok: true };
+      }
+      sentOrigin = message.origin;
+      if (
+        message.origin === "job-projection" &&
+        message.jobId === pageAttachment.jobId &&
+        pageAttachment.attachmentRevision > 0 &&
+        Number(message.attachmentRevision || 0) < pageAttachment.attachmentRevision
+      ) {
+        return { ok: true, attached: false, stale: true };
+      }
+      pageVtt = message.vtt;
+      return { ok: true, attached: true };
+    };
+    await toggleSubtitleMode();
+    return { subtitleDisplayMode, pageVtt, sentOrigin };
+  })()
+`, context);
+
+assert.equal(cachedSubtitleModeChangeState.subtitleDisplayMode, "source");
+assert.equal(cachedSubtitleModeChangeState.sentOrigin, "user-presentation");
+assert.match(
+  cachedSubtitleModeChangeState.pageVtt,
+  /cached source line/,
+  "a user-requested cached subtitle mode change must update the page instead of being silently rejected as stale"
+);

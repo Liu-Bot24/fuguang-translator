@@ -783,13 +783,17 @@ vm.runInContext(source, context, { filename: "offscreen.js" });
     })
   };
   context.FuguangLocalMediaExtractorOverrides = {
-    muxLocalMediaAudioWindow: async (_mediabunny, _sink, _codec, _decoderConfig, outputSpec, spec) => ({
-      name: `local-media-${String(spec.index + 1).padStart(3, "0")}.${outputSpec.extension}`,
-      mime: outputSpec.mime,
-      buffer: vm.runInContext(`new Uint8Array([${spec.index & 0xff}, 2, 3]).buffer`, context),
-      packetCount: 1,
-      spec
-    })
+    muxLocalMediaAudioWindow: async (_mediabunny, _sink, _codec, _decoderConfig, outputSpec, spec) => (
+      spec.index === 5
+        ? null
+        : {
+            name: `local-media-${String(spec.index + 1).padStart(3, "0")}.${outputSpec.extension}`,
+            mime: outputSpec.mime,
+            buffer: vm.runInContext(`new Uint8Array([${spec.index & 0xff}, 2, 3]).buffer`, context),
+            packetCount: 1,
+            spec
+          }
+    )
   };
   context.reloadWebFfmpegFrame = async url => {
     reloads.push({ url, requestsSeen: requests.length });
@@ -840,7 +844,8 @@ vm.runInContext(source, context, { filename: "offscreen.js" });
     const chunk41RequestIndex = requests.findIndex(request => request.outputName === "local-media-041.mp3");
     const chunk42Requests = requests.filter(request => request.outputName === "local-media-042.mp3");
 
-    assert.equal(result.length, specs.length);
+    assert.equal(result.length, specs.length - 1);
+    assert.equal(requests.some(request => request.outputName === "local-media-006.mp3"), false);
     assert.equal(chunk42Requests.length, 2);
     assert.notEqual(chunk42Requests[0].buffer, chunk42Requests[1].buffer);
     assert.ok(
@@ -858,6 +863,55 @@ vm.runInContext(source, context, { filename: "offscreen.js" });
     context.caches = originalCaches;
     context.Response = originalResponse;
   }
+}
+
+{
+  let outputCancelled = false;
+  let sourceClosed = false;
+  class EmptyWindowBufferTarget {
+    constructor() {
+      this.buffer = new ArrayBuffer(0);
+    }
+  }
+  class EmptyWindowOutput {
+    constructor({ target }) {
+      this.target = target;
+    }
+
+    addAudioTrack() {}
+    async start() {}
+    async finalize() {}
+    async cancel() {
+      outputCancelled = true;
+    }
+  }
+  class EmptyWindowPacketSource {
+    close() {
+      sourceClosed = true;
+    }
+  }
+  const sink = {
+    getPacket: async () => ({ timestamp: 0, duration: 1, isMetadataOnly: false }),
+    getFirstPacket: async () => null,
+    async *packets(packet) {
+      yield packet;
+    }
+  };
+  const result = await context.muxLocalMediaAudioWindow(
+    {
+      BufferTarget: EmptyWindowBufferTarget,
+      Output: EmptyWindowOutput,
+      EncodedAudioPacketSource: EmptyWindowPacketSource
+    },
+    sink,
+    "aac",
+    null,
+    { createFormat: () => ({}), extension: "aac", mime: "audio/aac" },
+    { index: 1, start: 30, end: 60, coreStart: 32, coreEnd: 58 }
+  );
+  assert.equal(result, null);
+  assert.equal(sourceClosed, true);
+  assert.equal(outputCancelled, true);
 }
 
 {

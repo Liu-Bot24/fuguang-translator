@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import test from "node:test";
 
 import { FuguangJobStore } from "../../extension/src/background/job-store.js";
+import { createOffscreenTaskExecutor } from "../../extension/src/offscreen/task-runtime-executor.js";
 import { createTaskRuntimeHost, FuguangOffscreenTaskRuntime } from "../../extension/src/offscreen/task-runtime-host.js";
 import { FuguangTaskRuntimeProtocol } from "../../extension/src/shared/task-runtime-protocol.js";
 
@@ -186,6 +187,136 @@ test("a rebuilt runtime takes over only after the previous execution lease expir
   await waitFor(() => executions === 1, "the rebuilt runtime to take over the expired lease");
 });
 
+test("resumeExisting starts from the durable snapshot without replaying the supplied draft", async () => {
+  const store = FuguangJobStore.createMemory();
+  await store.putSnapshot({
+    job: {
+      id: "job-a",
+      runToken: "run-a",
+      status: "running",
+      stage: "asr",
+      updatedAt: 100
+    },
+    chunks: [{
+      key: "job-a:run-a:audio:0",
+      jobRunKey: "job-a:run-a",
+      jobId: "job-a",
+      runToken: "run-a",
+      entryType: "audio-chunk",
+      index: 0,
+      asrCompleted: false,
+      updatedAt: 100
+    }]
+  });
+  let execution = null;
+  const started = deferred();
+  const host = createTaskRuntimeHost({
+    jobStore: store,
+    heartbeatIntervalMs: 0,
+    async executeJob(_runtime, context) {
+      execution = context;
+      started.resolve();
+    }
+  });
+  const response = await host.handleCommand({
+    type: FuguangTaskRuntimeProtocol.MESSAGE.START_JOB,
+    commandId: "resume-existing",
+    resumeExisting: true,
+    snapshot: {
+      job: {
+        id: "job-a",
+        runToken: "run-a",
+        status: "completed",
+        stage: "completed",
+        updatedAt: 999
+      },
+      chunks: [{
+        key: "job-a:run-a:audio:0",
+        jobRunKey: "job-a:run-a",
+        jobId: "job-a",
+        runToken: "run-a",
+        entryType: "audio-chunk",
+        index: 0,
+        asrCompleted: true,
+        sourceSegments: [{ text: "dirty" }],
+        updatedAt: 999
+      }]
+    }
+  });
+  assert.equal(response.accepted, true);
+  await started.promise;
+  assert.equal(execution.job.status, "running");
+  assert.equal(execution.chunks[0].asrCompleted, false);
+  const durable = await store.getSnapshot("job-a", "run-a");
+  assert.equal(durable.job.status, "running");
+  assert.equal(durable.chunks[0].asrCompleted, false);
+  assert.equal(JSON.stringify(durable).includes("dirty"), false);
+});
+
+test("resumeExisting fails retryably when the durable snapshot cannot be read", async () => {
+  const store = FuguangJobStore.createMemory();
+  await store.putSnapshot(snapshot({ status: "running", stage: "asr" }));
+  store.getSnapshot = async () => {
+    throw new Error("injected resume read failure");
+  };
+  let executions = 0;
+  const host = createTaskRuntimeHost({
+    jobStore: store,
+    async executeJob() {
+      executions += 1;
+    }
+  });
+  const response = await host.handleCommand({
+    type: FuguangTaskRuntimeProtocol.MESSAGE.START_JOB,
+    commandId: "resume-read-failure",
+    resumeExisting: true,
+    snapshot: { job: { id: "job-a", runToken: "run-a" }, chunks: [] }
+  });
+  assert.equal(response.retryable, true);
+  assert.equal(response.reason, "snapshot-read-error");
+  assert.equal(host.activeRuns.size, 0);
+  assert.equal(executions, 0);
+});
+
+test("runtime keeps its lease until a retryable finalization is resolved through a new work poll", async () => {
+  const store = FuguangJobStore.createMemory();
+  const secondPoll = deferred();
+  let polls = 0;
+  const executeJob = createOffscreenTaskExecutor({
+    retryBaseMs: 0,
+    pollIntervalMs: 0,
+    async sendMessage(message) {
+      if (message.type === FuguangTaskRuntimeProtocol.MESSAGE.GET_JOB_WORK) {
+        polls += 1;
+        if (polls === 1) {
+          return { ok: true, extractionDone: true, chunks: [] };
+        }
+        return secondPoll.promise;
+      }
+      if (message.type === FuguangTaskRuntimeProtocol.MESSAGE.FINALIZE_JOB) {
+        return { ok: true, stale: true, retryable: true, reason: "owned-write-error" };
+      }
+      return { ok: true };
+    }
+  });
+  const host = createTaskRuntimeHost({
+    jobStore: store,
+    heartbeatIntervalMs: 0,
+    executeJob
+  });
+  const response = await host.handleCommand({
+    type: FuguangTaskRuntimeProtocol.MESSAGE.START_JOB,
+    commandId: "retryable-finalize",
+    snapshot: snapshot({ status: "running", stage: "translation" })
+  });
+  assert.equal(response.accepted, true);
+  await waitFor(() => polls === 2, "the executor to re-poll work after retryable finalization");
+  assert.equal(host.activeRuns.size, 1, "the runtime must retain the lease while retry recovery is pending");
+  assert.equal((await store.getJob("job-a")).executionOwnerId, host.ownerId);
+  secondPoll.resolve({ ok: true, terminal: true, interrupted: true });
+  await waitFor(() => host.activeRuns.size === 0, "the resolved retry flow to release the runtime");
+});
+
 test("losing a lease evicts the stale active run before its executor promise settles", async () => {
   const store = FuguangJobStore.createMemory();
   let now = 100;
@@ -320,4 +451,21 @@ test("runtime persists executor failure even when the worker callback is unavail
   const stored = await store.getJob("job-a");
   assert.equal(stored.status, "failed");
   assert.match(stored.error, /worker unavailable/);
+});
+
+test("terminal resume rejection preserves its structured reason", async () => {
+  const store = FuguangJobStore.createMemory();
+  await store.putSnapshot(snapshot({ status: "completed", stage: "completed", updatedAt: 200 }));
+  const host = createTaskRuntimeHost({
+    jobStore: store,
+    async executeJob() {}
+  });
+  const response = await host.handleCommand({
+    type: FuguangTaskRuntimeProtocol.MESSAGE.START_JOB,
+    commandId: "resume-terminal",
+    resumeExisting: true,
+    snapshot: { job: { id: "job-a", runToken: "run-a" }, chunks: [] }
+  });
+  assert.equal(response.type, FuguangTaskRuntimeProtocol.MESSAGE.ERROR);
+  assert.equal(response.reason, "terminal-job");
 });
