@@ -711,6 +711,83 @@ test("ordinary ASR executor preserves real workflow HTTP diagnostics in its dura
   }
 });
 
+test("ordinary local ASR forwards its duration-based timeout to the durable request runtime", async () => {
+  const originalCaches = globalThis.caches;
+  const audioBytes = new Uint8Array(4096);
+  audioBytes[0] = 0xff;
+  audioBytes[1] = 0xfb;
+  globalThis.caches = {
+    async open() {
+      return { async match() { return new Response(audioBytes); } };
+    }
+  };
+  let transportTimeoutMs = null;
+  try {
+    const executeAsr = createOffscreenBrowserAsrExecutor({
+      paidRuntime: { async writeArtifact() {} },
+      paidClient: {
+        createRequestTransport: () => async (_url, _init, options = {}) => {
+          transportTimeoutMs = options.timeoutMs;
+          return new Response(JSON.stringify({
+            segments: [{ start: 0, end: 1, text: "local result" }]
+          }), {
+            status: 200,
+            headers: { "content-type": "application/json" }
+          });
+        }
+      }
+    });
+    const result = await executeAsr({
+      jobId: "job-local-timeout", runToken: "run-local-timeout",
+      executionOwnerId: "owner-local-timeout", executionEpoch: 1,
+      chunkIndex: 0, semanticRequestPath: "asr/job-local-timeout/run-local-timeout/chunk/0",
+      webFfmpegUrl: "chrome-extension://test/ffmpeg.html",
+      asrConfig: {
+        providerType: "openai", baseUrl: "http://127.0.0.1:8000/v1",
+        model: "whisper-1", apiKey: "local", vadFilter: "off"
+      },
+      chunk: {
+        index: 0, start: 0, end: 900, duration: 900, bytes: audioBytes.byteLength,
+        file: {
+          name: "local.mp3", mime: "audio/mpeg", bytes: audioBytes.byteLength,
+          cacheUrl: "https://fuguang.local/__fuguang_audio_cache/job-local-timeout/0.mp3"
+        }
+      }
+    }, { signal: new AbortController().signal });
+    assert.equal(result.segments[0].text, "local result");
+    assert.equal(transportTimeoutMs, 1_125_000,
+      "15-minute local ASR must keep the workflow's 18.75-minute deadline instead of the transport's 90-second fallback");
+  } finally {
+    if (originalCaches === undefined) delete globalThis.caches;
+    else globalThis.caches = originalCaches;
+  }
+});
+
+test("ordinary ASR VAD precheck forwards its own 30-second timeout to the durable request runtime", async () => {
+  let transportOptions = null;
+  const intervals = await FuguangBrowserAsrWorkflow.detectBrowserAsrSpeechIntervals(
+    { start: 0, end: 30, duration: 30, file: { mime: "audio/mpeg" } },
+    { providerType: "openai", baseUrl: "http://127.0.0.1:8000/v1", apiKey: "local" },
+    new Uint8Array([0xff, 0xfb, 1, 2]).buffer,
+    "vad.mp3",
+    null,
+    {
+      endpoint: "http://127.0.0.1:8000/v1/audio/speech/timestamps",
+      semanticRequestPath: "asr/job-local-vad/run-local-vad/chunk/0/vad",
+      requestTransport: async (_url, _init, options = {}) => {
+        transportOptions = options;
+        return new Response(JSON.stringify({ speech_segments: [] }), {
+          status: 200,
+          headers: { "content-type": "application/json" }
+        });
+      }
+    }
+  );
+  assert.deepEqual(intervals, []);
+  assert.equal(transportOptions.timeoutMs, 30_000);
+  assert.ok(transportOptions.signal instanceof AbortSignal);
+});
+
 test("ordinary ASR preserves paid delivery certainty through the real workflow and executor boundary", async () => {
   const originalCaches = globalThis.caches;
   const audioBytes = new Uint8Array(4096);

@@ -2,7 +2,7 @@ import { FuguangBrowserLanguage } from "./browser-language.js";
 
 export const FuguangBrowserTranslationProvider = (() => {
   const BROWSER_TRANSLATION_RESPONSE_FORMAT_UNSUPPORTED_KEYS = new Set();
-  const BROWSER_TRANSLATION_TIMEOUT_MS = 90_000;
+  const BROWSER_TRANSLATION_TIMEOUT_MS = 120_000;
   const BROWSER_TRANSLATION_DELIVERY_AMBIGUOUS = "BROWSER_TRANSLATION_DELIVERY_AMBIGUOUS";
   const BROWSER_TRANSLATION_REPAIRABLE = "BROWSER_TRANSLATION_REPAIRABLE";
   const BROWSER_TRANSLATION_ABORT_ERROR_BRAND = Symbol("fuguang.browser.translation.abort-error");

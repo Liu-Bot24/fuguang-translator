@@ -1091,8 +1091,8 @@ later cue
 }
 
 {
-  const video = new FakeMedia({ currentTime: 77, paused: false });
-  video.currentSrc = "https://media.example.test/quality-old.mp4";
+  const video = new FakeMedia({ currentTime: 1, paused: false });
+  video.currentSrc = "https://media.example.test/quality.mp4?token=old";
   video.src = video.currentSrc;
   const harness = createHarness({ videos: [video] });
   await harness.ready();
@@ -1104,16 +1104,36 @@ later cue
     attachmentRevision: 1,
     preloadGeneration: 1
   })).ok, true);
-  video.currentSrc = "https://media.example.test/quality-new.mp4";
+  assert.equal(harness.overlayText(), "first cue");
+  video.currentSrc = "https://media.example.test/quality.mp4?token=new";
   video.src = video.currentSrc;
-  assert.equal((await harness.send({
+  video.currentTime = 77;
+  harness.runIntervals();
+  assert.equal(harness.overlayHidden(), true,
+    "an automatic attachment must stop when its exact DOM changes source without background authorization");
+
+  const rejectedRefresh = await harness.send({
     type: "FUGUANG_ATTACH_VTT",
     vtt: OVERLAPPING_VTT,
     origin: "job-automatic",
     jobId: "job-quality-stream-refresh",
     attachmentRevision: 2,
     preloadGeneration: 2
-  })).ok, true, "same-DOM quality switching and streaming refresh must remain compatible");
+  });
+  assert.equal(rejectedRefresh.ok, false);
+  assert.equal(rejectedRefresh.mediaBindingRejected, true);
+  assert.equal(rejectedRefresh.currentSrc, "https://media.example.test/quality.mp4?token=new");
+  assert.equal(Number.isFinite(rejectedRefresh.mediaBindingRejectedAt), true);
+
+  assert.equal((await harness.send({
+    type: "FUGUANG_ATTACH_VTT",
+    vtt: OVERLAPPING_VTT,
+    origin: "job-automatic",
+    jobId: "job-quality-stream-refresh",
+    attachmentRevision: 2,
+    preloadGeneration: 2,
+    allowMediaRebind: true
+  })).ok, true, "a background-authorized same-lineage refresh must rebind the automatic subtitle");
   assert.equal(harness.overlayText(), "current cue");
 }
 

@@ -511,6 +511,7 @@ export const FuguangBrowserFunAsrProvider = (() => {
       const response = typeof requestTransport === "function"
         ? await requestTransport(url, { ...fetchOptions, signal: controller.signal }, {
           signal: controller.signal,
+          timeoutMs: deadlineAt ? Math.max(1, remainingMs) : undefined,
           semanticRequestPath,
           operationType,
           bodyIdentity

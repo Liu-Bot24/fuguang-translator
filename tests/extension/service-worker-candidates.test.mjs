@@ -2965,6 +2965,7 @@ assert.equal(context.browserTranslationProviderConcurrency({ modelConfig: { work
     assert.equal(missingOpenAiModel.accepted, false);
     assert.match(missingOpenAiModel.error, /配置无法恢复/);
     record.modelConfig.asr = { providerType: "xai", baseUrl: "https://api.x.ai/v1", model: "", apiKey: "test" };
+    record.job.translation.chunkStatuses[0].attempts = 4;
     const asrInput = await context.getOffscreenBrowserJobExecutionInput({
       jobId: record.job.id,
       runToken: record.runToken,
@@ -2978,6 +2979,8 @@ assert.equal(context.browserTranslationProviderConcurrency({ modelConfig: { work
     assert.equal(asrInput.input.asrConfig.providerType, "xai");
     assert.equal(asrInput.input.asrConfig.model, "", "xAI's built-in STT endpoint must not require a model name");
     assert.equal(asrInput.input.webFfmpegUrl, "chrome-extension://test-extension/web-ffmpeg/index.html", "production execution input must carry the configured Web FFmpeg URL");
+    assert.equal(record.job.translation.chunkStatuses[0].attempts, 4, "preparing an audio chunk must not count as another retry");
+    assert.equal(/offscreen/i.test(record.job.translation.chunkStatuses[0].message), false, "user progress must not expose the executor implementation");
     assert.equal(JSON.stringify(context.offscreenProcessSnapshots).includes('"apiKey":"test"'), false);
     assert.equal(context.offscreenProcessSnapshots.at(-1).chunks.find(entry => entry.entryType === "audio-chunk").asrExecutionMode, "offscreen-durable-v1");
     await context.commitOffscreenBrowserJobWorkResult({
@@ -3636,7 +3639,8 @@ assert.equal(context.browserTranslationProviderConcurrency({ modelConfig: { work
     assert.equal(record.audioChunks.length, 2, "media extraction must still complete and retain retryable audio");
     assert.equal(record.job.extract.status, "completed");
     assert.equal(record.job.status, "interrupted");
-    assert.match(record.job.error, /offscreen/);
+    assert.match(record.job.error, /后台识别暂时不可用/);
+    assert.equal(/offscreen|durable/i.test(record.job.error), false, "user-facing recovery errors must not expose executor internals");
     assert.equal(record.job.translation.chunksTotal, 2);
     assert.equal(record.job.translation.status, "interrupted");
   } finally {
@@ -9680,7 +9684,7 @@ async function assertInterruptedRerunContinuesWithAsr(pipeline) {
   try {
     await assert.rejects(
       () => context.rerunBrowserAsrFromAudio(record, [0]),
-      /offscreen .*执行器不可用/
+      /后台翻译暂时不可用/
     );
     assert.equal(record.job.status, "interrupted");
     assert.equal(record.audioChunks[0].asrCompleted, false);
@@ -16989,6 +16993,123 @@ assert.equal(context.shouldRetryBrowserAsrClipRequestError({
     assert.equal(exact.ok, true);
     assert.deepEqual(sentFrames, [{ frameId: 7, documentId: "document-original" }],
       "durable recovery must target the exact original frame/document first");
+
+    sentFrames.length = 0;
+    const originalPresentationLineageKey = recovered.presentationBinding.lineageKey;
+    recovered.presentationBinding.lineageKey = context.browserMediaLineageKey({
+      url: "https://media.example.test/durable/master.m3u8?token=refreshed",
+      kind: "hls"
+    }, pageUrl);
+    chrome.tabs.sendMessage = async (_id, message, options = {}) => {
+      sentFrames.push({
+        frameId: options.frameId,
+        documentId: options.documentId || "",
+        allowMediaRebind: message.allowMediaRebind === true
+      });
+      return message.allowMediaRebind
+        ? { ok: true }
+        : {
+          ok: false,
+          mediaBindingRejected: true,
+          currentSrc: "https://media.example.test/durable/master.m3u8?token=refreshed"
+        };
+    };
+    const exactLineageRefresh = await context.sendBrowserJobVttToBoundMedia(recovered, {
+      type: "FUGUANG_ATTACH_VTT",
+      vtt: "WEBVTT\n"
+    });
+    assert.equal(exactLineageRefresh.ok, true,
+      "a signed URL refresh in the exact bound document must be re-authorized by durable lineage");
+    assert.deepEqual(sentFrames, [
+      { frameId: 7, documentId: "document-original", allowMediaRebind: false },
+      { frameId: 7, documentId: "document-original", allowMediaRebind: true }
+    ]);
+
+    sentFrames.length = 0;
+    chrome.tabs.sendMessage = async (_id, message, options = {}) => {
+      sentFrames.push({
+        frameId: options.frameId,
+        documentId: options.documentId || "",
+        allowMediaRebind: message.allowMediaRebind === true
+      });
+      return {
+        ok: false,
+        mediaBindingRejected: true,
+        currentSrc: "https://ads.example.test/pre-roll.m3u8"
+      };
+    };
+    const exactUnrelatedMedia = await context.sendBrowserJobVttToBoundMedia(recovered, {
+      type: "FUGUANG_ATTACH_VTT",
+      vtt: "WEBVTT\n"
+    });
+    assert.equal(exactUnrelatedMedia.ok, false,
+      "an unrelated source in the exact same DOM/document must not inherit automatic subtitles");
+    assert.equal(exactUnrelatedMedia.mediaBindingRejected, true);
+    assert.deepEqual(sentFrames, [
+      { frameId: 7, documentId: "document-original", allowMediaRebind: false }
+    ]);
+    recovered.presentationBinding.lineageKey = originalPresentationLineageKey;
+
+    const blobRejectionTime = Date.now() + 10000;
+    const blobState = context.getState(tabId);
+    blobState.candidates = [{
+      url: mediaUrl,
+      kind: "hls",
+      frameId: 7,
+      documentId: "document-original",
+      pageUrl,
+      seenAt: blobRejectionTime + 1
+    }];
+    sentFrames.length = 0;
+    chrome.tabs.sendMessage = async (_id, message, options = {}) => {
+      sentFrames.push({
+        frameId: options.frameId,
+        documentId: options.documentId || "",
+        allowMediaRebind: message.allowMediaRebind === true
+      });
+      return message.allowMediaRebind
+        ? { ok: true }
+        : {
+          ok: false,
+          mediaBindingRejected: true,
+          currentSrc: "blob:https://example.test/player-rebuilt",
+          mediaBindingRejectedAt: blobRejectionTime
+        };
+    };
+    const exactBlobRefresh = await context.sendBrowserJobVttToBoundMedia(recovered, {
+      type: "FUGUANG_ATTACH_VTT",
+      vtt: "WEBVTT\n"
+    });
+    assert.equal(exactBlobRefresh.ok, true,
+      "a rebuilt blob player may rebind only when one recent exact-frame candidate proves the original lineage");
+    assert.deepEqual(sentFrames, [
+      { frameId: 7, documentId: "document-original", allowMediaRebind: false },
+      { frameId: 7, documentId: "document-original", allowMediaRebind: true }
+    ]);
+
+    blobState.candidates.push({
+      url: "https://ads.example.test/pre-roll.m3u8",
+      kind: "hls",
+      frameId: 7,
+      documentId: "document-original",
+      pageUrl,
+      seenAt: blobRejectionTime + 2
+    });
+    sentFrames.length = 0;
+    const ambiguousBlobRefresh = await context.sendBrowserJobVttToBoundMedia(recovered, {
+      type: "FUGUANG_ATTACH_VTT",
+      vtt: "WEBVTT\n"
+    });
+    assert.equal(ambiguousBlobRefresh.ok, false,
+      "competing recent lineages in the same frame must not authorize an automatic subtitle rebind");
+    assert.deepEqual(sentFrames, [
+      { frameId: 7, documentId: "document-original", allowMediaRebind: false }
+    ]);
+
+    chrome.tabs.sendMessage = async (_id, _message, options = {}) => {
+      sentFrames.push({ frameId: options.frameId, documentId: options.documentId || "" });
+      return { ok: true };
+    };
 
     sentFrames.length = 0;
     webNavigationFrames.set(`${tabId}:7`, {

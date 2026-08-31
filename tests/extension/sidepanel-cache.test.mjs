@@ -211,6 +211,23 @@ const document = {
   }
 };
 
+function createFakeChromeEvent() {
+  const listeners = new Set();
+  return {
+    addListener(listener) {
+      listeners.add(listener);
+    },
+    removeListener(listener) {
+      listeners.delete(listener);
+    },
+    emit(...args) {
+      for (const listener of listeners) {
+        listener(...args);
+      }
+    }
+  };
+}
+
 const chrome = {
   runtime: { sendMessage: async () => ({ ok: true }) },
   storage: {
@@ -225,6 +242,8 @@ const chrome = {
     }
   },
   tabs: {
+    onActivated: createFakeChromeEvent(),
+    onUpdated: createFakeChromeEvent(),
     query: async () => [{ id: 1, title: "Video", url: "https://example.test/watch/1" }]
   }
 };
@@ -235,8 +254,12 @@ const context = vm.createContext({
   document,
   window: {
     setInterval,
-    clearInterval
+    clearInterval,
+    setTimeout,
+    clearTimeout
   },
+  setTimeout,
+  clearTimeout,
   URL,
   Date,
   Map,
@@ -6432,6 +6455,113 @@ const chunkMessageState = await vm.runInContext(`
 `, context);
 
 assert.match(chunkMessageState, /第 2\/4 批/);
+assert.equal((chunkMessageState.match(/第 1 次尝试/g) || []).length, 1, "attempt metadata must not be repeated inside the message");
+
+const internalChunkMessageState = await vm.runInContext(`
+  (() => chunkMetaText({
+    stage: "asr_inflight",
+    attempts: 1,
+    sourceCount: 68,
+    message: "offscreen 识别 00:03:48.008 - 00:04:14.008"
+  }))()
+`, context);
+
+assert.equal(/offscreen/i.test(internalChunkMessageState), false, "internal executor names must not be shown in user progress copy");
+assert.match(internalChunkMessageState, /识别 00:03:48\.008 - 00:04:14\.008/);
+
+const tabSwitchRestoreState = await vm.runInContext(`
+  (async () => {
+    const jobs = {
+      1: {
+        id: "job-tab-1",
+        status: "completed",
+        stage: "completed",
+        sourceUrl: "https://media.example.test/one.mp4",
+        progress: { extraction: { percent: 100 }, translation: { chunkStatuses: [] } },
+        translation: { status: "completed", chunkStatuses: [] }
+      },
+      2: {
+        id: "job-tab-2",
+        status: "completed",
+        stage: "completed",
+        sourceUrl: "https://media.example.test/two.mp4",
+        progress: { extraction: { percent: 100 }, translation: { chunkStatuses: [] } },
+        translation: { status: "completed", chunkStatuses: [] }
+      }
+    };
+    let selectedTabId = 1;
+    let selectedTabUrl = "https://example.test/watch/1";
+    const statusRequests = [];
+    chrome.tabs.query = async () => [{
+      id: selectedTabId,
+      title: "Video " + selectedTabId,
+      url: selectedTabUrl
+    }];
+    chrome.runtime.sendMessage = async message => {
+      if (message.type === "FUGUANG_GET_STATUS") {
+        statusRequests.push(message.tabId);
+        return { ok: true, candidates: [], preload: "completed", preloadJob: { id: jobs[message.tabId].id } };
+      }
+      if (message.type === "FUGUANG_CHECK_PRELOAD_JOB") {
+        return { ok: true, job: jobs[message.tabId] };
+      }
+      return { ok: true };
+    };
+    activeTab = { id: 1, title: "Video 1", url: "https://example.test/watch/1" };
+    currentJobId = jobs[1].id;
+    currentJob = jobs[1];
+    subtitleCues = [];
+    attachedSubtitleTabId = 0;
+    statusRefreshQueued = false;
+    statusRefreshPending = false;
+    refreshStatusInFlight = false;
+    bindTabLifecycleListeners();
+
+    const waitForJob = async expectedId => {
+      for (let index = 0; index < 20 && currentJob?.id !== expectedId; index += 1) {
+        await new Promise(resolve => setTimeout(resolve, 0));
+      }
+    };
+
+    selectedTabId = 2;
+    selectedTabUrl = "https://example.test/watch/2";
+    chrome.tabs.onActivated.emit({ tabId: 2, windowId: 1 });
+    await waitForJob(jobs[2].id);
+    const afterSwitchAway = currentJob?.id;
+
+    selectedTabId = 1;
+    selectedTabUrl = "https://example.test/watch/1";
+    chrome.tabs.onActivated.emit({ tabId: 1, windowId: 1 });
+    await waitForJob(jobs[1].id);
+    const afterSwitchBack = currentJob?.id;
+
+    chrome.tabs.onUpdated.emit(2, { status: "complete" });
+    await new Promise(resolve => setTimeout(resolve, 0));
+    const requestsAfterUnrelatedUpdate = statusRequests.length;
+
+    selectedTabUrl = "https://example.test/watch/1?episode=2";
+    jobs[1] = { ...jobs[1], id: "job-tab-1-navigation" };
+    chrome.tabs.onUpdated.emit(1, { url: selectedTabUrl });
+    await waitForJob(jobs[1].id);
+    return {
+      afterSwitchAway,
+      afterSwitchBack,
+      afterCurrentTabNavigation: currentJob?.id,
+      activeTabId: activeTab?.id,
+      requestsAfterUnrelatedUpdate,
+      statusRequests
+    };
+  })()
+`, context);
+
+assert.deepEqual(JSON.parse(JSON.stringify(tabSwitchRestoreState)), {
+  afterSwitchAway: "job-tab-2",
+  afterSwitchBack: "job-tab-1",
+  afterCurrentTabNavigation: "job-tab-1-navigation",
+  activeTabId: 1,
+  requestsAfterUnrelatedUpdate: 2,
+  statusRequests: [2, 1, 1]
+});
 
 
 const subtitleAttachmentOriginState = await vm.runInContext(`

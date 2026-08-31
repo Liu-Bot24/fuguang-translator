@@ -777,6 +777,7 @@ let statusRefreshQueued = false;
 let statusRefreshPending = false;
 let statusPortReconnectTimer = 0;
 let statusPortReconnectAttempt = 0;
+let tabLifecycleListenersBound = false;
 let subtitleLoadRequestId = 0;
 let pendingSubtitleSignature = "";
 let pendingSubtitlePromise = null;
@@ -960,6 +961,7 @@ function applyLocale() {
 async function init() {
   applyLocale();
   [activeTab] = await chrome.tabs.query({ active: true, currentWindow: true });
+  bindTabLifecycleListeners();
   connectStatusPort();
   await loadSettings();
   applyLocale();
@@ -967,6 +969,25 @@ async function init() {
   await activateCurrentPage();
   await refreshStatus();
   pollTimer = window.setInterval(refreshStatus, STATUS_FALLBACK_POLL_MS);
+}
+
+function bindTabLifecycleListeners() {
+  if (tabLifecycleListenersBound) {
+    return;
+  }
+  chrome.tabs?.onActivated?.addListener?.(activeInfo => {
+    if (activeTab?.windowId && activeInfo?.windowId && Number(activeInfo.windowId) !== Number(activeTab.windowId)) {
+      return;
+    }
+    queueStatusRefresh();
+  });
+  chrome.tabs?.onUpdated?.addListener?.((tabId, changeInfo) => {
+    if (Number(tabId) !== Number(activeTab?.id) || (!changeInfo?.url && changeInfo?.status !== "complete")) {
+      return;
+    }
+    queueStatusRefresh();
+  });
+  tabLifecycleListenersBound = true;
 }
 
 function connectStatusPort() {
@@ -4488,7 +4509,6 @@ function chunkMetaText(status) {
   const sourceSegments = status.sourceSegments || status.source_segments;
   const translatedSegments = status.translatedSegments || status.translated_segments;
   const parts = [];
-  const message = String(status.message || "").trim();
   if (status.attempts) {
     parts.push(t("attemptCount", { count: status.attempts }));
   }
@@ -4511,17 +4531,30 @@ function chunkMetaText(status) {
   if (!translatedSegments && status.translatedCount) {
     parts.push(t("translatedSegments", { count: status.translatedCount }));
   }
+  const message = userFacingChunkMessage(status.message, parts);
   if (message) {
-    const duplicateMessage = parts.some(part => part === message);
-    if (!duplicateMessage) {
-      parts.push(message);
-    }
+    parts.push(message);
   }
   const waiting = runningChunkWaitText(status);
   if (waiting) {
     parts.push(waiting);
   }
   return parts.join(" · ");
+}
+
+function userFacingChunkMessage(value, existingParts = []) {
+  let message = String(value || "")
+    .replace(/\boffscreen\s*/gi, "")
+    .trim();
+  for (const part of existingParts) {
+    if (message === part) {
+      return "";
+    }
+    if (message.startsWith(`${part} · `)) {
+      message = message.slice(part.length + 3).trim();
+    }
+  }
+  return message;
 }
 
 function runningChunkWaitText(status) {

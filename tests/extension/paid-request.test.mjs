@@ -1040,6 +1040,7 @@ test("CacheStorage response adapter preserves large bodies exactly and deletes j
 
 test("translation provider injects transport and gives response-format variants distinct stable paths", async () => {
   const paths = [];
+  const timeouts = [];
   let calls = 0;
   const items = await FuguangBrowserTranslationProvider.requestBrowserTranslationItems(
     [{ start: 0, end: 1, text: "hello" }],
@@ -1055,6 +1056,7 @@ test("translation provider injects transport and gives response-format variants 
       semanticRequestPath: "translation/batch/0/attempt/0",
       requestTransport: async (_url, _init, options) => {
         paths.push(options.semanticRequestPath);
+        timeouts.push(options.timeoutMs);
         calls += 1;
         return calls === 1
           ? new Response('{"error":{"message":"response_format is not supported"}}', {
@@ -1073,6 +1075,7 @@ test("translation provider injects transport and gives response-format variants 
     "translation/batch/0/attempt/0/openai/json",
     "translation/batch/0/attempt/0/openai/plain"
   ]);
+  assert.deepEqual(timeouts, [120_000, 120_000]);
 });
 
 test("translation pipeline assigns stable initial-batch and missing-repair request paths", async () => {

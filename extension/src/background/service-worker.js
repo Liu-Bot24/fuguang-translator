@@ -1277,12 +1277,12 @@ async function runBrowserPreloadJob(jobId, expectedRecord = null) {
     record.offscreenExecution = false;
     record.job.status = "interrupted";
     record.job.stage = "interrupted";
-    record.job.error = "offscreen 识别执行器不可用，已保留抽取音频，请重试。";
+    record.job.error = "后台识别暂时不可用，已保留抽取音频，请重试。";
     record.job.updatedAt = Date.now();
     record.job.translation = {
       ...record.job.translation,
       status: "interrupted",
-      message: "等待 offscreen 识别执行器"
+      message: "等待后台识别"
     };
     publishBrowserPreloadJob(record);
     await flushBrowserJobMirror(record.job.id).catch(() => null);
@@ -1375,12 +1375,12 @@ async function runBrowserFunAsrPreloadJob(jobId, expectedRecord = null) {
   record.offscreenExecution = false;
   record.job.status = "interrupted";
   record.job.stage = "interrupted";
-  record.job.error = "Fun-ASR durable offscreen 执行器不可用，已保留抽取音频，请重试。";
+  record.job.error = "Fun-ASR 后台识别暂时不可用，已保留抽取音频，请重试。";
   record.job.updatedAt = Date.now();
   record.job.translation = {
     ...record.job.translation,
     status: "interrupted",
-    message: "等待 offscreen 识别执行器"
+    message: "等待后台识别"
   };
   publishBrowserPreloadJob(record);
   await flushBrowserJobMirror(record.job.id).catch(() => null);
@@ -4547,7 +4547,7 @@ async function recoverExpiredBrowserJobLease(jobId) {
     const interruption = await interruptRecoveredBrowserJob(
       record,
       durable,
-      "offscreen 执行器在音频抽取完成前中断。请重新抽取。"
+      "后台字幕处理在音频抽取完成前中断。请重新抽取。"
     );
     return {
       recovered: false,
@@ -4566,7 +4566,7 @@ async function recoverExpiredBrowserJobLease(jobId) {
     const interruption = await interruptRecoveredBrowserJob(
       record,
       durable,
-      "本地执行租约已失效。为避免与 offscreen 重叠处理，已中断任务；请明确重试。"
+      "后台任务执行权已失效。为避免重复处理，已中断任务；请明确重试。"
     );
     return {
       recovered: false,
@@ -4589,7 +4589,7 @@ async function recoverExpiredBrowserJobLease(jobId) {
   const interruption = await interruptRecoveredBrowserJob(
     record,
     durable,
-    "offscreen 执行器无法恢复。已保留完成分段，请明确重试。"
+    "后台字幕处理无法恢复。已保留完成分段，请明确重试。"
   );
   return {
     recovered: false,
@@ -4987,7 +4987,7 @@ async function getOffscreenBrowserJobExecutionInput(message = {}) {
       targetLanguage: record.modelConfig.targetLanguage,
       translationExecutionMode: "offscreen-durable-v1",
       error: "",
-      message: `第 ${attempt} 次尝试 · offscreen 翻译`
+      message: `第 ${attempt} 次尝试 · 翻译中`
     });
       const checkpoint = await commitOffscreenBrowserRecord(record, operation);
       if (!checkpoint.applied) {
@@ -5045,8 +5045,8 @@ async function reportOffscreenBrowserJobWorkProgress(message = {}) {
     ? String(progress.phase)
     : "batch";
   const progressMessage = batchIndex && batchTotal
-    ? `offscreen 翻译第 ${Math.min(batchIndex, batchTotal)}/${batchTotal} 批`
-    : (phase === "completed" ? "offscreen 翻译完成，正在保存" : "offscreen 翻译中");
+    ? `翻译第 ${Math.min(batchIndex, batchTotal)}/${batchTotal} 批`
+    : (phase === "completed" ? "翻译完成，正在保存" : "翻译中");
   const operation = createOffscreenBrowserOperation(record, fence, { chunkIndex: index, workType: "translation-progress" });
   try {
     updateChunkStatus(record, index, {
@@ -5123,7 +5123,7 @@ async function commitOffscreenBrowserJobWorkResult(message = {}) {
       error: previous.length
         ? `重翻译失败，已保留已有译文：${resultError}`
         : `重翻译失败，未生成译文，已保留原文供重试：${resultError}`,
-      message: "offscreen 翻译失败"
+      message: "翻译失败"
       });
     } else {
       const translatedSegments = cloneBrowserSegments(result.segments);
@@ -5241,8 +5241,8 @@ async function getOffscreenBrowserAsrExecutionInput(message, fence) {
     const group = getBrowserTranslationGroupForAudioChunk(record, chunk);
     updateChunkStatus(record, group.index, {
       stage: "asr_inflight", status: "识别", error: "",
-      attempts: Math.max(1, Number(record.job.translation?.chunkStatuses?.[group.index]?.attempts || 0) + 1),
-      message: `offscreen 识别 ${browserAsrChunkTimeRangeText(chunk)}`
+      attempts: Math.max(1, Number(record.job.translation?.chunkStatuses?.[group.index]?.attempts || 1)),
+      message: `识别 ${browserAsrChunkTimeRangeText(chunk)}`
     });
     const checkpoint = await commitOffscreenBrowserRecord(record, operation);
     if (!checkpoint.applied) return offscreenCommitFailureResponse(checkpoint);
@@ -5755,7 +5755,7 @@ async function failOffscreenBrowserJob(message = {}) {
     record.runToken,
     fence.executionOwnerId,
     fence.executionEpoch,
-    "当前 offscreen 执行已进入失败终态。"
+    "当前后台字幕处理已失败。"
   );
   const nextJob = {
     ...record.job,
@@ -6901,7 +6901,7 @@ function queueBrowserTranslationIndexesForOffscreen(record, indexes, options = {
       translatedCount: cloneBrowserSegments(record.translatedSegmentsByChunk?.get(index)).length,
       translationFailures: 0,
       error: "",
-      message: "等待 offscreen 重新翻译"
+      message: "等待重新翻译"
     });
   }
 }
@@ -6914,7 +6914,7 @@ async function startQueuedBrowserWorkInOffscreen(record, options = {}) {
     record.offscreenExecution = false;
     record.job.status = "interrupted";
     record.job.stage = "interrupted";
-    record.job.error = "offscreen 翻译执行器不可用，已保留原文和已有译文，请重试。";
+    record.job.error = "后台翻译暂时不可用，已保留原文和已有译文，请重试。";
     record.job.updatedAt = Date.now();
     publishBrowserPreloadJob(record);
     await flushBrowserJobMirror(record.job.id).catch(() => null);
@@ -8992,6 +8992,16 @@ async function sendBrowserJobVttToBoundMedia(record, message) {
     if (exactResponse?.ok || exactResponse?.state || exactResponse?.preservedManual) {
       return exactResponse;
     }
+    const authorizedRebind = await retryExactBrowserMediaLineageRebind(
+      record,
+      message,
+      exactResponse,
+      frameId,
+      documentId
+    );
+    if (authorizedRebind?.ok || authorizedRebind?.state || authorizedRebind?.preservedManual) {
+      return authorizedRebind;
+    }
   }
 
   const successor = await findTrustedBrowserMediaSuccessor(record, frameId, documentId);
@@ -9008,6 +9018,70 @@ async function sendBrowserJobVttToBoundMedia(record, message) {
     mediaBindingRejected: true,
     durableBindingRejected: true
   };
+}
+
+async function retryExactBrowserMediaLineageRebind(record, message, response, frameId, documentId) {
+  if (message?.type !== MESSAGE.ATTACH_VTT ||
+      !response?.mediaBindingRejected ||
+      message.allowMediaRebind === true) {
+    return null;
+  }
+  const currentSrc = String(response.currentSrc || "").trim();
+  const expectedLineageKey = String(record?.presentationBinding?.lineageKey || "");
+  if (!currentSrc || !expectedLineageKey) {
+    return null;
+  }
+  const selectedCandidate = record?.selectedCandidate || record?.candidate || {};
+  const pageUrl = record?.metadata?.pageUrl || record?.job?.metadata?.pageUrl || "";
+  const currentLineageKey = browserMediaLineageKey({
+    ...selectedCandidate,
+    url: currentSrc,
+    identity: currentSrc,
+    sourceUrl: currentSrc
+  }, pageUrl);
+  const currentSourceMatches = Boolean(
+    currentLineageKey && currentLineageKey === expectedLineageKey
+  );
+  const recentFrameEvidenceMatches = browserExactFrameHasUniqueRecentLineage(
+    record,
+    frameId,
+    documentId,
+    response.mediaBindingRejectedAt
+  );
+  if (!currentSourceMatches && !recentFrameEvidenceMatches) {
+    return null;
+  }
+  return sendMessageToSpecificMediaFrame(Number(record.tabId), {
+    ...message,
+    allowMediaRebind: true
+  }, frameId, documentId);
+}
+
+function browserExactFrameHasUniqueRecentLineage(record, frameId, documentId, rejectedAt) {
+  const tabId = Number(record?.tabId);
+  const expectedLineageKey = String(record?.presentationBinding?.lineageKey || "");
+  const rejectionTime = Number(rejectedAt);
+  if (!Number.isInteger(tabId) || tabId < 0 || !expectedLineageKey ||
+      !Number.isFinite(rejectionTime) || rejectionTime <= 0) {
+    return false;
+  }
+  const state = getState(tabId);
+  const pageUrl = record?.metadata?.pageUrl || record?.job?.metadata?.pageUrl || "";
+  const recentLineages = new Set();
+  for (const candidate of Array.isArray(state.candidates) ? state.candidates : []) {
+    const candidateFrameId = optionalBrowserFrameId(candidate?.frameId);
+    const candidateDocumentId = normalizeDocumentId(candidate?.documentId);
+    const seenAt = Number(candidate?.seenAt || 0);
+    if (candidateFrameId !== frameId || candidateDocumentId !== documentId ||
+        !Number.isFinite(seenAt) || seenAt < rejectionTime - 2000) {
+      continue;
+    }
+    const lineageKey = browserMediaLineageKey(candidate, pageUrl);
+    if (lineageKey) {
+      recentLineages.add(lineageKey);
+    }
+  }
+  return recentLineages.size === 1 && recentLineages.has(expectedLineageKey);
 }
 
 async function findTrustedBrowserMediaSuccessor(record, originalFrameId, originalDocumentId) {

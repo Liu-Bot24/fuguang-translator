@@ -235,13 +235,15 @@ Object.assign(context, context.FuguangBrowserFunAsrProvider);
 
 {
   const calls = [];
+  let transportTimeoutMs = null;
   const outcome = await context.cancelDashScopeFunAsrTask(
     "task-pending",
     { baseUrl: "https://dashscope.example/api/v1", apiKey: "cancel-secret" },
     {
       timeoutMs: 50,
-      requestTransport: async (url, options = {}) => {
+      requestTransport: async (url, options = {}, requestOptions = {}) => {
         calls.push({ url: String(url), options });
+        transportTimeoutMs = requestOptions.timeoutMs;
         return new Response(JSON.stringify({ output: { task_status: "CANCELED" } }), {
           status: 200, headers: { "content-type": "application/json" }
         });
@@ -253,6 +255,8 @@ Object.assign(context, context.FuguangBrowserFunAsrProvider);
   assert.equal(calls[0].options.method, "POST");
   assert.equal(calls[0].options.headers.Authorization, "Bearer cancel-secret");
   assert.ok(calls[0].options.signal instanceof AbortSignal);
+  assert.ok(transportTimeoutMs > 0 && transportTimeoutMs <= 50,
+    `FunASR durable transport must inherit the provider deadline, actual ${transportTimeoutMs}`);
   assert.deepEqual(JSON.parse(JSON.stringify(outcome)), {
     status: "confirmed", confirmed: true, taskId: "task-pending", httpStatus: 200,
     remoteTaskStatus: "CANCELED", message: ""

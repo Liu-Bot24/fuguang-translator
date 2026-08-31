@@ -1063,6 +1063,8 @@ async function requestBrowserAsrTranscription({ endpoint, timeoutMs, asrConfig, 
       body: formData,
       signal: controller.signal
     }, {
+      signal: controller.signal,
+      timeoutMs,
       semanticRequestPath,
       operationType: "asr",
       bodyIdentity: {
@@ -1778,7 +1780,8 @@ async function detectBrowserAsrSpeechIntervals(chunk, asrConfig, fileBuffer, fil
   }
   const controller = new AbortController();
   const unlink = linkBrowserAbortSignal(options.signal, controller);
-  const timer = setTimeout(() => controller.abort(), 30_000);
+  const timeoutMs = 30_000;
+  const timer = setTimeout(() => controller.abort(), timeoutMs);
   try {
     const formData = new FormData();
     formData.append("file", new Blob([fileBuffer], { type: chunk.file?.mime || "audio/mpeg" }), fileName);
@@ -1796,6 +1799,8 @@ async function detectBrowserAsrSpeechIntervals(chunk, asrConfig, fileBuffer, fil
       body: formData,
       signal: controller.signal
     }, {
+      signal: controller.signal,
+      timeoutMs,
       semanticRequestPath: String(options.semanticRequestPath || "asr/vad/precheck"),
       operationType: "asr-vad",
       bodyIdentity: {

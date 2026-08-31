@@ -126,7 +126,12 @@
         message.label || "流声字幕",
         message.signature || "",
         preloadGeneration,
-        { origin, jobId, attachmentRevision }
+        {
+          origin,
+          jobId,
+          attachmentRevision,
+          allowMediaRebind: message.allowMediaRebind === true
+        }
       );
       sendResponse(attachVttResponse(attachResult));
       return false;
@@ -806,6 +811,8 @@
       mediaBindingExpected: mediaHandoff.mediaBindingExpected,
       expiredMediaBinding: mediaHandoff.expiredMediaBinding,
       mediaBindingRejected: false,
+      mediaBindingRejectedAt: 0,
+      mediaRebindAuthorized: false,
       nativeTrack: null,
       nativeTrackMedia: null,
       nativeCues: []
@@ -867,9 +874,16 @@
   }
 
   function attachVttMediaBindingResult(controller) {
-    return controller?.mediaBindingRejected
-      ? { ok: false, mediaBindingRejected: true }
-      : false;
+    if (!controller?.mediaBindingRejected) {
+      return false;
+    }
+    const media = findPrimaryVideo();
+    return {
+      ok: false,
+      mediaBindingRejected: true,
+      currentSrc: String(media?.currentSrc || media?.src || ""),
+      mediaBindingRejectedAt: Number(controller.mediaBindingRejectedAt || Date.now())
+    };
   }
 
   function controllerMediaHandoff(controller, incomingOrigin, incomingJobId) {
@@ -977,6 +991,7 @@
     controller.origin = normalizeSubtitleAttachmentOrigin(metadata.origin, preloadGeneration);
     controller.jobId = String(metadata.jobId || "");
     controller.attachmentRevision = normalizeSubtitleAttachmentRevision(metadata.attachmentRevision);
+    controller.mediaRebindAuthorized = metadata.allowMediaRebind === true;
   }
 
   function findCueAt(cues, time) {
@@ -1032,28 +1047,39 @@
     const nextSourceObject = mediaElementSourceObject(next);
     const exactPreferredMedia = next === controller.preferredMedia;
     if (controller.expiredMediaBinding) {
-      const compatibility = exactPreferredMedia
-        ? true
-        : compareMediaBindings(controller, nextSignature, nextSourceObject);
+      const compatibility = compareMediaBindings(controller, nextSignature, nextSourceObject);
       if (compatibility !== true) {
-        rejectControllerMediaBinding(controller);
-        return null;
+        if (!controllerMediaRebindAuthorized(controller)) {
+          rejectControllerMediaBinding(controller);
+          return null;
+        }
       }
       controller.expiredMediaBinding = false;
       controller.mediaBindingRejected = false;
+      controller.mediaBindingRejectedAt = 0;
       controller.mediaUnavailableSince = null;
     }
     if (controllerMediaReplacementGraceExpired(controller)) {
-      const compatibility = exactPreferredMedia
-        ? true
-        : compareMediaBindings(controller, nextSignature, nextSourceObject);
+      const compatibility = compareMediaBindings(controller, nextSignature, nextSourceObject);
       if (compatibility !== true) {
-        expireControllerMediaBinding(controller);
-        return null;
+        if (!controllerMediaRebindAuthorized(controller)) {
+          expireControllerMediaBinding(controller);
+          return null;
+        }
       }
       controller.mediaUnavailableSince = null;
     }
     if (next === controller.media) {
+      const compatibility = compareMediaBindings(controller, nextSignature, nextSourceObject);
+      if (
+        subtitleAttachmentIsJobOwned(controller.origin) &&
+        controller.mediaBindingExpected &&
+        compatibility === false &&
+        !controllerMediaRebindAuthorized(controller)
+      ) {
+        expireControllerMediaBinding(controller);
+        return null;
+      }
       if (nextSignature || nextSourceObject) {
         controller.mediaSignature = nextSignature;
         controller.mediaSourceObject = nextSourceObject;
@@ -1061,17 +1087,23 @@
       controller.mediaUnavailableSince = null;
       controller.mediaBindingExpected = true;
       controller.mediaBindingRejected = false;
+      controller.mediaBindingRejectedAt = 0;
+      controller.mediaRebindAuthorized = false;
       return controller.media;
     }
     if (controller.mediaBindingExpected && !exactPreferredMedia) {
       const compatibility = compareMediaBindings(controller, nextSignature, nextSourceObject);
       if (compatibility === false) {
-        expireControllerMediaBinding(controller);
-        return null;
+        if (!controllerMediaRebindAuthorized(controller)) {
+          expireControllerMediaBinding(controller);
+          return null;
+        }
       }
       if (compatibility == null) {
-        noteControllerMediaUnavailable(controller);
-        return null;
+        if (!controllerMediaRebindAuthorized(controller)) {
+          noteControllerMediaUnavailable(controller);
+          return null;
+        }
       }
     }
     if (controller.media) {
@@ -1084,6 +1116,8 @@
     controller.mediaUnavailableSince = null;
     controller.mediaBindingExpected = true;
     controller.mediaBindingRejected = false;
+    controller.mediaBindingRejectedAt = 0;
+    controller.mediaRebindAuthorized = false;
     clearExpiredJobMediaBinding(controller);
     controller.events.forEach(event => next.addEventListener(event, controller.updateCaption));
     return next;
@@ -1116,11 +1150,22 @@
     return null;
   }
 
+  function controllerMediaRebindAuthorized(controller) {
+    return Boolean(
+      controller?.mediaRebindAuthorized &&
+      subtitleAttachmentIsJobOwned(controller.origin) &&
+      controller.jobId
+    );
+  }
+
   function expireControllerMediaBinding(controller) {
     if (activeVttController !== controller) {
       return;
     }
     controller.mediaBindingRejected = true;
+    if (!controller.mediaBindingRejectedAt) {
+      controller.mediaBindingRejectedAt = Date.now();
+    }
     controller.expiredMediaBinding = true;
     rememberExpiredJobMediaBinding(controller);
     disableNativeSubtitleTrack(controller);
