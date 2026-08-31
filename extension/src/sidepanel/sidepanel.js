@@ -23,6 +23,7 @@ const MESSAGE = {
 };
 const SIDEPANEL_STATUS_PORT_NAME = "fuguang-sidepanel-status-v1";
 const STATUS_FALLBACK_POLL_MS = 15_000;
+const STATUS_PORT_RECONNECT_DELAYS_MS = [250, 500, 1000, 2000, 5000];
 
 const DEFAULTS = {
   sourceLanguage: "auto",
@@ -167,6 +168,7 @@ const I18N = {
     statusFailed: "任务失败",
     statusInterrupted: "任务已中断，可继续处理",
     statusCancelled: "任务已停止",
+    statusRemoteCancellationPending: "本地已停止，远端取消待确认",
     statusRunning: "处理中",
     jobExtractingTranslating: "正在边抽边译",
     jobAsrTranslation: "正在生成字幕",
@@ -230,7 +232,7 @@ const I18N = {
     reuseSourceMessage: "正在继续翻译...",
     reuseAudioMessage: "正在继续识别...",
     continueTaskMessage: "正在继续处理任务...",
-    rerunAsrMessage: "正在重新识别音频，会复用音频缓存并清除旧 ASR 原文和旧译文。",
+    rerunAsrMessage: "正在复用音频缓存重新识别；新字幕成功保存前会继续显示现有字幕。",
     retranslateOnlyMessage: "正在重新翻译字幕，不会重新识别音频...",
     retranslateCacheMessage: "正在使用本地缓存原文重新翻译，不会重新识别音频...",
     retryChunkMessage: "正在重试第 {index} 个失败分段...",
@@ -242,6 +244,7 @@ const I18N = {
     retranslateChunkSubmitted: "已提交第 {index} 个分段重翻译。",
     stoppingTask: "正在停止任务...",
     stoppedTask: "任务已停止。",
+    remoteCancellationPending: "本地处理已停止；远端 FunASR 任务取消正在确认。",
     noAudioCacheTask: "没有可清理音频缓存的任务。",
     runningNoClearAudio: "任务仍在运行中，请先停止或等待结束。",
     clearingAudio: "正在清除当前任务的音频缓存...",
@@ -288,7 +291,7 @@ const I18N = {
     restartTitle: "从选中的媒体源重新抽取音频并创建新任务。",
     retryNeedsExtractTitle: "音频缓存已清除，需要重新抽取全部。",
     continueTaskTitle: "从当前卡住的位置继续，不改变抽取、ASR、翻译的边界。",
-    rerunAsrTitle: "复用已抽取音频重新识别；会清除旧 ASR 原文和旧译文。",
+    rerunAsrTitle: "复用已抽取音频重新识别；新结果成功保存前会继续显示现有字幕。",
     rerunAsrNeedsAudioTitle: "没有可复用音频缓存，请重新抽取。",
     continueTranslateTitle: "继续翻译已有原文，不重新识别音频。",
     continueAsrTitle: "继续识别已抽取的音频，不重新下载媒体。",
@@ -455,6 +458,7 @@ const I18N = {
     statusFailed: "Task failed",
     statusInterrupted: "Task interrupted; progress can be resumed",
     statusCancelled: "Stopped",
+    statusRemoteCancellationPending: "Stopped locally; remote cancellation pending",
     statusRunning: "Processing",
     jobExtractingTranslating: "Extracting and translating",
     jobAsrTranslation: "Generating subtitles",
@@ -518,7 +522,7 @@ const I18N = {
     reuseSourceMessage: "Continuing translation...",
     reuseAudioMessage: "Continuing ASR...",
     continueTaskMessage: "Continuing the task...",
-    rerunAsrMessage: "Rerunning ASR from cached audio and clearing the old ASR text and translation.",
+    rerunAsrMessage: "Rerunning ASR from cached audio; existing subtitles stay visible until new results are saved.",
     retranslateOnlyMessage: "Retranslating subtitles without running ASR again...",
     retranslateCacheMessage: "Retranslating from cached source without running ASR again...",
     retryChunkMessage: "Retrying failed segment #{index}...",
@@ -530,6 +534,7 @@ const I18N = {
     retranslateChunkSubmitted: "Segment #{index} retranslation submitted.",
     stoppingTask: "Stopping task...",
     stoppedTask: "Task stopped.",
+    remoteCancellationPending: "Local processing stopped; remote FunASR cancellation is pending.",
     noAudioCacheTask: "No task has audio cache to clear.",
     runningNoClearAudio: "The task is still running. Stop it or wait for it to finish.",
     clearingAudio: "Clearing audio cache for this task...",
@@ -576,7 +581,7 @@ const I18N = {
     restartTitle: "Extract audio again from the selected source and create a new task.",
     retryNeedsExtractTitle: "Audio cache was cleared. Start a full extraction again.",
     continueTaskTitle: "Continue from the step where the task stopped without changing extraction, ASR, or translation boundaries.",
-    rerunAsrTitle: "Run ASR again from extracted audio; old ASR text and translations will be cleared.",
+    rerunAsrTitle: "Run ASR again from extracted audio; existing subtitles stay visible until new results are saved.",
     rerunAsrNeedsAudioTitle: "No reusable audio cache is available. Extract again first.",
     continueTranslateTitle: "Continue translating existing source text without running ASR again.",
     continueAsrTitle: "Continue ASR from extracted audio without downloading media again.",
@@ -769,6 +774,9 @@ let subtitleFollowBusy = false;
 let refreshStatusInFlight = false;
 let statusPort = null;
 let statusRefreshQueued = false;
+let statusRefreshPending = false;
+let statusPortReconnectTimer = 0;
+let statusPortReconnectAttempt = 0;
 let subtitleLoadRequestId = 0;
 let pendingSubtitleSignature = "";
 let pendingSubtitlePromise = null;
@@ -969,6 +977,7 @@ function connectStatusPort() {
   try {
     const port = chrome.runtime.connect({ name: SIDEPANEL_STATUS_PORT_NAME });
     statusPort = port;
+    clearStatusPortReconnect();
     port.onMessage?.addListener?.(message => {
       if (message?.type !== MESSAGE.SIDEPANEL_JOB_CHANGED || Number(message.tabId) !== Number(activeTab?.id)) {
         return;
@@ -978,11 +987,14 @@ function connectStatusPort() {
     port.onDisconnect?.addListener?.(() => {
       if (statusPort === port) {
         statusPort = null;
+        queueStatusRefresh();
+        scheduleStatusPortReconnect();
       }
     });
     subscribeStatusPort();
   } catch {
     statusPort = null;
+    scheduleStatusPortReconnect();
   }
   return statusPort;
 }
@@ -995,10 +1007,42 @@ function subscribeStatusPort() {
     statusPort.postMessage({ type: MESSAGE.SIDEPANEL_SUBSCRIBE, tabId: activeTab.id });
   } catch {
     statusPort = null;
+    queueStatusRefresh();
+    scheduleStatusPortReconnect();
   }
 }
 
+function scheduleStatusPortReconnect() {
+  if (statusPort || statusPortReconnectTimer || typeof chrome.runtime?.connect !== "function") {
+    return;
+  }
+  const delay = STATUS_PORT_RECONNECT_DELAYS_MS[Math.min(
+    statusPortReconnectAttempt,
+    STATUS_PORT_RECONNECT_DELAYS_MS.length - 1
+  )];
+  statusPortReconnectAttempt += 1;
+  statusPortReconnectTimer = window.setTimeout(() => {
+    statusPortReconnectTimer = 0;
+    connectStatusPort();
+    if (!statusPort) {
+      scheduleStatusPortReconnect();
+    }
+  }, delay);
+}
+
+function clearStatusPortReconnect() {
+  if (statusPortReconnectTimer) {
+    window.clearTimeout(statusPortReconnectTimer);
+    statusPortReconnectTimer = 0;
+  }
+  statusPortReconnectAttempt = 0;
+}
+
 function queueStatusRefresh() {
+  if (refreshStatusInFlight) {
+    statusRefreshPending = true;
+    return;
+  }
   if (statusRefreshQueued) {
     return;
   }
@@ -1659,6 +1703,10 @@ async function refreshStatus() {
   await tryLoadCachedSubtitleForCurrentPage();
   } finally {
     refreshStatusInFlight = false;
+    if (statusRefreshPending) {
+      statusRefreshPending = false;
+      queueStatusRefresh();
+    }
   }
 }
 
@@ -1883,9 +1931,6 @@ async function rerunAsrFromSidePanel(chunkIndexes = []) {
   asrRetryRequestInFlight = true;
   updateActionButtons(currentJob);
   setMessage(t("rerunAsrMessage"));
-  if (!chunkIndexes.length) {
-    clearSubtitles(t("waitingNewSubtitles"), currentJobId);
-  }
   try {
     const response = await send({
       type: MESSAGE.RERUN_ASR_PRELOAD,
@@ -1927,9 +1972,6 @@ async function retryTranslationFromSidePanel(chunkIndexes = []) {
   translationRetryRequestInFlight = true;
   updateActionButtons(currentJob);
   setMessage(t("retranslateOnlyMessage"));
-  if (!chunkIndexes.length) {
-    clearSubtitles(t("waitingNewSubtitles"), currentJobId);
-  }
   try {
     const response = await send({
       type: MESSAGE.RETRANSLATE_PRELOAD,
@@ -2090,7 +2132,9 @@ async function cancelPreloadFromSidePanel() {
     setMessage(response.error);
     return;
   }
-  setMessage(t("stoppedTask"));
+  setMessage(response.job?.remoteCancellationStatus === "pending"
+    ? (response.job.error || t("remoteCancellationPending"))
+    : t("stoppedTask"));
   renderJob(response.job);
 }
 
@@ -2139,7 +2183,8 @@ function renderJob(job) {
     }
     currentJobId = job.id;
   }
-  if (job?.id && renderedSubtitleJobId && renderedSubtitleJobId !== job.id) {
+  if (job?.id && renderedSubtitleJobId && renderedSubtitleJobId !== job.id &&
+      !shouldPreserveVisibleSubtitlesForTranslationReplacement(job)) {
     clearSubtitles(t("waitingNewSubtitles"), job.id);
   }
   const progress = job.progress || {};
@@ -2194,6 +2239,11 @@ function renderJob(job) {
     children.splice(1, 0, error);
   }
   elements.jobStatus.append(...children);
+}
+
+function shouldPreserveVisibleSubtitlesForTranslationReplacement(job) {
+  return ["queued", "running"].includes(String(job?.status || ""))
+    && String(job?.stage || "") === "retry_translation";
 }
 
 function renderEmptyJob(text) {
@@ -4315,6 +4365,9 @@ function showTab(tab) {
 function statusLabel(status) {
   const preloadStatus = status?.preloadJob?.status || status?.preload;
   const preloadStage = status?.preloadJob?.stage;
+  if (status?.preloadJob?.remoteCancellationStatus === "pending") {
+    return t("statusRemoteCancellationPending");
+  }
   if (preloadStage === "completed_with_warnings") {
     return t("statusCompletedWarnings");
   }
@@ -4358,6 +4411,9 @@ function formatSource(source) {
 }
 
 function jobTitle(job) {
+  if (job.remoteCancellationStatus === "pending") {
+    return t("statusRemoteCancellationPending");
+  }
   if (job.stage === "completed_with_warnings") {
     return t("statusCompletedWarnings");
   }
@@ -4635,6 +4691,9 @@ function countReusableAudioChunks(job) {
   const direct = Number(job?.reusableAudioChunks || job?.translation?.reusableAudioChunks || job?.progress?.translation?.reusableAudioChunks || 0);
   if (direct > 0) {
     return direct;
+  }
+  if (job?.audioCacheVerified) {
+    return 0;
   }
   const total = Number(job?.translation?.chunksTotal || job?.progress?.translation?.chunksTotal || job?.progress?.chunksTotal || 0);
   const extractDone = job?.extract?.status === "completed" || job?.progress?.extraction?.status === "completed";

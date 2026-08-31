@@ -49,6 +49,8 @@ assert.deepEqual(backgroundHandled, new Set([
   "PAGE_CONTEXT_FOUND",
   "OFFSCREEN_WEB_FFMPEG_PROGRESS",
   "OFFSCREEN_WEB_FFMPEG_CHUNK_READY",
+  "OFFSCREEN_WEB_FFMPEG_COMPLETED",
+  "OFFSCREEN_WEB_FFMPEG_FAILED",
   "UPDATE_MEDIA_HEADER_RULE_DOMAINS"
 ]));
 
@@ -59,13 +61,23 @@ assert.ok(files.sidepanel.includes("MESSAGE.SIDEPANEL_JOB_CHANGED"));
 assert.ok(files.background.includes("MESSAGE.SIDEPANEL_SUBSCRIBE"));
 
 const offscreenHandled = messageKeysForPattern(files.offscreen, /message\?\.type === MESSAGE\.([A-Z0-9_]+)/g);
-assert.deepEqual(offscreenHandled, new Set(["OFFSCREEN_WEB_FFMPEG_EXTRACT_AUDIO", "OFFSCREEN_WEB_FFMPEG_COLLECT_SPEECH_AUDIO", "OFFSCREEN_CANCEL_JOB"]));
+assert.deepEqual(offscreenHandled, new Set([
+  "OFFSCREEN_WEB_FFMPEG_EXTRACT_AUDIO",
+  "OFFSCREEN_WEB_FFMPEG_COLLECT_SPEECH_AUDIO",
+  "OFFSCREEN_CANCEL_JOB",
+  "OFFSCREEN_GET_ACTIVE_MEDIA_HEADER_LEASES"
+]));
 
 const offscreenSent = messageKeysForPattern(files.offscreen, /type:\s*MESSAGE\.([A-Z0-9_]+)/g);
 assert.equal(hasSetDifference(offscreenSent, backgroundHandled), false);
 
 const backgroundRuntimeSent = messageKeysForPattern(files.background, /chrome\.runtime\.sendMessage\(\{\s*type:\s*MESSAGE\.([A-Z0-9_]+)/g);
-assert.deepEqual(backgroundRuntimeSent, new Set(["OFFSCREEN_WEB_FFMPEG_EXTRACT_AUDIO", "OFFSCREEN_WEB_FFMPEG_COLLECT_SPEECH_AUDIO", "OFFSCREEN_CANCEL_JOB"]));
+assert.deepEqual(backgroundRuntimeSent, new Set([
+  "OFFSCREEN_WEB_FFMPEG_EXTRACT_AUDIO",
+  "OFFSCREEN_WEB_FFMPEG_COLLECT_SPEECH_AUDIO",
+  "OFFSCREEN_CANCEL_JOB",
+  "OFFSCREEN_GET_ACTIVE_MEDIA_HEADER_LEASES"
+]));
 assert.equal(hasSetDifference(backgroundRuntimeSent, offscreenHandled), false);
 
 const overlayHandled = messageKeysForPattern(files.overlay, /message\?\.type === MESSAGE\.([A-Z0-9_]+)/g);

@@ -23,8 +23,17 @@
       requestWebFfmpeg,
       persistWebFfmpegAudioResult,
       offsetSpeechIntervals,
-      createRemoteMediaMediabunnyInput
+      throwIfOffscreenJobAborted: injectedThrowIfOffscreenJobAborted
     } = deps;
+
+    const throwIfLocalMediaJobAborted = typeof injectedThrowIfOffscreenJobAborted === "function"
+      ? injectedThrowIfOffscreenJobAborted
+      : signal => {
+          if (!signal?.aborted) {
+            return;
+          }
+          throw signal.reason instanceof Error ? signal.reason : new Error("任务已停止。");
+        };
 
     function localMediaOverride(name, fallback) {
       const override = globalThis.FuguangLocalMediaExtractorOverrides?.[name];
@@ -32,10 +41,7 @@
     }
 
     function shouldUseLocalMediaChunkedExtraction(message) {
-      const sourceUrl = String(message?.sourceUrl || "");
-      const supportedSource = isLocalFileMediaSourceUrl(sourceUrl) ||
-        (message?.remoteRangeExtraction === true && /^https?:\/\//i.test(sourceUrl));
-      return supportedSource &&
+      return isLocalFileMediaSourceUrl(message?.sourceUrl || "") &&
         !isHlsSource(message) &&
         !isDashSource(message) &&
         !isMseFragmentSource(message);
@@ -43,8 +49,8 @@
 
     async function extractLocalMediaAudioWithWebFfmpeg(message) {
       const sourceUrl = String(message.sourceUrl || "");
-      if (!isLocalFileMediaSourceUrl(sourceUrl) && message.remoteRangeExtraction !== true) {
-        throw new Error("媒体分片抽取只支持已授权的本地文件或启用 Range 的直连媒体。");
+      if (!isLocalFileMediaSourceUrl(sourceUrl)) {
+        throw new Error("本地媒体分片抽取只支持 file:// 来源。");
       }
       const mediabunny = await loadMediabunny();
       const inputInfo = await createLocalMediaMediabunnyInput(sourceUrl, mediabunny, message);
@@ -115,12 +121,6 @@
       const stored = await createStoredLocalMediaMediabunnyInput(message, mediabunny);
       if (stored) {
         return stored;
-      }
-      if (message.remoteRangeExtraction === true && /^https?:\/\//i.test(sourceUrl)) {
-        if (typeof createRemoteMediaMediabunnyInput !== "function") {
-          throw new Error("直连媒体 Range 读取模块不可用。");
-        }
-        return createRemoteMediaMediabunnyInput(sourceUrl, mediabunny, message);
       }
       const size = await getLocalMediaSourceSize(sourceUrl).catch(error => {
         if (isLocalMediaSizeUnavailableError(error)) {
@@ -202,9 +202,6 @@
       }
       if (inputInfo.sourceMode === "blob") {
         return "正在读取已授权本地媒体音轨";
-      }
-      if (inputInfo.sourceMode === "url-range") {
-        return "正在通过 Range 读取直连媒体音轨";
       }
       return "正在解析本地媒体音轨";
     }
@@ -489,11 +486,6 @@
         }
         await addPacketToLocalMediaMuxSession(session, packet, decoderConfig);
       }
-      if (!session.packetCount) {
-        session.source.close();
-        await session.output.cancel?.().catch?.(() => {});
-        return null;
-      }
       return finalizeLocalMediaMuxSession(session);
     }
 
@@ -501,6 +493,7 @@
       const chunks = [];
       const recyclePolicy = createHlsWebFfmpegRecyclePolicy(message.webFfmpegPerformance);
       for (let index = 0; index < specs.length; index += 1) {
+        throwIfLocalMediaJobAborted(message.abortSignal);
         const spec = specs[index];
         if (message.webFfmpegUrl && recyclePolicy.shouldRecycleBefore(index)) {
           reportWebFfmpegExtractionProgress(message, {
@@ -511,7 +504,9 @@
             readySeconds: Math.round(spec.coreStart),
             message: `正在重置 Web FFmpeg 工作区，准备处理本地音频分片 ${index + 1}/${specs.length}`
           });
-          await reloadWebFfmpegFrame(message.webFfmpegUrl);
+          throwIfLocalMediaJobAborted(message.abortSignal);
+          await reloadWebFfmpegFrame(message.webFfmpegUrl, message.abortSignal);
+          throwIfLocalMediaJobAborted(message.abortSignal);
           recyclePolicy.noteRecycle(index);
         }
         const encoded = await localMediaOverride("muxLocalMediaAudioWindow", muxLocalMediaAudioWindow)(
@@ -522,9 +517,6 @@
           outputSpec,
           spec
         );
-        if (!encoded) {
-          continue;
-        }
         const chunk = await extractLocalMediaAudioWindowWithWebFfmpegWithRetry(
           message,
           recyclePolicy,
@@ -547,6 +539,7 @@
 
       async function openSpecsForPacket(packetEnd) {
         while (nextSpecIndex < specs.length && packetEnd > specs[nextSpecIndex].start + 0.0001) {
+          throwIfLocalMediaJobAborted(message.abortSignal);
           active.push(await createLocalMediaMuxSession(mediabunny, codec, outputSpec, specs[nextSpecIndex]));
           nextSpecIndex += 1;
         }
@@ -554,6 +547,7 @@
 
       async function finalizeReady(packetStart) {
         for (let index = 0; index < active.length;) {
+          throwIfLocalMediaJobAborted(message.abortSignal);
           const session = active[index];
           if (packetStart < session.spec.end - 0.0001) {
             index += 1;
@@ -568,6 +562,7 @@
       }
 
       for await (const packet of sink.packets()) {
+        throwIfLocalMediaJobAborted(message.abortSignal);
         if (packet.isMetadataOnly) {
           continue;
         }
@@ -585,6 +580,7 @@
       }
       await openSpecsForPacket(Number.POSITIVE_INFINITY);
       for (const session of active.splice(0)) {
+        throwIfLocalMediaJobAborted(message.abortSignal);
         const chunk = await finalizeAndExtractLocalMediaMuxSession(message, session, specs.length);
         if (chunk) {
           chunks.push(chunk);
@@ -658,9 +654,11 @@
     }
 
     async function extractLocalMediaAudioWindowWithWebFfmpegWithRetry(message, recyclePolicy, encoded, spec, index, groupCount) {
+      throwIfLocalMediaJobAborted(message.abortSignal);
       try {
         return await extractLocalMediaAudioWindowWithWebFfmpeg(message, encoded, spec, index, groupCount);
       } catch (error) {
+        throwIfLocalMediaJobAborted(message.abortSignal);
         if (!message.webFfmpegUrl) {
           throw error;
         }
@@ -674,10 +672,13 @@
           message: `本地音频分片 ${index + 1}/${groupCount} 转码异常，正在重置 Web FFmpeg 后重试`
         });
         try {
-          await reloadWebFfmpegFrame(message.webFfmpegUrl);
+          throwIfLocalMediaJobAborted(message.abortSignal);
+          await reloadWebFfmpegFrame(message.webFfmpegUrl, message.abortSignal);
+          throwIfLocalMediaJobAborted(message.abortSignal);
           recyclePolicy?.noteRecycle?.(index);
           return await extractLocalMediaAudioWindowWithWebFfmpeg(message, encoded, spec, index, groupCount);
         } catch (retryError) {
+          throwIfLocalMediaJobAborted(message.abortSignal);
           throw new Error(`${retryError.message || retryError}（已重置 Web FFmpeg 后重试本地音频分片 ${index + 1}/${groupCount}，仍然失败；原错误：${error.message || error}）`);
         }
       }
@@ -706,6 +707,7 @@
     }
 
     async function extractLocalMediaAudioWindowWithWebFfmpeg(message, encoded, spec, index, groupCount) {
+      throwIfLocalMediaJobAborted(message.abortSignal);
       const requestBuffer = cloneArrayBuffer(encoded.buffer);
       const result = await requestWebFfmpeg({
         app: WEB_FFMPEG_APP,
@@ -737,6 +739,7 @@
         runToken: String(message?.runToken || ""),
         signal: message?.abortSignal
       });
+      throwIfLocalMediaJobAborted(message.abortSignal);
       const persisted = await persistWebFfmpegAudioResult(result, `${message.cacheNamespace || "local-media"}-${index}`);
       const file = persisted.file || persisted.chunks?.[0]?.file;
       if (!file) {

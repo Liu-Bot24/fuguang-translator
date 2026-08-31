@@ -4,6 +4,9 @@ const MESSAGE = {
   OFFSCREEN_CANCEL_JOB: "FUGUANG_OFFSCREEN_CANCEL_JOB",
   OFFSCREEN_WEB_FFMPEG_PROGRESS: "FUGUANG_OFFSCREEN_WEB_FFMPEG_PROGRESS",
   OFFSCREEN_WEB_FFMPEG_CHUNK_READY: "FUGUANG_OFFSCREEN_WEB_FFMPEG_CHUNK_READY",
+  OFFSCREEN_WEB_FFMPEG_COMPLETED: "FUGUANG_OFFSCREEN_WEB_FFMPEG_COMPLETED",
+  OFFSCREEN_WEB_FFMPEG_FAILED: "FUGUANG_OFFSCREEN_WEB_FFMPEG_FAILED",
+  OFFSCREEN_GET_ACTIVE_MEDIA_HEADER_LEASES: "FUGUANG_OFFSCREEN_GET_ACTIVE_MEDIA_HEADER_LEASES",
   UPDATE_MEDIA_HEADER_RULE_DOMAINS: "FUGUANG_UPDATE_MEDIA_HEADER_RULE_DOMAINS"
 };
 
@@ -42,6 +45,7 @@ let dashManifestParserPromise = null;
 let hlsUrlHelpersPromise = null;
 let mediabunnyPromise = null;
 const offscreenJobAbortControllers = new Map();
+const offscreenActiveMediaHeaderLeases = new Map();
 
 async function loadDashManifestParser() {
   if (globalThis.FuguangDashManifestParser) {
@@ -112,9 +116,25 @@ function createHlsWebFfmpegRecyclePolicy(mode) {
 
 chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
   if (message?.type === MESSAGE.OFFSCREEN_WEB_FFMPEG_EXTRACT_AUDIO) {
-    runOffscreenJobOperation(message, extractAudioWithWebFfmpeg)
+    runOffscreenJobOperation(message, async operationMessage => {
+      let result;
+      try {
+        result = await extractAudioWithWebFfmpeg(operationMessage);
+      } catch (error) {
+        await deliverWebFfmpegExtractionTerminal(operationMessage, {
+          type: MESSAGE.OFFSCREEN_WEB_FFMPEG_FAILED,
+          error: error?.message || String(error)
+        }).catch(() => {});
+        throw error;
+      }
+      await deliverWebFfmpegExtractionTerminal(operationMessage, {
+          type: MESSAGE.OFFSCREEN_WEB_FFMPEG_COMPLETED,
+          result
+      });
+      return result;
+    })
       .then(result => sendResponse({ ok: true, result }))
-      .catch(error => sendResponse({ ok: false, error: error.message }));
+      .catch(error => sendResponse({ ok: false, error: error?.message || String(error) }));
     return true;
   }
   if (message?.type === MESSAGE.OFFSCREEN_WEB_FFMPEG_COLLECT_SPEECH_AUDIO) {
@@ -127,14 +147,48 @@ chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
     sendResponse(cancelOffscreenJob(message.jobId, message.runToken));
     return false;
   }
+  if (message?.type === MESSAGE.OFFSCREEN_GET_ACTIVE_MEDIA_HEADER_LEASES) {
+    sendResponse({ ok: true, leases: activeMediaHeaderLeases() });
+    return false;
+  }
   return false;
 });
+
+async function deliverWebFfmpegExtractionTerminal(message, terminal = {}) {
+  const startedAt = Date.now();
+  let lastError = null;
+  let attempt = 0;
+  while (Date.now() - startedAt < 5 * 60_000) {
+    throwIfOffscreenJobAborted(message?.abortSignal);
+    try {
+      const response = await chrome.runtime.sendMessage({
+        type: terminal.type,
+        tabId: message.tabId,
+        jobId: message.jobId || "",
+        runToken: message.runToken || "",
+        mediaHeaderLease: message.mediaHeaderLease || null,
+        result: terminal.result,
+        error: terminal.error || ""
+      });
+      if (response?.ok && (response.accepted || response.duplicate || response.stale || response.cancelled || response.failed)) {
+        return response;
+      }
+      lastError = new Error(response?.error || "Service Worker 尚未确认音频抽取终态。");
+    } catch (error) {
+      lastError = error;
+    }
+    attempt += 1;
+    await abortableOffscreenDelay(Math.min(5000, 250 * (2 ** Math.min(attempt, 5))), message?.abortSignal);
+  }
+  throw lastError || new Error("音频抽取终态未能交付给 Service Worker。");
+}
 
 async function runOffscreenJobOperation(message, operation) {
   const controller = new AbortController();
   const jobId = String(message?.jobId || "");
   const runToken = String(message?.runToken || "");
   const operationKey = offscreenJobOperationKey(jobId, runToken);
+  const trackedLeaseToken = retainActiveMediaHeaderLease(message?.mediaHeaderLease);
   if (operationKey) {
     if (!offscreenJobAbortControllers.has(operationKey)) {
       offscreenJobAbortControllers.set(operationKey, new Set());
@@ -149,7 +203,40 @@ async function runOffscreenJobOperation(message, operation) {
     if (controllers && !controllers.size) {
       offscreenJobAbortControllers.delete(operationKey);
     }
+    releaseActiveMediaHeaderLease(trackedLeaseToken);
   }
+}
+
+function retainActiveMediaHeaderLease(value) {
+  const leaseToken = String(value?.leaseToken || value?.ownerToken || "");
+  const ruleId = Number(value?.ruleId ?? value?.id);
+  if (!leaseToken || !Number.isInteger(ruleId)) {
+    return "";
+  }
+  const existing = offscreenActiveMediaHeaderLeases.get(leaseToken);
+  offscreenActiveMediaHeaderLeases.set(leaseToken, {
+    lease: { ...value, leaseToken, ruleId },
+    count: Number(existing?.count || 0) + 1
+  });
+  return leaseToken;
+}
+
+function releaseActiveMediaHeaderLease(leaseToken) {
+  if (!leaseToken) {
+    return;
+  }
+  const existing = offscreenActiveMediaHeaderLeases.get(leaseToken);
+  if (!existing || Number(existing.count || 0) <= 1) {
+    offscreenActiveMediaHeaderLeases.delete(leaseToken);
+    return;
+  }
+  existing.count -= 1;
+}
+
+function activeMediaHeaderLeases() {
+  return [...offscreenActiveMediaHeaderLeases.values()]
+    .map(entry => ({ ...entry.lease }))
+    .sort((left, right) => String(left.leaseToken || "").localeCompare(String(right.leaseToken || "")));
 }
 
 function cancelOffscreenJob(jobId, runToken = "") {
@@ -235,7 +322,7 @@ async function extractAudioWithWebFfmpeg(message) {
     percent: 1,
     message: "正在准备 Web FFmpeg"
   });
-  await ensureWebFfmpegFrame(message.webFfmpegUrl);
+  await ensureWebFfmpegFrameForJob(message.webFfmpegUrl, message.abortSignal);
   warmWebFfmpegFrame();
   if (isHlsSource(message)) {
     return extractHlsAudioWithWebFfmpeg(message);
@@ -246,18 +333,7 @@ async function extractAudioWithWebFfmpeg(message) {
   if (isMseFragmentSource(message)) {
     return extractMseFragmentAudioWithWebFfmpeg(message);
   }
-  if (shouldUseRangeDirectMediaExtraction(message)) {
-    try {
-      return await extractLocalMediaAudioWithWebFfmpeg({ ...message, remoteRangeExtraction: true });
-    } catch (error) {
-      throwIfOffscreenJobAborted(message.abortSignal);
-      reportWebFfmpegExtractionProgress(message, {
-        phase: "download",
-        percent: 4,
-        message: `Range 分片读取不可用，回退兼容下载：${error.message || String(error)}`
-      });
-    }
-  } else if (shouldUseLocalMediaChunkedExtraction(message)) {
+  if (shouldUseLocalMediaChunkedExtraction(message)) {
     return extractLocalMediaAudioWithWebFfmpeg(message);
   }
   reportWebFfmpegExtractionProgress(message, {
@@ -270,9 +346,7 @@ async function extractAudioWithWebFfmpeg(message) {
     const fetchOptions = isLocalFileMediaSourceUrl(sourceUrl)
       ? { signal: message.abortSignal }
       : buildMediaFetchOptions(message);
-    assertMediaFetchTargetAllowed(sourceUrl, fetchOptions);
     response = await fetch(sourceUrl, fetchOptions);
-    assertMediaFetchTargetAllowed(response?.url || sourceUrl, fetchOptions);
   } catch (error) {
     if (isLocalFileMediaSourceUrl(sourceUrl)) {
       throw new Error(`本地媒体文件读取失败：${error.message || String(error)}。请确认文件仍可访问，并在扩展详情中允许访问文件网址。`);
@@ -364,7 +438,7 @@ function getLocalMediaExtractor() {
       requestWebFfmpeg: (...args) => globalThis.requestWebFfmpeg(...args),
       persistWebFfmpegAudioResult: (...args) => globalThis.persistWebFfmpegAudioResult(...args),
       offsetSpeechIntervals,
-      createRemoteMediaMediabunnyInput
+      throwIfOffscreenJobAborted
     });
   }
   return globalThis.FuguangLocalMediaExtractorInstance;
@@ -372,48 +446,6 @@ function getLocalMediaExtractor() {
 
 function shouldUseLocalMediaChunkedExtraction(...args) {
   return getLocalMediaExtractor().shouldUseLocalMediaChunkedExtraction(...args);
-}
-
-function shouldUseRangeDirectMediaExtraction(message = {}) {
-  const sourceUrl = String(message.sourceUrl || "");
-  if (!/^https?:\/\//i.test(sourceUrl) || isHlsSource(message) || isDashSource(message) || isMseFragmentSource(message)) {
-    return false;
-  }
-  const duration = Math.max(0, Number(message.duration || 0) || 0);
-  const bytes = Math.max(0, Number(message.sourceBytes || message.bytes || 0) || 0);
-  return duration >= 10 * 60 || bytes >= 64 * 1024 * 1024;
-}
-
-function createRemoteMediaMediabunnyInput(sourceUrl, mediabunny, message = {}) {
-  if (typeof mediabunny.UrlSource !== "function") {
-    throw new Error("当前 Mediabunny 版本不支持直连媒体 Range 读取。");
-  }
-  const fetchOptions = buildMediaFetchOptions(message);
-  assertMediaFetchTargetAllowed(sourceUrl, fetchOptions);
-  const requestInit = {
-    credentials: fetchOptions.credentials,
-    headers: fetchOptions.headers,
-    redirect: fetchOptions.redirect,
-    signal: fetchOptions.signal
-  };
-  const source = new mediabunny.UrlSource(sourceUrl, {
-    requestInit,
-    maxCacheSize: 16 * 1024 * 1024,
-    parallelism: 2,
-    getRetryDelay(previousAttempts) {
-      return previousAttempts >= WEB_FFMPEG_HLS_FETCH_RETRY_ATTEMPTS
-        ? null
-        : Math.min(1.5, 0.18 * (2 ** previousAttempts));
-    }
-  });
-  return {
-    input: new mediabunny.Input({
-      formats: mediabunny.ALL_FORMATS,
-      source
-    }),
-    sourceMode: "url-range",
-    size: Number(message.sourceBytes || 0) || 0
-  };
 }
 
 function extractLocalMediaAudioWithWebFfmpeg(...args) {
@@ -547,13 +579,6 @@ async function extractMseFragmentAudioWithWebFfmpeg(message) {
   if (!hasInit || !mediaFragments.length) {
     throw new Error("MSE/fMP4 媒体源缺少初始化片段或媒体片段，无法装配音频。");
   }
-  const windows = buildFragmentedMp4Windows(fragments, WEB_FFMPEG_HLS_EXTRACT_CHUNK_SECONDS);
-  if (windows.length > 1) {
-    return extractFragmentedMp4AudioInWindows(message, windows, {
-      sourceType: "mse-fragments",
-      duration: pickFiniteNumber(message.duration, windows.at(-1)?.end)
-    });
-  }
   reportWebFfmpegExtractionProgress(message, {
     phase: "download",
     percent: 5,
@@ -634,13 +659,6 @@ async function extractDashAudioWithWebFfmpeg(message) {
   if (!hasInit || !mediaFragments.length) {
     throw new Error("DASH 音频轨缺少初始化片段或媒体片段，无法装配音频。");
   }
-  const windows = buildFragmentedMp4Windows(fragments, WEB_FFMPEG_HLS_EXTRACT_CHUNK_SECONDS);
-  if (windows.length > 1) {
-    return extractFragmentedMp4AudioInWindows(message, windows, {
-      sourceType: "dash",
-      duration: pickFiniteNumber(duration, windows.at(-1)?.end)
-    });
-  }
   reportWebFfmpegExtractionProgress(message, {
     phase: "download",
     percent: 5,
@@ -695,146 +713,6 @@ async function extractDashAudioWithWebFfmpeg(message) {
   };
 }
 
-function buildFragmentedMp4Windows(fragments, targetSeconds = WEB_FFMPEG_HLS_EXTRACT_CHUNK_SECONDS) {
-  const list = Array.isArray(fragments) ? fragments : [];
-  const initFragments = list.filter(fragment => fragment.segmentType === "init");
-  const mediaFragments = list.filter(fragment => fragment.segmentType !== "init");
-  const seconds = Math.max(30, Number(targetSeconds) || WEB_FFMPEG_HLS_EXTRACT_CHUNK_SECONDS);
-  const windows = [];
-  let current = null;
-  let inferredStart = 0;
-  for (const fragment of mediaFragments) {
-    const duration = Math.max(0, Number(fragment.duration || (fragment.end - fragment.start)) || 0);
-    const start = Number.isFinite(Number(fragment.start)) && Number(fragment.start) >= inferredStart
-      ? Number(fragment.start)
-      : inferredStart;
-    const end = Math.max(start, Number(fragment.end || 0) || (start + duration));
-    if (!current || (
-      current.mediaFragments.length > 0 &&
-      ((end - current.start > seconds) || current.mediaFragments.length >= WEB_FFMPEG_HLS_MAX_SEGMENTS_PER_CHUNK)
-    )) {
-      current = {
-        index: windows.length,
-        start,
-        end,
-        initFragments,
-        mediaFragments: []
-      };
-      windows.push(current);
-    }
-    current.mediaFragments.push(fragment);
-    current.end = Math.max(current.end, end);
-    inferredStart = Math.max(inferredStart, end);
-  }
-  return windows;
-}
-
-async function extractFragmentedMp4AudioInWindows(message, windows, options = {}) {
-  const fetchOptions = buildMediaFetchOptions(message);
-  const allUrls = windows.flatMap(window => [...window.initFragments, ...window.mediaFragments].map(fragment => fragment.url));
-  await updateMediaHeaderRuleDomains(message, allUrls);
-  const chunks = [];
-  let bytes = 0;
-  let downloadedSegments = 0;
-  const totalSegments = windows.reduce((sum, window) => sum + window.mediaFragments.length, 0);
-  const initBuffers = await downloadMseFragmentBuffers(windows[0].initFragments, fetchOptions, message);
-  for (const window of windows) {
-    throwIfOffscreenJobAborted(message.abortSignal);
-    reportWebFfmpegExtractionProgress(message, {
-      phase: "download",
-      percent: 5 + (window.index / windows.length) * 85,
-      internalChunksDone: window.index,
-      internalChunksTotal: windows.length,
-      downloadedSegments,
-      totalSegments,
-      readySeconds: window.start,
-      message: `正在处理 ${options.sourceType === "dash" ? "DASH" : "MSE/fMP4"} 窗口 ${window.index + 1}/${windows.length}`
-    });
-    const mediaBuffers = await downloadMseFragmentBuffers(window.mediaFragments, fetchOptions, message);
-    downloadedSegments += mediaBuffers.length;
-    const inputBuffer = concatenateArrayBuffers([
-      ...initBuffers.map(item => item.buffer),
-      ...mediaBuffers.map(item => item.buffer)
-    ]);
-    if (!inputBuffer.byteLength) {
-      throw new Error(`第 ${window.index + 1} 个 fMP4 窗口装配结果为空。`);
-    }
-    const id = `extract-fragment-window-${window.index}-${Date.now()}-${Math.random().toString(16).slice(2)}`;
-    const result = await requestWebFfmpegForJob(message, {
-      app: WEB_FFMPEG_APP,
-      type: "extract-audio",
-      id,
-      file: {
-        name: `${options.sourceType || "fragmented"}-${String(window.index + 1).padStart(3, "0")}.m4a`,
-        mime: "audio/mp4",
-        buffer: inputBuffer
-      },
-      options: {
-        format: "mp3",
-        chunkSeconds: Math.max(10, window.end - window.start + 1),
-        overlapSeconds: 0,
-        duration: Math.max(0, window.end - window.start)
-      }
-    }, [inputBuffer], progress => {
-      reportWebFfmpegExtractionProgress(message, {
-        phase: "ffmpeg",
-        percent: 5 + ((window.index + Number(progress.percent || 0) / 100) / windows.length) * 94,
-        internalChunksDone: window.index,
-        internalChunksTotal: windows.length,
-        downloadedSegments,
-        totalSegments,
-        readySeconds: window.start,
-        message: `正在提取窗口 ${window.index + 1}/${windows.length} 的音频`
-      });
-    });
-    const persisted = await persistWebFfmpegAudioResult(
-      result,
-      `${message.cacheNamespace || message.jobId || "fragmented"}-${options.sourceType || "fragments"}-${window.index}`
-    );
-    const windowChunks = normalizeFragmentedWindowAudioChunks(persisted, window, chunks.length);
-    for (const chunk of windowChunks) {
-      chunks.push(chunk);
-      bytes += Number(chunk.bytes || chunk.file?.bytes || 0) || 0;
-      await reportWebFfmpegChunkReady(message, chunk, {
-        duration: options.duration,
-        internalChunksDone: window.index + 1,
-        internalChunksTotal: windows.length
-      });
-    }
-  }
-  return {
-    chunks,
-    bytes,
-    duration: pickFiniteNumber(options.duration, windows.at(-1)?.end),
-    chunkSeconds: WEB_FFMPEG_HLS_EXTRACT_CHUNK_SECONDS,
-    sourceType: options.sourceType || "fragmented-mp4",
-    streamed: true
-  };
-}
-
-function normalizeFragmentedWindowAudioChunks(result, window, baseIndex = 0) {
-  const source = Array.isArray(result?.chunks) && result.chunks.length
-    ? result.chunks
-    : result?.file
-      ? [{ file: result.file, start: 0, end: window.end - window.start, duration: window.end - window.start, bytes: result.bytes }]
-      : [];
-  return source.map((chunk, index) => {
-    const start = window.start + (Number(chunk.start || 0) || 0);
-    const end = Math.min(window.end, window.start + (Number(chunk.end || 0) || Number(chunk.duration || 0) || (window.end - window.start)));
-    return {
-      ...chunk,
-      index: baseIndex + index,
-      start,
-      end,
-      duration: Math.max(0, end - start),
-      coreStart: start,
-      coreEnd: end,
-      coreDuration: Math.max(0, end - start),
-      logical: true
-    };
-  });
-}
-
 async function downloadMseFragmentBuffers(fragments, fetchOptions, message) {
   const results = new Array(fragments.length);
   let nextIndex = 0;
@@ -882,7 +760,7 @@ async function collectSpeechAudioWithWebFfmpeg(message) {
     percent: 1,
     message: "正在准备 Web FFmpeg 语音窗口"
   });
-  await ensureWebFfmpegFrame(message.webFfmpegUrl);
+  await ensureWebFfmpegFrameForJob(message.webFfmpegUrl, message.abortSignal);
   warmWebFfmpegFrame();
   const id = `collect-speech-${Date.now()}-${Math.random().toString(16).slice(2)}`;
   const result = await requestWebFfmpegForJob(message, {
@@ -911,6 +789,50 @@ async function collectSpeechAudioWithWebFfmpeg(message) {
   });
   return persistWebFfmpegAudioResult(result, message.cacheNamespace || id);
 }
+
+async function prepareDurableAsrLogicalAudio({ file, webFfmpegUrl, cacheNamespace, abortSignal, jobId, runToken }) {
+  const parts = Array.isArray(file?.parts) ? file.parts.filter(part => part?.file) : [];
+  if (parts.length <= 1) return parts[0]?.file || file;
+  await ensureWebFfmpegFrameForJob(webFfmpegUrl, abortSignal);
+  warmWebFfmpegFrame();
+  const files = [];
+  const transfer = [];
+  for (let index = 0; index < parts.length; index += 1) {
+    const buffer = await readPersistedWebFfmpegAudioFile(parts[index].file);
+    throwIfOffscreenJobAborted(abortSignal);
+    files.push({ name: `part-${String(index + 1).padStart(3, "0")}.mp3`, mime: "audio/mpeg", buffer });
+    transfer.push(buffer);
+  }
+  const result = await requestWebFfmpegForJob({ cacheNamespace, abortSignal, jobId, runToken }, {
+    app: WEB_FFMPEG_APP,
+    type: "concat-audio",
+    id: `concat-asr-${safeCachePathPart(cacheNamespace)}`,
+    outputName: "logical.mp3",
+    files,
+    options: { format: "mp3" }
+  }, transfer);
+  throwIfOffscreenJobAborted(abortSignal);
+  const output = result?.file;
+  if (!(output?.buffer instanceof ArrayBuffer)) throw new Error("Web FFmpeg 没有返回合并后的识别音频。");
+  const namespace = safeCachePathPart(cacheNamespace || "asr-logical");
+  const cacheUrl = new URL(`${WEB_FFMPEG_AUDIO_CACHE_PREFIX}/${namespace}/logical.mp3`, WEB_FFMPEG_AUDIO_CACHE_ORIGIN).href;
+  const cache = await caches.open(WEB_FFMPEG_AUDIO_CACHE);
+  throwIfOffscreenJobAborted(abortSignal);
+  await cache.put(cacheUrl, new Response(output.buffer, { headers: {
+    "Content-Type": output.mime || "audio/mpeg", "Cache-Control": "no-store",
+    "X-Fuguang-Cached-At": String(Date.now()), "X-Fuguang-Bytes": String(output.buffer.byteLength)
+  }}));
+  if (abortSignal?.aborted) {
+    await cache.delete(cacheUrl);
+    throwIfOffscreenJobAborted(abortSignal);
+  }
+  return { name: output.name || "logical.mp3", mime: output.mime || "audio/mpeg", cacheUrl, bytes: output.buffer.byteLength };
+}
+
+globalThis.FuguangOffscreenAudio = Object.freeze({
+  prepareDurableAsrLogicalAudio,
+  collectSpeechAudio: collectSpeechAudioWithWebFfmpeg
+});
 
 async function extractHlsAudioWithWebFfmpeg(message) {
   const fetchOptions = buildMediaFetchOptions(message);
@@ -1007,6 +929,7 @@ async function extractHlsAudioWithWebFfmpeg(message) {
     );
   };
   for (let index = 0; index < groups.length; index += 1) {
+    throwIfOffscreenJobAborted(message.abortSignal);
     const group = groups[index];
     if (message.webFfmpegUrl && recyclePolicy.shouldRecycleBefore(index)) {
       reportWebFfmpegExtractionProgress(message, {
@@ -1019,13 +942,14 @@ async function extractHlsAudioWithWebFfmpeg(message) {
         readySeconds: internalChunksReadySeconds(internalChunks),
         message: `正在重置 Web FFmpeg 工作区，准备处理第 ${index + 1}/${groups.length} 个内部媒体切片`
       });
-      await reloadWebFfmpegFrame(message.webFfmpegUrl);
+      await reloadWebFfmpegFrame(message.webFfmpegUrl, message.abortSignal);
       recyclePolicy.noteRecycle(index);
     }
     const groupDownload = nextGroupDownload || startGroupDownload(group, index);
     nextGroupDownload = null;
     let groupDownloadResult = await groupDownload;
     if (!groupDownloadResult.ok) {
+      throwIfOffscreenJobAborted(message.abortSignal);
       const originalDownloadError = groupDownloadResult.error;
       reportWebFfmpegExtractionProgress(message, {
         phase: "download",
@@ -1039,6 +963,7 @@ async function extractHlsAudioWithWebFfmpeg(message) {
       });
       groupDownloadResult = await startGroupDownload(group, index);
       if (!groupDownloadResult.ok) {
+        throwIfOffscreenJobAborted(message.abortSignal);
         throw new Error(`${groupDownloadResult.error?.message || groupDownloadResult.error}（已重新下载第 ${index + 1}/${groups.length} 组，仍然失败；原错误：${originalDownloadError?.message || originalDownloadError}）`);
       }
     }
@@ -1095,6 +1020,7 @@ async function extractHlsAudioWithWebFfmpeg(message) {
         internalChunks
       });
     } catch (error) {
+      throwIfOffscreenJobAborted(message.abortSignal);
       if (ffmpegInput.inputKind !== "transport-stream") {
         if (!message.webFfmpegUrl) {
           throw error;
@@ -1111,8 +1037,9 @@ async function extractHlsAudioWithWebFfmpeg(message) {
           message: `Web FFmpeg 执行异常，正在重置工作区并重试第 ${index + 1}/${groups.length} 个内部媒体切片`
         });
         try {
-          await reloadWebFfmpegFrame(message.webFfmpegUrl);
+          await reloadWebFfmpegFrame(message.webFfmpegUrl, message.abortSignal);
           recyclePolicy.noteRecycle(index);
+          throwIfOffscreenJobAborted(message.abortSignal);
           const retryDownload = await downloadHlsGroupResources(group, fetchOptions, index);
           const retryPlaylistSegments = [];
           const retryFiles = [...retryDownload.files];
@@ -1144,6 +1071,7 @@ async function extractHlsAudioWithWebFfmpeg(message) {
             fallback: true
           });
         } catch (retryError) {
+          throwIfOffscreenJobAborted(message.abortSignal);
           throw new Error(`${retryError.message || retryError}（已重置 Web FFmpeg 后重试，仍然失败；原错误：${error.message || error}）`);
         }
       } else {
@@ -1158,6 +1086,7 @@ async function extractHlsAudioWithWebFfmpeg(message) {
           readySeconds: internalChunksReadySeconds(internalChunks),
           message: `TS 拼接输入失败，正在重置 Web FFmpeg 并改用本地播放列表重试第 ${index + 1}/${groups.length} 个内部媒体切片`
         });
+        throwIfOffscreenJobAborted(message.abortSignal);
         const fallbackInput = buildHlsFfmpegInput({
           index,
           media,
@@ -1171,7 +1100,7 @@ async function extractHlsAudioWithWebFfmpeg(message) {
         });
         try {
           if (message.webFfmpegUrl) {
-            await reloadWebFfmpegFrame(message.webFfmpegUrl);
+            await reloadWebFfmpegFrame(message.webFfmpegUrl, message.abortSignal);
             recyclePolicy.noteRecycle(index);
           }
           result = await runHlsAudioExtraction(message, {
@@ -1187,6 +1116,7 @@ async function extractHlsAudioWithWebFfmpeg(message) {
             fallback: true
           });
         } catch (fallbackError) {
+          throwIfOffscreenJobAborted(message.abortSignal);
           throw new Error(`${fallbackError.message || fallbackError}（已从 TS 拼接输入降级为本地播放列表，仍然失败；原错误：${error.message || error}）`);
         }
       }
@@ -1365,7 +1295,7 @@ async function splitHlsInternalChunkForAsr(message, internalChunk, logicalChunkS
       readySeconds: Math.round(coreEnd),
       message: `已生成第 ${internalChunk.index + 1}/${groupCount} 个内部媒体切片的 ASR 短窗，正在回收 Web FFmpeg 工作区`
     });
-    await reloadWebFfmpegFrame(message.webFfmpegUrl);
+    await reloadWebFfmpegFrame(message.webFfmpegUrl, message.abortSignal);
   }
   return chunks;
 }
@@ -1862,9 +1792,7 @@ function isLongFileAsrMode(message = {}) {
 
 async function fetchText(url, options, label = "HLS 播放列表下载失败") {
   return withMediaFetchRetry(label, async () => {
-    assertMediaFetchTargetAllowed(url, options);
     const response = await fetch(url, mediaFetchOptionsForUrl(options, url));
-    assertMediaFetchTargetAllowed(response?.url || url, options);
     if (!response.ok) {
       throw createMediaFetchHttpError(response.status);
     }
@@ -1874,10 +1802,8 @@ async function fetchText(url, options, label = "HLS 播放列表下载失败") {
 
 async function fetchBinary(url, options, byteRange = null, label = "媒体切片下载失败") {
   return withMediaFetchRetry(label, async () => {
-    assertMediaFetchTargetAllowed(url, options);
     const targetOptions = mediaFetchOptionsForUrl(options, url);
     const response = await fetch(url, buildFetchOptionsWithByteRange(targetOptions, byteRange));
-    assertMediaFetchTargetAllowed(response?.url || url, options);
     if (!response.ok) {
       throw createMediaFetchHttpError(response.status);
     }
@@ -1926,9 +1852,6 @@ function describeMediaFetchError(label, error) {
 }
 
 function isRetryableMediaFetchError(error) {
-  if (error?.mediaFetchBlocked) {
-    return false;
-  }
   const status = Number(error?.status);
   if (Number.isFinite(status) && status > 0) {
     return status === 408 ||
@@ -2523,6 +2446,8 @@ async function updateMediaHeaderRuleDomains(message, urls) {
   const response = await chrome.runtime.sendMessage({
     type: MESSAGE.UPDATE_MEDIA_HEADER_RULE_DOMAINS,
     jobId,
+    runToken: String(message?.runToken || ""),
+    mediaHeaderLease: message?.mediaHeaderLease || null,
     urls: cleanUrls
   });
   if (response?.ok === false) {
@@ -3182,34 +3107,13 @@ function buildMediaFetchOptions(message) {
   const options = {
     credentials: "include",
     headers,
-    redirect: "error",
     signal: message.abortSignal
   };
   mediaFetchOptionsMetadata.set(options, {
     sourceOrigin: httpMediaOrigin(message.sourceUrl),
-    allowedPrivateNetworkOrigins: new Set(message.allowPrivateNetworkMediaOrigin
-      ? [httpMediaOrigin(message.sourceUrl)].filter(Boolean)
-      : []),
     requestHeadersByOrigin: normalizeRequestHeadersByOrigin(message.requestHeadersByOrigin)
   });
   return options;
-}
-
-function assertMediaFetchTargetAllowed(rawUrl, options = null) {
-  const policy = globalThis.FuguangMediaNetworkPolicy;
-  if (!policy?.isPrivateNetworkMediaUrl?.(rawUrl)) {
-    return;
-  }
-  const metadata = options && typeof options === "object"
-    ? mediaFetchOptionsMetadata.get(options)
-    : null;
-  const origin = policy.privateNetworkMediaOrigin(rawUrl);
-  if (origin && metadata?.allowedPrivateNetworkOrigins?.has(origin)) {
-    return;
-  }
-  const error = new Error("媒体地址指向未授权的私有网络，已停止下载。请先在当前页面播放该媒体并刷新候选列表。");
-  error.mediaFetchBlocked = true;
-  throw error;
 }
 
 function mediaFetchOptionsForUrl(options, targetUrl) {
@@ -3282,39 +3186,91 @@ async function ensureWebFfmpegFrame(rawUrl) {
   iframe.hidden = true;
   iframe.setAttribute("aria-hidden", "true");
 
-  webFfmpegReady = new Promise((resolve, reject) => {
+  let frame = null;
+  const readyPromise = new Promise((resolve, reject) => {
+    let settled = false;
     const timeout = setTimeout(() => {
-      resetWebFfmpegFrame();
-      reject(new Error("Web FFmpeg 页面加载超时。"));
+      const error = new Error("Web FFmpeg 页面加载超时。");
+      if (webFfmpegFrame === frame) {
+        resetWebFfmpegFrame(error);
+      } else if (!settled) {
+        settled = true;
+        reject(error);
+      }
     }, WEB_FFMPEG_READY_TIMEOUT_MS);
-    webFfmpegFrame = {
+    frame = {
       iframe,
       origin,
       url,
       ready: false,
       resolveReady: () => {
+        if (settled) return;
+        settled = true;
         clearTimeout(timeout);
         resolve();
+      },
+      rejectReady: error => {
+        if (settled) return;
+        settled = true;
+        clearTimeout(timeout);
+        reject(error instanceof Error ? error : new Error("Web FFmpeg 页面初始化已取消。"));
       }
     };
+    webFfmpegFrame = frame;
     iframe.addEventListener("load", () => {
       iframe.contentWindow?.postMessage({ app: WEB_FFMPEG_APP, type: "ping", id: "load" }, origin);
     });
     iframe.src = url;
     document.body.appendChild(iframe);
-  }).finally(() => {
-    webFfmpegReady = null;
   });
+  let trackedReady = null;
+  trackedReady = readyPromise.finally(() => {
+    if (webFfmpegReady === trackedReady) {
+      webFfmpegReady = null;
+    }
+  });
+  webFfmpegReady = trackedReady;
   return webFfmpegReady;
 }
 
-function reloadWebFfmpegFrame(rawUrl) {
-  return enqueueWebFfmpegOperation(() => reloadWebFfmpegFrameNow(rawUrl));
+function ensureWebFfmpegFrameForJob(rawUrl, signal = null) {
+  throwIfOffscreenJobAborted(signal);
+  const readyPromise = ensureWebFfmpegFrame(rawUrl);
+  if (!signal) return readyPromise;
+  return new Promise((resolve, reject) => {
+    let settled = false;
+    const finish = (handler, value) => {
+      if (settled) return;
+      settled = true;
+      signal.removeEventListener?.("abort", onAbort);
+      handler(value);
+    };
+    const onAbort = () => {
+      const reason = signal.reason;
+      const error = reason instanceof Error
+        ? reason
+        : new Error(String(reason?.message || reason || "任务已停止。"));
+      if (reason?.name) error.name = String(reason.name);
+      finish(reject, error);
+    };
+    readyPromise.then(
+      value => finish(resolve, value),
+      error => finish(reject, error)
+    );
+    signal.addEventListener?.("abort", onAbort, { once: true });
+    if (signal.aborted) onAbort();
+  });
 }
 
-async function reloadWebFfmpegFrameNow(rawUrl) {
+function reloadWebFfmpegFrame(rawUrl, signal = null) {
+  return enqueueWebFfmpegOperation(() => reloadWebFfmpegFrameNow(rawUrl, signal));
+}
+
+async function reloadWebFfmpegFrameNow(rawUrl, signal = null) {
+  throwIfOffscreenJobAborted(signal);
   resetWebFfmpegFrame(new Error("Web FFmpeg 页面正在重新加载。"));
-  await ensureWebFfmpegFrame(rawUrl);
+  await ensureWebFfmpegFrameForJob(rawUrl, signal);
+  throwIfOffscreenJobAborted(signal);
   warmWebFfmpegFrame();
 }
 
@@ -3331,7 +3287,7 @@ function requestWebFfmpeg(payload, transfer = [], onProgress = null, options = {
   return enqueueWebFfmpegOperation(async () => {
     throwIfOffscreenJobAborted(options.signal);
     if (!webFfmpegFrame?.iframe?.contentWindow && options.webFfmpegUrl) {
-      await ensureWebFfmpegFrame(options.webFfmpegUrl);
+      await ensureWebFfmpegFrameForJob(options.webFfmpegUrl, options.signal);
       warmWebFfmpegFrame();
     }
     throwIfOffscreenJobAborted(options.signal);
@@ -3347,6 +3303,17 @@ function requestWebFfmpegNow(payload, transfer = [], onProgress = null, options 
     }
     let idleTimeout = null;
     let absoluteTimeout = null;
+    const onAbort = () => {
+      if (!webFfmpegPending.has(payload.id)) return;
+      webFfmpegPending.delete(payload.id);
+      clearTimers();
+      options.signal?.removeEventListener?.("abort", onAbort);
+      const error = options.signal?.reason instanceof Error
+        ? options.signal.reason
+        : Object.assign(new Error("任务已停止。"), { name: "AbortError" });
+      resetWebFfmpegFrame(error);
+      reject(error);
+    };
     const clearTimers = () => {
       if (idleTimeout) {
         clearTimeout(idleTimeout);
@@ -3356,6 +3323,7 @@ function requestWebFfmpegNow(payload, transfer = [], onProgress = null, options 
         clearTimeout(absoluteTimeout);
         absoluteTimeout = null;
       }
+      options.signal?.removeEventListener?.("abort", onAbort);
     };
     const failWithTimeout = error => {
       if (!webFfmpegPending.has(payload.id)) {
@@ -3396,6 +3364,11 @@ function requestWebFfmpegNow(payload, transfer = [], onProgress = null, options 
         reject(error);
       }
     });
+    options.signal?.addEventListener?.("abort", onAbort, { once: true });
+    if (options.signal?.aborted) {
+      onAbort();
+      return;
+    }
     try {
       webFfmpegFrame.iframe.contentWindow.postMessage(payload, webFfmpegFrame.origin, transfer);
     } catch (error) {
@@ -3407,12 +3380,14 @@ function requestWebFfmpegNow(payload, transfer = [], onProgress = null, options 
 }
 
 function resetWebFfmpegFrame(error = new Error("Web FFmpeg 页面已重置。")) {
+  const frame = webFfmpegFrame;
   const pendingRequests = [...webFfmpegPending.values()];
   webFfmpegPending.clear();
   for (const pending of pendingRequests) {
     pending.reject?.(error);
   }
-  webFfmpegFrame?.iframe?.remove?.();
+  frame?.rejectReady?.(error);
+  frame?.iframe?.remove?.();
   webFfmpegFrame = null;
   webFfmpegReady = null;
 }

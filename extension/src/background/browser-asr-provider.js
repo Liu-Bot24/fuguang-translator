@@ -554,6 +554,11 @@ export const FuguangBrowserAsrProvider = (() => {
     return ["openai", "groq", "xai", "anthropic", "dashscope_funasr"].includes(value) ? value : "openai";
   }
 
+  function browserAsrProviderNeedsModel(asrConfig = {}) {
+    const providerType = typeof asrConfig === "object" ? asrConfig?.providerType : asrConfig;
+    return normalizeProviderType(providerType) !== "xai";
+  }
+
   function normalizeApiBaseUrl(value) {
     return String(value || "").replace(/\/+$/, "");
   }
@@ -590,6 +595,7 @@ export const FuguangBrowserAsrProvider = (() => {
     normalizeAsrVadFilterMode,
     isKnownStandardAsrBaseUrl,
     browserAsrEndpoint,
+    browserAsrProviderNeedsModel,
     normalizeAsrLanguage,
     xaiAsrLanguage
   };

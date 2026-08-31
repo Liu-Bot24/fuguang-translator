@@ -14,7 +14,7 @@ Liusheng Subtitles is a Chrome extension for generating and translating subtitle
 
 After opening a video page, Liusheng Subtitles shows available media sources in the side panel. Configure an ASR provider and an LLM translation provider, then generate original subtitles, translated subtitles, or bilingual subtitles and display them on the page.
 
-## 0.1.5 Updates
+## 0.1.6 Updates
 
 - Improves the online video subtitle generation pipeline for more complete and stable HLS recognition results.
 - Optimizes online video audio preprocessing to reduce repeated extraction work while keeping recognition segments stable.

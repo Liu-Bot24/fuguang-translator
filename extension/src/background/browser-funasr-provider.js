@@ -1,6 +1,8 @@
-import { FuguangRequestSemaphore } from "../shared/request-semaphore.js";
-
 export const FuguangBrowserFunAsrProvider = (() => {
+  const FUNASR_QUERY_TASK_STATUSES = new Set([
+    "PENDING", "RUNNING", "PRE-PROCESSING", "POST-PROCESSING",
+    "SUCCEEDED", "FAILED", "UNKNOWN", "CANCELED"
+  ]);
   const DASHSCOPE_DEFAULT_BASE_URL = "https://dashscope.aliyuncs.com/api/v1";
   const FUNASR_DEFAULT_MODEL = "fun-asr";
   const FUNASR_DIARIZATION_MAX_SECONDS = 2 * 60 * 60;
@@ -9,6 +11,7 @@ export const FuguangBrowserFunAsrProvider = (() => {
   const FUNASR_POLL_INTERVAL_MS = 10_000;
   const FUNASR_MAX_POLL_INTERVAL_MS = 30_000;
   const FUNASR_TIMEOUT_MS = 2 * 60 * 60 * 1000;
+  const FUNASR_CANCEL_TIMEOUT_MS = 5_000;
 
   function isDashScopeFunAsrConfig(config = {}) {
     return normalizeProviderType(config.providerType) === "dashscope_funasr";
@@ -180,43 +183,29 @@ export const FuguangBrowserFunAsrProvider = (() => {
   }
 
   async function transcribeDashScopeFunAsrFile(file, config = {}, options = {}) {
-    const key = FuguangRequestSemaphore.providerKey("funasr", config);
-    const limit = Math.max(1, Math.min(2, Number(config.maxConcurrency || 2) || 2));
-    return FuguangRequestSemaphore.withPermit(
-      key,
-      limit,
-      () => transcribeDashScopeFunAsrFileUnlocked(file, config, options),
-      options.signal
-    );
-  }
-
-  async function transcribeDashScopeFunAsrFileUnlocked(file, config = {}, options = {}) {
-    const operationOptions = funAsrOperationOptions(config, options);
-    throwIfFunAsrAborted(operationOptions.signal);
+    throwIfFunAsrAborted(options.signal);
     const model = String(config.model || FUNASR_DEFAULT_MODEL).trim() || FUNASR_DEFAULT_MODEL;
     const apiKey = String(config.apiKey || "").trim();
     if (!apiKey) {
       throw new Error("Fun-ASR 缺少 DashScope API Key。");
     }
-    const fileUrl = await uploadDashScopeTemporaryFile(file, { ...config, model }, operationOptions);
+    const fileUrl = await uploadDashScopeTemporaryFile(file, { ...config, model }, options);
     const task = await submitDashScopeFunAsrTask({
       config,
       model,
       apiKey,
       fileUrls: [fileUrl],
       parameters: buildDashScopeFunAsrParameters(config, options),
-      signal: operationOptions.signal,
-      deadlineAt: operationOptions.deadlineAt
+      signal: options.signal
     });
-    const completed = await waitDashScopeFunAsrTask(task.taskId, { ...config, apiKey }, operationOptions);
+    const completed = await waitDashScopeFunAsrTask(task.taskId, { ...config, apiKey }, options);
     const resultUrl = findDashScopeFunAsrTranscriptionUrl(completed);
     if (!resultUrl) {
       throw new Error("Fun-ASR 任务完成但没有返回转写结果地址。");
     }
     return await fetchJsonOrThrow(resultUrl, {
       headers: {},
-      signal: operationOptions.signal,
-      deadlineAt: operationOptions.deadlineAt
+      signal: options.signal
     });
   }
 
@@ -259,7 +248,10 @@ export const FuguangBrowserFunAsrProvider = (() => {
     });
   }
 
-  async function submitDashScopeFunAsrTask({ config = {}, model, apiKey, fileUrls, parameters, signal = null, deadlineAt = 0 }) {
+  async function submitDashScopeFunAsrTask({
+    config = {}, model, apiKey, fileUrls, parameters, signal = null, deadlineAt = 0,
+    requestTransport = null, semanticRequestPath = "", bodyIdentity = undefined
+  }) {
     throwIfFunAsrAborted(signal);
     const payload = {
       model,
@@ -276,7 +268,11 @@ export const FuguangBrowserFunAsrProvider = (() => {
       },
       body: JSON.stringify(payload),
       signal,
-      deadlineAt
+      deadlineAt,
+      requestTransport,
+      semanticRequestPath,
+      operationType: "funasr-submit",
+      bodyIdentity: bodyIdentity === undefined ? payload : bodyIdentity
     }, async (response, requestSignal) => {
       const body = await responseJsonOrText(response, requestSignal);
       if (!response.ok) {
@@ -286,7 +282,13 @@ export const FuguangBrowserFunAsrProvider = (() => {
       if (!taskId) {
         throw new Error("Fun-ASR 任务提交成功但没有返回 task_id。");
       }
-      return { taskId, response: body };
+      return {
+        taskId,
+        response: body,
+        durableOperationId: String(response.durableOperationId || ""),
+        durableInputHash: String(response.durableInputHash || ""),
+        durableReplayed: Boolean(response.durableReplayed)
+      };
     });
   }
 
@@ -296,24 +298,149 @@ export const FuguangBrowserFunAsrProvider = (() => {
     let attempt = 0;
     while (Date.now() < deadlineAt) {
       throwIfFunAsrAborted(options.signal);
-      const body = await fetchJsonOrThrow(`${dashScopeApiBaseUrl(config)}/tasks/${encodeURIComponent(taskId)}`, {
+      const fetched = await fetchJsonOrThrow(`${dashScopeApiBaseUrl(config)}/tasks/${encodeURIComponent(taskId)}`, {
         headers: dashScopeHeaders(config.apiKey),
         signal: options.signal,
-        deadlineAt
+        deadlineAt,
+        requestTransport: options.requestTransport,
+        semanticRequestPath: options.semanticRequestPath
+          ? `${options.semanticRequestPath}/poll/${attempt}`
+          : "",
+        operationType: "funasr-poll",
+        bodyIdentity: { taskId, attempt },
+        includeTransportMetadata: true
       });
+      const body = fetched.body;
       const status = body.output?.task_status || body.task_status || "";
       options.onProgress?.({ taskId, status, attempt });
       if (status === "SUCCEEDED") {
         return body;
       }
       if (status === "FAILED" || status === "CANCELED") {
-        throw new Error(`Fun-ASR 任务${status === "FAILED" ? "失败" : "已取消"}：${body.output?.message || body.message || body.code || ""}`);
+        const error = new Error(`Fun-ASR 任务${status === "FAILED" ? "失败" : "已取消"}：${body.output?.message || body.message || body.code || ""}`);
+        error.code = "FUNASR_REMOTE_TERMINAL";
+        error.remoteTaskStatus = status;
+        throw error;
       }
       const waitMs = Math.min(FUNASR_MAX_POLL_INTERVAL_MS, FUNASR_POLL_INTERVAL_MS + attempt * 1000);
       attempt += 1;
-      await delay(Math.min(waitMs, Math.max(0, deadlineAt - Date.now())), options.signal);
+      if (!fetched.durableReplayed) {
+        await delay(Math.min(waitMs, Math.max(0, deadlineAt - Date.now())), options.signal);
+      }
     }
     throw new Error("Fun-ASR 任务轮询超时。");
+  }
+
+  async function cancelDashScopeFunAsrTask(taskId, config = {}, options = {}) {
+    const normalizedTaskId = String(taskId || "").trim();
+    if (!normalizedTaskId) {
+      return funAsrCancelOutcome("unknown", normalizedTaskId, 0, {}, "Fun-ASR cancellation has no task id.");
+    }
+    const timeoutMs = Math.max(1, Number(options.timeoutMs || FUNASR_CANCEL_TIMEOUT_MS) || FUNASR_CANCEL_TIMEOUT_MS);
+    try {
+      return await withFunAsrResponse(
+        `${dashScopeApiBaseUrl(config)}/tasks/${encodeURIComponent(normalizedTaskId)}/cancel`,
+        {
+          method: "POST",
+          headers: dashScopeHeaders(config.apiKey),
+          deadlineAt: Date.now() + timeoutMs,
+          requestTransport: options.requestTransport,
+          semanticRequestPath: options.semanticRequestPath || "",
+          operationType: "funasr-cancel",
+          bodyIdentity: { taskId: normalizedTaskId }
+        },
+        async (response, requestSignal) => {
+          let body = {};
+          try {
+            body = await responseJsonOrText(response, requestSignal);
+          } catch {
+            // The HTTP status is the provider acknowledgement; response details are optional.
+          }
+          const httpStatus = Math.max(0, Number(response.status || 0) || 0);
+          const remoteTaskStatus = String(body?.output?.task_status || body?.task_status || "").toUpperCase();
+          const status = remoteTaskStatus === "CANCELED"
+            ? "confirmed"
+            : ["PENDING", "RUNNING", "PRE-PROCESSING", "POST-PROCESSING", "UNKNOWN"].includes(remoteTaskStatus)
+              ? "unknown"
+              : ["SUCCEEDED", "FAILED"].includes(remoteTaskStatus)
+                ? "not-applied"
+                : response.ok
+                  ? "confirmed"
+                  : httpStatus >= 400 && httpStatus < 500
+                    ? "not-applied"
+                    : "unknown";
+          return funAsrCancelOutcome(status, normalizedTaskId, response.status, body);
+        }
+      );
+    } catch (error) {
+      return funAsrCancelOutcome(
+        "unknown",
+        normalizedTaskId,
+        0,
+        {},
+        String(error?.message || error || "Fun-ASR cancellation acknowledgement is unknown.")
+      );
+    }
+  }
+
+  async function queryDashScopeFunAsrTask(taskId, config = {}, options = {}) {
+    const normalizedTaskId = String(taskId || "").trim();
+    if (!normalizedTaskId) {
+      return { known: false, taskId: normalizedTaskId, taskStatus: "", httpStatus: 0, message: "Fun-ASR query has no task id." };
+    }
+    const timeoutMs = Math.max(1, Number(options.timeoutMs || FUNASR_CANCEL_TIMEOUT_MS) || FUNASR_CANCEL_TIMEOUT_MS);
+    try {
+      return await withFunAsrResponse(
+        `${dashScopeApiBaseUrl(config)}/tasks/${encodeURIComponent(normalizedTaskId)}`,
+        {
+          method: "GET",
+          headers: dashScopeHeaders(config.apiKey),
+          deadlineAt: Date.now() + timeoutMs,
+          requestTransport: options.requestTransport,
+          semanticRequestPath: options.semanticRequestPath || "",
+          operationType: "funasr-cancel-query",
+          bodyIdentity: { taskId: normalizedTaskId }
+        },
+        async (response, requestSignal) => {
+          let body = {};
+          try {
+            body = await responseJsonOrText(response, requestSignal);
+          } catch {
+            // HTTP status still tells us whether the query itself succeeded.
+          }
+          const taskStatus = String(body?.output?.task_status || body?.task_status || "").toUpperCase();
+          const known = Boolean(response.ok && FUNASR_QUERY_TASK_STATUSES.has(taskStatus));
+          return {
+            known,
+            taskId: normalizedTaskId,
+            taskStatus,
+            httpStatus: Math.max(0, Number(response.status || 0) || 0),
+            message: String(body?.message || body?.output?.message || body?.code ||
+              (response.ok && !known ? "Fun-ASR query response has no supported task_status." : ""))
+          };
+        }
+      );
+    } catch (error) {
+      return {
+        known: false,
+        taskId: normalizedTaskId,
+        taskStatus: "",
+        httpStatus: 0,
+        message: String(error?.message || error || "Fun-ASR task status query is unknown.")
+      };
+    }
+  }
+
+  function funAsrCancelOutcome(status, taskId, httpStatus, body = {}, fallbackMessage = "") {
+    const normalizedStatus = ["confirmed", "not-applied", "unknown"].includes(status) ? status : "unknown";
+    return {
+      status: normalizedStatus,
+      confirmed: normalizedStatus === "confirmed",
+      taskId: String(taskId || ""),
+      httpStatus: Math.max(0, Number(httpStatus || 0) || 0),
+      remoteTaskStatus: String(body?.output?.task_status || body?.task_status || ""),
+      message: String(body?.message || body?.output?.message || body?.code || fallbackMessage || "")
+    };
   }
 
   function findDashScopeFunAsrTranscriptionUrl(task = {}) {
@@ -330,52 +457,78 @@ export const FuguangBrowserFunAsrProvider = (() => {
     return task.output?.transcription_url || task.transcription_url || "";
   }
 
+  async function fetchDashScopeFunAsrResult(url, options = {}) {
+    return await fetchJsonOrThrow(url, {
+      headers: {},
+      signal: options.signal,
+      deadlineAt: options.deadlineAt,
+      requestTransport: options.requestTransport,
+      semanticRequestPath: options.semanticRequestPath || "",
+      operationType: "funasr-result",
+      bodyIdentity: options.bodyIdentity
+    });
+  }
+
   async function fetchJsonOrThrow(url, options = {}) {
     return await withFunAsrResponse(url, options, async (response, requestSignal) => {
       const body = await responseJsonOrText(response, requestSignal);
       if (!response.ok) {
-        throw new Error(`Fun-ASR 请求失败：HTTP ${response.status} ${body.message || body.code || ""}`.trim());
+        const error = new Error(`Fun-ASR 请求失败：HTTP ${response.status} ${body.message || body.code || ""}`.trim());
+        error.code = "FUNASR_HTTP_ERROR";
+        error.status = Math.max(0, Number(response.status || 0) || 0);
+        throw error;
       }
-      return body;
+      return options.includeTransportMetadata
+        ? { body, durableReplayed: Boolean(response.durableReplayed) }
+        : body;
     });
   }
 
-  function funAsrOperationOptions(config = {}, options = {}) {
-    const timeoutMs = Math.max(1, Number(config.timeoutMs || options.timeoutMs || FUNASR_TIMEOUT_MS) || FUNASR_TIMEOUT_MS);
-    return {
-      ...options,
-      deadlineAt: Number(options.deadlineAt || 0) || (Date.now() + timeoutMs)
-    };
-  }
-
   async function withFunAsrResponse(url, options = {}, consume) {
-    const { deadlineAt: rawDeadlineAt, timeoutMs: rawTimeoutMs, signal, ...fetchOptions } = options;
-    const timeoutMs = Math.max(1, Number(rawTimeoutMs || FUNASR_TIMEOUT_MS) || FUNASR_TIMEOUT_MS);
-    const deadlineAt = Number(rawDeadlineAt || 0) || (Date.now() + timeoutMs);
-    const remainingMs = deadlineAt - Date.now();
-    if (remainingMs <= 0) {
+    const {
+      deadlineAt: rawDeadlineAt,
+      signal,
+      requestTransport,
+      semanticRequestPath,
+      operationType,
+      bodyIdentity,
+      includeTransportMetadata: _includeTransportMetadata,
+      ...fetchOptions
+    } = options;
+    const deadlineAt = Number(rawDeadlineAt || 0) || 0;
+    const remainingMs = deadlineAt ? deadlineAt - Date.now() : 0;
+    if (deadlineAt && remainingMs <= 0) {
       throw new Error("Fun-ASR 请求超时。");
     }
     const controller = new AbortController();
     const unlink = linkFunAsrAbortSignal(signal, controller);
     let timedOut = false;
-    const timer = setTimeout(() => {
+    const timer = deadlineAt ? setTimeout(() => {
       timedOut = true;
       controller.abort(new Error("Fun-ASR request deadline exceeded."));
-    }, remainingMs);
+    }, remainingMs) : 0;
     try {
-      const response = await fetch(url, { ...fetchOptions, signal: controller.signal });
+      const response = typeof requestTransport === "function"
+        ? await requestTransport(url, { ...fetchOptions, signal: controller.signal }, {
+          signal: controller.signal,
+          semanticRequestPath,
+          operationType,
+          bodyIdentity
+        })
+        : await fetch(url, { ...fetchOptions, signal: controller.signal });
       return await consume(response, controller.signal);
     } catch (error) {
       if (signal?.aborted) {
         throw funAsrAbortError(signal.reason);
       }
-      if (timedOut || (controller.signal.aborted && Date.now() >= deadlineAt)) {
+      if (timedOut || (deadlineAt && controller.signal.aborted && Date.now() >= deadlineAt)) {
         throw new Error("Fun-ASR 请求超时。");
       }
       throw error;
     } finally {
-      clearTimeout(timer);
+      if (timer) {
+        clearTimeout(timer);
+      }
       unlink();
     }
   }
@@ -523,6 +676,9 @@ export const FuguangBrowserFunAsrProvider = (() => {
     getDashScopeUploadPolicy,
     submitDashScopeFunAsrTask,
     waitDashScopeFunAsrTask,
-    findDashScopeFunAsrTranscriptionUrl
+    queryDashScopeFunAsrTask,
+    cancelDashScopeFunAsrTask,
+    findDashScopeFunAsrTranscriptionUrl,
+    fetchDashScopeFunAsrResult
   };
 })();

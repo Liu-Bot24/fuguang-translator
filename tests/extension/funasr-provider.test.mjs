@@ -3,10 +3,7 @@ import fs from "node:fs";
 import vm from "node:vm";
 
 const source = fs.readFileSync(new URL("../../extension/src/background/browser-funasr-provider.js", import.meta.url), "utf8")
-  .replace('import { FuguangRequestSemaphore } from "../shared/request-semaphore.js";\n\n', "")
   .replace("export const FuguangBrowserFunAsrProvider =", "var FuguangBrowserFunAsrProvider =");
-const semaphoreSource = fs.readFileSync(new URL("../../extension/src/shared/request-semaphore.js", import.meta.url), "utf8")
-  .replace("export const FuguangRequestSemaphore =", "var FuguangRequestSemaphore =");
 
 const context = vm.createContext({
   console,
@@ -30,7 +27,6 @@ const context = vm.createContext({
   clearTimeout
 });
 
-vm.runInContext(semaphoreSource, context, { filename: "request-semaphore.js" });
 vm.runInContext(source, context, { filename: "browser-funasr-provider.js" });
 Object.assign(context, context.FuguangBrowserFunAsrProvider);
 
@@ -232,6 +228,254 @@ Object.assign(context, context.FuguangBrowserFunAsrProvider);
       ]),
       /Fun-ASR 请求超时/
     );
+  } finally {
+    context.fetch = originalFetch;
+  }
+}
+
+{
+  const calls = [];
+  const outcome = await context.cancelDashScopeFunAsrTask(
+    "task-pending",
+    { baseUrl: "https://dashscope.example/api/v1", apiKey: "cancel-secret" },
+    {
+      timeoutMs: 50,
+      requestTransport: async (url, options = {}) => {
+        calls.push({ url: String(url), options });
+        return new Response(JSON.stringify({ output: { task_status: "CANCELED" } }), {
+          status: 200, headers: { "content-type": "application/json" }
+        });
+      }
+    }
+  );
+  assert.equal(calls.length, 1);
+  assert.equal(calls[0].url, "https://dashscope.example/api/v1/tasks/task-pending/cancel");
+  assert.equal(calls[0].options.method, "POST");
+  assert.equal(calls[0].options.headers.Authorization, "Bearer cancel-secret");
+  assert.ok(calls[0].options.signal instanceof AbortSignal);
+  assert.deepEqual(JSON.parse(JSON.stringify(outcome)), {
+    status: "confirmed", confirmed: true, taskId: "task-pending", httpStatus: 200,
+    remoteTaskStatus: "CANCELED", message: ""
+  });
+}
+
+{
+  let calls = 0;
+  const outcome = await context.cancelDashScopeFunAsrTask(
+    "task-running",
+    { baseUrl: "https://dashscope.example/api/v1", apiKey: "cancel-secret" },
+    {
+      timeoutMs: 50,
+      requestTransport: async () => {
+        calls += 1;
+        return new Response(JSON.stringify({
+          code: "InvalidTaskStatus",
+          message: "Only PENDING tasks can be canceled",
+          output: { task_status: "RUNNING" }
+        }), { status: 409, headers: { "content-type": "application/json" } });
+      }
+    }
+  );
+  assert.equal(calls, 1);
+  assert.deepEqual(JSON.parse(JSON.stringify(outcome)), {
+    status: "unknown", confirmed: false, taskId: "task-running", httpStatus: 409,
+    remoteTaskStatus: "RUNNING", message: "Only PENDING tasks can be canceled"
+  });
+}
+
+for (const [remoteTaskStatus, expectedStatus] of [
+  ["RUNNING", "unknown"],
+  ["UNKNOWN", "unknown"],
+  ["SUCCEEDED", "not-applied"]
+]) {
+  const outcome = await context.cancelDashScopeFunAsrTask(
+    `task-200-${remoteTaskStatus.toLowerCase()}`,
+    { baseUrl: "https://dashscope.example/api/v1", apiKey: "cancel-secret" },
+    {
+      timeoutMs: 50,
+      requestTransport: async () => new Response(JSON.stringify({ output: { task_status: remoteTaskStatus } }), {
+        status: 200, headers: { "content-type": "application/json" }
+      })
+    }
+  );
+  assert.equal(outcome.status, expectedStatus, `HTTP 200 ${remoteTaskStatus}`);
+  assert.equal(outcome.confirmed, false, `HTTP 200 ${remoteTaskStatus}`);
+  assert.equal(outcome.remoteTaskStatus, remoteTaskStatus);
+}
+
+{
+  let calls = 0;
+  const outcome = await context.cancelDashScopeFunAsrTask(
+    "task-unknown",
+    { baseUrl: "https://dashscope.example/api/v1", apiKey: "cancel-secret" },
+    {
+      timeoutMs: 50,
+      requestTransport: async () => {
+        calls += 1;
+        throw new Error("connection reset before cancellation acknowledgement");
+      }
+    }
+  );
+  assert.equal(calls, 1, "remote cancellation must never retry automatically");
+  assert.deepEqual(JSON.parse(JSON.stringify(outcome)), {
+    status: "unknown", confirmed: false, taskId: "task-unknown", httpStatus: 0,
+    remoteTaskStatus: "", message: "connection reset before cancellation acknowledgement"
+  });
+}
+
+{
+  let calls = 0;
+  const outcome = await context.cancelDashScopeFunAsrTask(
+    "task-timeout",
+    { baseUrl: "https://dashscope.example/api/v1", apiKey: "cancel-secret" },
+    {
+      timeoutMs: 15,
+      requestTransport: async (_url, options = {}) => {
+        calls += 1;
+        return await new Promise((_, reject) => {
+          options.signal.addEventListener("abort", () => reject(options.signal.reason), { once: true });
+        });
+      }
+    }
+  );
+  assert.equal(calls, 1, "timed-out remote cancellation must never retry automatically");
+  assert.equal(outcome.status, "unknown");
+  assert.equal(outcome.confirmed, false);
+  assert.equal(outcome.taskId, "task-timeout");
+  assert.equal(outcome.httpStatus, 0);
+  assert.match(outcome.message, /超时/);
+}
+
+{
+  let calls = 0;
+  const outcome = await context.cancelDashScopeFunAsrTask(
+    "task-server-ambiguous",
+    { baseUrl: "https://dashscope.example/api/v1", apiKey: "cancel-secret" },
+    {
+      timeoutMs: 50,
+      requestTransport: async () => {
+        calls += 1;
+        return new Response(JSON.stringify({ message: "internal error after dispatch" }), {
+          status: 500, headers: { "content-type": "application/json" }
+        });
+      }
+    }
+  );
+  assert.equal(calls, 1);
+  assert.equal(outcome.status, "unknown", "a 5xx response cannot prove whether cancellation was applied");
+  assert.equal(outcome.confirmed, false);
+}
+
+{
+  const queried = await context.queryDashScopeFunAsrTask(
+    "task-running",
+    { baseUrl: "https://dashscope.example/api/v1", apiKey: "query-secret" },
+    {
+      timeoutMs: 50,
+      requestTransport: async (url, options = {}) => {
+        assert.equal(String(url), "https://dashscope.example/api/v1/tasks/task-running");
+        assert.equal(options.method, "GET");
+        assert.equal(options.headers.Authorization, "Bearer query-secret");
+        return new Response(JSON.stringify({ output: { task_id: "task-running", task_status: "RUNNING" } }), {
+          status: 200, headers: { "content-type": "application/json" }
+        });
+      }
+    }
+  );
+  assert.deepEqual(JSON.parse(JSON.stringify(queried)), {
+    known: true, taskId: "task-running", taskStatus: "RUNNING", httpStatus: 200, message: ""
+  });
+}
+
+for (const [label, responseFactory] of [
+  ["empty body", () => new Response("", { status: 200, headers: { "content-type": "application/json" } })],
+  ["malformed body", () => new Response("{not-json", { status: 200, headers: { "content-type": "application/json" } })],
+  ["missing task_status", () => new Response(JSON.stringify({ output: { task_id: "task-ambiguous" } }), {
+    status: 200, headers: { "content-type": "application/json" }
+  })]
+]) {
+  const queried = await context.queryDashScopeFunAsrTask(
+    "task-ambiguous",
+    { baseUrl: "https://dashscope.example/api/v1", apiKey: "query-secret" },
+    { timeoutMs: 50, requestTransport: async () => responseFactory() }
+  );
+  assert.equal(queried.known, false, `HTTP 200 with ${label} must remain ambiguous`);
+  assert.equal(queried.taskStatus, "");
+  assert.match(queried.message, /no supported task_status/);
+}
+
+{
+  const queried = await context.queryDashScopeFunAsrTask(
+    "task-query-timeout",
+    { baseUrl: "https://dashscope.example/api/v1", apiKey: "query-secret" },
+    {
+      timeoutMs: 10,
+      requestTransport: async (_url, options = {}) => await new Promise((_, reject) => {
+        options.signal.addEventListener("abort", () => reject(options.signal.reason), { once: true });
+      })
+    }
+  );
+  assert.equal(queried.known, false);
+  assert.equal(queried.taskStatus, "");
+  assert.match(queried.message, /超时/);
+}
+
+{
+  const originalFetch = context.fetch;
+  const calls = [];
+  context.fetch = async (url, options = {}) => {
+    calls.push(String(url));
+    if (String(url).includes("/uploads?action=getPolicy")) {
+      await new Promise(resolve => setTimeout(resolve, 25));
+      return {
+        ok: true,
+        json: async () => ({
+          data: {
+            upload_host: "https://oss-upload.example.test",
+            upload_dir: "dashscope/tmp",
+            oss_access_key_id: "oss-key",
+            signature: "oss-signature",
+            policy: "oss-policy"
+          }
+        })
+      };
+    }
+    if (String(url) === "https://oss-upload.example.test") {
+      return { ok: true, text: async () => "" };
+    }
+    if (String(url).endsWith("/services/audio/asr/transcription")) {
+      return { ok: true, json: async () => ({ output: { task_id: "task-delayed-upload" } }) };
+    }
+    if (String(url).endsWith("/tasks/task-delayed-upload")) {
+      return {
+        ok: true,
+        json: async () => ({
+          output: {
+            task_status: "SUCCEEDED",
+            results: [{ transcription_url: "https://result.example.test/delayed.json" }]
+          }
+        })
+      };
+    }
+    if (String(url) === "https://result.example.test/delayed.json") {
+      return { ok: true, json: async () => ({ transcripts: [{ sentences: [] }] }) };
+    }
+    throw new Error(`unexpected fetch ${url}`);
+  };
+  try {
+    const payload = await context.transcribeDashScopeFunAsrFile(
+      { name: "audio.mp3", mime: "audio/mpeg", buffer: new Uint8Array([1]).buffer },
+      {
+        providerType: "dashscope_funasr",
+        baseUrl: "https://dashscope.aliyuncs.com/api/v1",
+        model: "fun-asr",
+        apiKey: "test-key",
+        timeoutMs: 1
+      },
+      { chunksTotal: 1, duration: 60 }
+    );
+    assert.equal(Array.isArray(payload.transcripts), true);
+    assert.equal(calls.length, 5, "upload time must not consume the post-submit polling timeout");
   } finally {
     context.fetch = originalFetch;
   }

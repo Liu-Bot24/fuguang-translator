@@ -11,6 +11,11 @@ assert.equal(manifest.name, "__MSG_appName__");
 assert.equal(manifest.short_name, "__MSG_appShortName__");
 assert.equal(manifest.description, "__MSG_appDescription__");
 assert.equal(manifest.action.default_title, "__MSG_actionTitle__");
+assert.equal(
+  manifest.permissions.includes("unlimitedStorage"),
+  true,
+  "durable IndexedDB and CacheStorage replay evidence must be protected from quota eviction"
+);
 
 const localeDirs = fs
   .readdirSync(new URL("_locales/", extensionRoot), { withFileTypes: true })

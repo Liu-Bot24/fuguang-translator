@@ -1,5 +1,6 @@
 import assert from "node:assert/strict";
 import fs from "node:fs";
+import { fileURLToPath } from "node:url";
 import vm from "node:vm";
 
 const sidepanel = fs.readFileSync(new URL("../../extension/src/sidepanel/sidepanel.js", import.meta.url), "utf8");
@@ -8,6 +9,7 @@ const backgroundProfiles = loadBackgroundModelProfiles();
 const sidepanelProfiles = loadSidepanelProfiles();
 const sidepanelHtml = fs.readFileSync(new URL("../../extension/src/sidepanel/sidepanel.html", import.meta.url), "utf8");
 const manifest = JSON.parse(fs.readFileSync(new URL("../../extension/manifest.json", import.meta.url), "utf8"));
+const smokeDirectory = fileURLToPath(new URL("../smoke/", import.meta.url));
 
 assert.equal(constNumber(sidepanel, "MODEL_SETTINGS_VERSION"), constNumber(background, "MODEL_SETTINGS_VERSION"));
 assert.equal(sidepanelProfiles.DEFAULT_ASR_PROFILE_ID, backgroundProfiles.DEFAULT_ASR_PROFILE_ID);
@@ -76,6 +78,15 @@ assert.ok(
   cspSourceList(manifest.content_security_policy.extension_pages, "connect-src").includes("file:"),
   "extension_pages connect-src must allow file: so local media files can be fetched after the user enables file URL access"
 );
+
+for (const smokeFile of fs.readdirSync(smokeDirectory).filter(name => name.endsWith(".mjs"))) {
+  const smokeSource = fs.readFileSync(new URL(`../smoke/${smokeFile}`, import.meta.url), "utf8");
+  assert.doesNotMatch(
+    smokeSource,
+    /indexedDB\.open\(\s*["']liusheng-job-runtime["']\s*,/,
+    `${smokeFile} must open the existing job ledger without pinning an obsolete schema version`
+  );
+}
 
 function constNumber(source, name) {
   const match = source.match(new RegExp(`const ${name} = (\\d+);`));

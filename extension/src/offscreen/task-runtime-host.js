@@ -1,5 +1,7 @@
 import { FuguangJobStore } from "../background/job-store.js";
+import { FuguangJobContract } from "../shared/job-contract.js";
 import { FuguangTaskRuntimeProtocol } from "../shared/task-runtime-protocol.js";
+import { createDurableFunAsrCancellationHandler } from "./browser-funasr-executor.js";
 import { executeOffscreenJob } from "./task-runtime-executor.js";
 
 export function createTaskRuntimeHost(options = {}) {
@@ -30,6 +32,9 @@ export function createTaskRuntimeHost(options = {}) {
     }
     if (type === FuguangTaskRuntimeProtocol.MESSAGE.START_JOB) {
       return startJob(command);
+    }
+    if (type === FuguangTaskRuntimeProtocol.MESSAGE.WAKE_JOB) {
+      return wakeJob(command);
     }
     if (type === FuguangTaskRuntimeProtocol.MESSAGE.CANCEL_JOB) {
       return requestCancellation(command);
@@ -67,6 +72,15 @@ export function createTaskRuntimeHost(options = {}) {
     if (activeRun) {
       const durable = await jobStore.getJob(job.id).catch(() => null);
       if (runOwnsDurableLease(activeRun, durable, job, ownerId, now())) {
+        if (resumeExisting && String(durable?.status || "") === "interrupted") {
+          return FuguangTaskRuntimeProtocol.response(FuguangTaskRuntimeProtocol.MESSAGE.ERROR, command, {
+            error: "The previous offscreen run is releasing its lease.",
+            reason: "active-run-settling",
+            retryable: true,
+            jobId: job.id,
+            runToken: job.runToken
+          });
+        }
         return FuguangTaskRuntimeProtocol.response(FuguangTaskRuntimeProtocol.MESSAGE.ACK, command, {
           accepted: true,
           duplicate: true,
@@ -144,6 +158,7 @@ export function createTaskRuntimeHost(options = {}) {
     const controller = new AbortController();
     const run = {
       controller,
+      wakeChannel: createWakeChannel(),
       command,
       started: false,
       fenced: false,
@@ -165,6 +180,7 @@ export function createTaskRuntimeHost(options = {}) {
         job,
         chunks: snapshot.chunks || [],
         signal: controller.signal,
+        waitForWake: (timeoutMs, signal = controller.signal) => run.wakeChannel.wait(timeoutMs, signal),
         executionOwnerId: ownerId,
         executionEpoch: run.executionEpoch
       }))
@@ -174,6 +190,7 @@ export function createTaskRuntimeHost(options = {}) {
           }
           const current = await jobStore.getJob(job.id).catch(() => null);
           if (!current || current.runToken !== job.runToken || current.cancelRequested ||
+              current.status === "interrupted" || FuguangJobContract.isTerminalStatus(current.status) ||
               String(current.executionOwnerId || "") !== ownerId ||
               Number(current.executionEpoch || 0) !== run.executionEpoch) {
             return;
@@ -214,6 +231,22 @@ export function createTaskRuntimeHost(options = {}) {
     });
   }
 
+  function wakeJob(command) {
+    const jobId = String(command.jobId || "");
+    const runToken = String(command.runToken || "");
+    const run = activeRuns.get(`${jobId}:${runToken}`);
+    const accepted = Boolean(run && !run.fenced && !run.controller.signal.aborted);
+    if (accepted) {
+      run.wakeChannel.wake();
+    }
+    return FuguangTaskRuntimeProtocol.response(FuguangTaskRuntimeProtocol.MESSAGE.ACK, command, {
+      accepted,
+      reason: accepted ? "" : "inactive-run",
+      jobId,
+      runToken
+    });
+  }
+
   function startLeaseHeartbeat(runKey, run, job) {
     if (!heartbeatIntervalMs || typeof setInterval !== "function") {
       return;
@@ -233,6 +266,13 @@ export function createTaskRuntimeHost(options = {}) {
           run.executionEpoch
         );
         if (!result.applied) {
+          if (result.reason === "inactive-job") {
+            const durable = await jobStore.getJob(job.id).catch(() => null);
+            if (durable?.runToken === job.runToken && durable.cancelRequested) {
+              cancelActiveRun(run, "Task cancellation was observed in durable state.");
+              return;
+            }
+          }
           fenceActiveRun(runKey, run, "Task execution lease was lost.");
           return;
         }
@@ -278,18 +318,30 @@ export function createTaskRuntimeHost(options = {}) {
     }
   }
 
+  function cancelActiveRun(run, message) {
+    if (!run || run.controller.signal.aborted) return;
+    const cancellation = new Error(message || "Task cancellation requested.");
+    cancellation.name = "AbortError";
+    cancellation.code = "FUGUANG_TASK_CANCEL_REQUESTED";
+    run.controller.abort(cancellation);
+  }
+
   async function requestCancellation(command) {
     const jobId = String(command.jobId || "");
     const runToken = String(command.runToken || "");
     const requestedAt = Number(command.requestedAt || Date.now());
     const result = await jobStore.markCancelRequested(jobId, runToken, requestedAt);
+    const cancellationAccepted = Boolean(result.applied || result.reason === "already-cancelled");
     const run = activeRuns.get(`${jobId}:${runToken}`);
-    run?.controller.abort(new Error("Task cancellation requested."));
-    if (result.applied) {
-      setTimeout(() => Promise.resolve(cancelJob({ jobId, runToken, requestedAt })).catch(() => {}), 0);
+    cancelActiveRun(run);
+    if (cancellationAccepted) {
+      const funAsrConfig = command.funAsrCancelConfig && typeof command.funAsrCancelConfig === "object"
+        ? JSON.parse(JSON.stringify(command.funAsrCancelConfig))
+        : undefined;
+      setTimeout(() => Promise.resolve(cancelJob({ jobId, runToken, requestedAt, funAsrConfig })).catch(() => {}), 0);
     }
     return FuguangTaskRuntimeProtocol.response(FuguangTaskRuntimeProtocol.MESSAGE.ACK, command, {
-      accepted: Boolean(result.applied),
+      accepted: cancellationAccepted,
       reason: result.reason || "",
       jobId,
       runToken
@@ -338,11 +390,67 @@ export function createTaskRuntimeHost(options = {}) {
   };
 }
 
+function createWakeChannel() {
+  let pending = false;
+  const waiters = new Set();
+  return {
+    wake() {
+      pending = true;
+      for (const resolve of [...waiters]) {
+        resolve({ reason: "wake" });
+      }
+      waiters.clear();
+    },
+    wait(timeoutMs, signal = null) {
+      if (pending) {
+        pending = false;
+        return Promise.resolve({ reason: "wake" });
+      }
+      if (signal?.aborted) {
+        return Promise.reject(abortError(signal.reason));
+      }
+      return new Promise((resolve, reject) => {
+        let settled = false;
+        const settle = (callback, value) => {
+          if (settled) {
+            return;
+          }
+          settled = true;
+          clearTimeout(timer);
+          waiters.delete(onWake);
+          signal?.removeEventListener?.("abort", onAbort);
+          callback(value);
+        };
+        const onWake = value => {
+          pending = false;
+          settle(resolve, value || { reason: "wake" });
+        };
+        const onAbort = () => settle(reject, abortError(signal?.reason));
+        const timer = setTimeout(() => settle(resolve, { reason: "timeout" }), Math.max(0, Number(timeoutMs) || 0));
+        waiters.add(onWake);
+        signal?.addEventListener?.("abort", onAbort, { once: true });
+      });
+    }
+  };
+}
+
+function abortError(reason) {
+  const error = new Error(reason?.message || "Task cancellation requested.");
+  error.name = "AbortError";
+  return error;
+}
+
 function createRuntimeOwnerId() {
   const suffix = globalThis.crypto?.randomUUID?.() || `${Date.now()}-${Math.random().toString(16).slice(2)}`;
   return `offscreen:${suffix}`;
 }
 
-export const FuguangOffscreenTaskRuntime = createTaskRuntimeHost({ executeJob: executeOffscreenJob });
+const productionJobStore = FuguangJobStore.create();
+const productionFunAsrCancellation = createDurableFunAsrCancellationHandler({ jobStore: productionJobStore });
+export const FuguangOffscreenTaskRuntime = createTaskRuntimeHost({
+  jobStore: productionJobStore,
+  executeJob: executeOffscreenJob,
+  cancelJob: productionFunAsrCancellation
+});
 FuguangOffscreenTaskRuntime.install();
 ;

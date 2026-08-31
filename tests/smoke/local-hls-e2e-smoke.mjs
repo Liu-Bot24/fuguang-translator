@@ -79,6 +79,7 @@ try {
 async function runExtensionSmoke(origin) {
   const context = await chromium.launchPersistentContext(userDataDir, {
     headless: chromiumHeadless,
+    executablePath: process.env.PLAYWRIGHT_BROWSER_EXECUTABLE || undefined,
     args: [
       `--disable-extensions-except=${extensionPath}`,
       `--load-extension=${extensionPath}`
@@ -327,7 +328,11 @@ function wavBuffer({ seconds, sampleRate = 16_000, freq = 440 }) {
 
 function resolveCommand(command) {
   try {
-    return execSync(`command -v ${command}`, { encoding: "utf8", shell: "/bin/zsh" }).trim();
+    const locator = process.platform === "win32" ? "where.exe" : "which";
+    return execFileSync(locator, [command], { encoding: "utf8" })
+      .split(/\r?\n/)
+      .map(value => value.trim())
+      .find(Boolean) || "";
   } catch {
     throw new Error(`Missing required command: ${command}`);
   }
@@ -337,6 +342,10 @@ function loadPlaywright() {
   try {
     return require("playwright");
   } catch {
+    const configuredRoot = String(process.env.PLAYWRIGHT_NODE_MODULES || "").trim();
+    if (configuredRoot) {
+      return require(path.join(configuredRoot, "playwright"));
+    }
     const globalRoot = execSync("npm root -g", { encoding: "utf8" }).trim();
     return require(path.join(globalRoot, "playwright"));
   }

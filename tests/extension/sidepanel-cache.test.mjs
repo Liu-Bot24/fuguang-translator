@@ -38,6 +38,35 @@ import vm from "node:vm";
   assert.ok(js.includes('sourceLanguage: document.querySelector("#sourceLanguage")'));
   assert.equal(js.includes('asrVocabularyId: document.querySelector("#asrVocabularyId")'), false);
   assert.ok(js.includes("sourceLanguage: getSourceLanguageValue()"));
+  assert.ok(
+    js.includes("const STATUS_PORT_RECONNECT_DELAYS_MS = [250, 500, 1000, 2000, 5000]"),
+    "status port disconnects should reconnect promptly instead of waiting for the 15 second fallback poll"
+  );
+  assert.match(
+    js,
+    /port\.onDisconnect[\s\S]*?queueStatusRefresh\(\);[\s\S]*?scheduleStatusPortReconnect\(\);/,
+    "disconnect must immediately refresh visible status and schedule reconnection"
+  );
+  assert.match(
+    js,
+    /function queueStatusRefresh\(\)[\s\S]*?if \(refreshStatusInFlight\)[\s\S]*?statusRefreshPending = true;/,
+    "a status event received during an active refresh must be remembered"
+  );
+  assert.match(
+    js,
+    /finally \{[\s\S]*?refreshStatusInFlight = false;[\s\S]*?if \(statusRefreshPending\)[\s\S]*?queueStatusRefresh\(\);/,
+    "an in-flight status event must trigger one trailing refresh"
+  );
+  assert.match(
+    js,
+    /remoteCancellationStatus === "pending"[\s\S]*?statusRemoteCancellationPending/,
+    "a locally stopped FunASR task must expose pending remote cancellation instead of claiming it fully stopped"
+  );
+  assert.match(
+    js,
+    /response\.job\?\.remoteCancellationStatus === "pending"[\s\S]*?remoteCancellationPending/,
+    "the stop action message must preserve remote-cancellation uncertainty"
+  );
   assert.equal(
     js.match(/const MODEL_SETTINGS_VERSION = (\d+);/)?.[1],
     background.match(/const MODEL_SETTINGS_VERSION = (\d+);/)?.[1]
@@ -1085,7 +1114,7 @@ assert.deepEqual(JSON.parse(JSON.stringify(retryStageButtonState)), {
     retryTitle: "从当前卡住的位置继续，不改变抽取、ASR、翻译的边界。",
     rerunAsrDisabled: false,
     rerunAsrText: "重新 ASR",
-    rerunAsrTitle: "复用已抽取音频重新识别；会清除旧 ASR 原文和旧译文。",
+    rerunAsrTitle: "复用已抽取音频重新识别；新结果成功保存前会继续显示现有字幕。",
     translationDisabled: true
   },
   translationResume: {
@@ -1094,7 +1123,7 @@ assert.deepEqual(JSON.parse(JSON.stringify(retryStageButtonState)), {
     retryTitle: "从当前卡住的位置继续，不改变抽取、ASR、翻译的边界。",
     rerunAsrDisabled: false,
     rerunAsrText: "重新 ASR",
-    rerunAsrTitle: "复用已抽取音频重新识别；会清除旧 ASR 原文和旧译文。",
+    rerunAsrTitle: "复用已抽取音频重新识别；新结果成功保存前会继续显示现有字幕。",
     translationTitle: "只重新翻译已有原文。",
     translationDisabled: false
   }
@@ -1349,6 +1378,71 @@ assert.deepEqual(JSON.parse(JSON.stringify(retranslateButtonTargetLanguageState.
   }
 ]);
 assert.equal(retranslateButtonTargetLanguageState.message, "重翻译已提交");
+
+const fullRetranslatePreservesVisibleSubtitles = await vm.runInContext(`
+  (async () => {
+    const originalTabsQuery = chrome.tabs.query;
+    const originalSendMessage = chrome.runtime.sendMessage;
+    const originalClearSubtitles = clearSubtitles;
+    let clearCalls = 0;
+    currentJobId = "job-visible-old-translation";
+    renderedSubtitleJobId = currentJobId;
+    currentJob = {
+      id: currentJobId,
+      status: "completed",
+      stage: "completed",
+      translation: { chunkStatuses: [{ index: 0, stage: "completed", translatedCount: 1 }] }
+    };
+    translationRetryRequestInFlight = false;
+    chrome.tabs.query = async () => [{ id: 1, title: "Video", url: "https://example.test/watch" }];
+    chrome.runtime.sendMessage = async () => ({
+      ok: true,
+      message: "重翻译已提交",
+      job: { ...currentJob, status: "running", stage: "retry_translation" }
+    });
+    clearSubtitles = () => { clearCalls += 1; };
+    try {
+      await retryTranslationFromSidePanel([]);
+      return { clearCalls, currentJobId };
+    } finally {
+      clearSubtitles = originalClearSubtitles;
+      chrome.tabs.query = originalTabsQuery;
+      chrome.runtime.sendMessage = originalSendMessage;
+    }
+  })()
+`, context);
+
+assert.deepEqual(JSON.parse(JSON.stringify(fullRetranslatePreservesVisibleSubtitles)), {
+  clearCalls: 0,
+  currentJobId: "job-visible-old-translation"
+});
+
+const cachedRetranslateReplacementPreservesVisibleSubtitles = vm.runInContext(`
+  (() => {
+    const originalClearSubtitles = clearSubtitles;
+    let clearCalls = 0;
+    renderedSubtitleJobId = "cached-old-job";
+    currentJobId = "cached-old-job";
+    clearSubtitles = () => { clearCalls += 1; };
+    try {
+      renderJob({
+        id: "cached-new-retranslate-job",
+        status: "running",
+        stage: "retry_translation",
+        pipeline: "cached-transcript",
+        translation: { chunkStatuses: [{ index: 0, stage: "asr_done", translatedCount: 1 }] }
+      });
+      return { clearCalls, currentJobId };
+    } finally {
+      clearSubtitles = originalClearSubtitles;
+    }
+  })()
+`, context);
+
+assert.deepEqual(JSON.parse(JSON.stringify(cachedRetranslateReplacementPreservesVisibleSubtitles)), {
+  clearCalls: 0,
+  currentJobId: "cached-new-retranslate-job"
+});
 
 const retryChunkTranslationOnlyTitleState = await vm.runInContext(`
   (() => {
@@ -6473,4 +6567,15 @@ assert.match(
   cachedSubtitleModeChangeState.pageVtt,
   /cached source line/,
   "a user-requested cached subtitle mode change must update the page instead of being silently rejected as stale"
+);
+
+assert.equal(
+  vm.runInContext(`countReusableAudioChunks({
+    audioCacheVerified: true,
+    reusableAudioChunks: 0,
+    extract: { status: "completed" },
+    translation: { chunksTotal: 4 }
+  })`, context),
+  0,
+  "a verified empty audio cache must not fall back to the extracted chunk total and re-enable ASR"
 );

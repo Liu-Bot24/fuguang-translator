@@ -17,9 +17,10 @@ function testDomainsFromUrls(urls) {
   return [...domains].sort();
 }
 
+let runtimeMessageListener = null;
 const chrome = {
   runtime: {
-    onMessage: { addListener: () => {} },
+    onMessage: { addListener: listener => { runtimeMessageListener = listener; } },
     getURL: path => `chrome-extension://fuguang-test/${path}`,
     sendMessage: async message => ({ domains: testDomainsFromUrls(message?.urls) })
   }
@@ -68,11 +69,6 @@ function loadSharedModule(path, exportName) {
 
 loadSharedModule("../../extension/src/shared/dash-manifest-parser.js", "FuguangDashManifestParser");
 loadSharedModule("../../extension/src/shared/hls-url-helpers.js", "FuguangHlsUrlHelpers");
-vm.runInContext(
-  fs.readFileSync(new URL("../../extension/src/shared/media-network-policy.js", import.meta.url), "utf8"),
-  context,
-  { filename: "media-network-policy.js" }
-);
 
 const localMediaExtractorSource = fs.readFileSync(
   new URL("../../extension/src/offscreen/local-media-extractor.js", import.meta.url),
@@ -92,30 +88,82 @@ vm.runInContext(localMediaExtractorSource, context, { filename: "local-media-ext
 vm.runInContext(source, context, { filename: "offscreen.js" });
 
 {
-  const fragments = [
-    { url: "https://cdn.example.test/init.mp4", segmentType: "init", start: 0, end: 0, duration: 0 },
-    ...Array.from({ length: 95 }, (_, index) => ({
-      url: `https://cdn.example.test/seg-${index}.m4s`,
-      segmentType: "media",
-      start: index * 3,
-      end: (index + 1) * 3,
-      duration: 3
-    }))
-  ];
-  const windows = context.buildFragmentedMp4Windows(fragments, 180);
-  assert.equal(windows.length, 2);
-  assert.equal(windows[0].mediaFragments.length, 60);
-  assert.equal(windows[1].mediaFragments.length, 35);
-  assert.equal(windows.every(window => window.initFragments.length === 1), true);
-  const chunks = context.normalizeFragmentedWindowAudioChunks({
-    file: { name: "window.mp3", cacheUrl: "https://fuguang.local/window.mp3", bytes: 10 },
-    bytes: 10
-  }, windows[1], 1);
-  assert.equal(chunks[0].index, 1);
-  assert.equal(chunks[0].start, windows[1].start);
-  assert.equal(chunks[0].end, windows[1].end);
-  assert.equal(chunks[0].logical, true);
+  const originalExtractAudio = context.extractAudioWithWebFfmpeg;
+  const originalDeliverTerminal = context.deliverWebFfmpegExtractionTerminal;
+  const terminalTypes = [];
+  context.extractAudioWithWebFfmpeg = async () => ({ audioChunks: [] });
+  context.deliverWebFfmpegExtractionTerminal = async (_message, terminal) => {
+    terminalTypes.push(terminal.type);
+    throw new Error("terminal delivery unavailable");
+  };
+  try {
+    const response = await new Promise(resolve => {
+      assert.equal(runtimeMessageListener({
+        type: "FUGUANG_OFFSCREEN_WEB_FFMPEG_EXTRACT_AUDIO",
+        jobId: "terminal-delivery-test",
+        runToken: "run-terminal-delivery-test"
+      }, {}, resolve), true);
+    });
+    assert.equal(response.ok, false);
+    assert.match(response.error, /terminal delivery unavailable/);
+    assert.deepEqual(terminalTypes, ["FUGUANG_OFFSCREEN_WEB_FFMPEG_COMPLETED"]);
+  } finally {
+    context.extractAudioWithWebFfmpeg = originalExtractAudio;
+    context.deliverWebFfmpegExtractionTerminal = originalDeliverTerminal;
+  }
 }
+
+{
+  const originalSendMessage = chrome.runtime.sendMessage;
+  const sent = [];
+  const lease = {
+    leaseToken: "lease-offscreen-terminal",
+    ruleId: 250321,
+    jobId: "job-offscreen-terminal",
+    runToken: "run-offscreen-terminal"
+  };
+  chrome.runtime.sendMessage = async message => {
+    sent.push(JSON.parse(JSON.stringify(message)));
+    return { ok: true, accepted: true };
+  };
+  try {
+    await context.deliverWebFfmpegExtractionTerminal({
+      tabId: 12,
+      jobId: lease.jobId,
+      runToken: lease.runToken,
+      mediaHeaderLease: lease
+    }, {
+      type: "FUGUANG_OFFSCREEN_WEB_FFMPEG_COMPLETED",
+      result: { duration: 30 }
+    });
+  } finally {
+    chrome.runtime.sendMessage = originalSendMessage;
+  }
+  assert.deepEqual(sent[0].mediaHeaderLease, lease, "terminal retries must carry the durable DNR lease to a replacement Worker");
+}
+
+{
+  const lease = {
+    leaseToken: "lease-active-query",
+    ruleId: 250323,
+    jobId: "job-active-query",
+    runToken: "run-active-query"
+  };
+  context.activeQueryLease = lease;
+  vm.runInContext("retainActiveMediaHeaderLease(activeQueryLease)", context);
+  let response = null;
+  const asyncResponse = runtimeMessageListener({
+    type: "FUGUANG_OFFSCREEN_GET_ACTIVE_MEDIA_HEADER_LEASES"
+  }, {}, value => { response = value; });
+  assert.equal(asyncResponse, false);
+  assert.deepEqual(JSON.parse(JSON.stringify(response)), { ok: true, leases: [lease] });
+  vm.runInContext("releaseActiveMediaHeaderLease(activeQueryLease.leaseToken)", context);
+  delete context.activeQueryLease;
+}
+
+assert.equal(context.buildFragmentedMp4Windows, undefined);
+assert.equal(context.extractFragmentedMp4AudioInWindows, undefined);
+assert.equal(context.normalizeFragmentedWindowAudioChunks, undefined);
 
 {
   const originalResetWebFfmpegFrame = context.resetWebFfmpegFrame;
@@ -257,6 +305,68 @@ vm.runInContext(source, context, { filename: "offscreen.js" });
   assert.equal(requestOptions?.runToken, "run-current", "local/range FFmpeg work must use the run-tokenized cancellation key");
 }
 
+async function assertLocalMediaAbortSkipsRecovery({ abortBeforeStart }) {
+  let requests = 0;
+  let reloads = 0;
+  let firstRequestStarted;
+  const requestStarted = new Promise(resolve => {
+    firstRequestStarted = resolve;
+  });
+  const controller = new AbortController();
+  const abortError = Object.assign(new Error("local media cancelled"), { name: "AbortError" });
+  const extractor = context.FuguangLocalMediaExtractor.createLocalMediaExtractor({
+    reportWebFfmpegExtractionProgress: () => {},
+    requestWebFfmpeg: async (_payload, _transfer, _onProgress, options) => {
+      requests += 1;
+      firstRequestStarted();
+      if (options?.signal?.aborted) {
+        throw options.signal.reason;
+      }
+      return new Promise((_resolve, reject) => {
+        options?.signal?.addEventListener("abort", () => reject(options.signal.reason), { once: true });
+      });
+    },
+    reloadWebFfmpegFrame: async () => {
+      reloads += 1;
+    },
+    persistWebFfmpegAudioResult: async () => ({}),
+    offsetSpeechIntervals: value => value
+  });
+  if (abortBeforeStart) {
+    controller.abort(abortError);
+  }
+  const operation = extractor.extractLocalMediaAudioWindowWithWebFfmpegWithRetry({
+    jobId: `local-abort-${abortBeforeStart ? "pre" : "active"}`,
+    runToken: "run-current",
+    webFfmpegUrl: "chrome-extension://fuguang-test/web-ffmpeg/index.html",
+    abortSignal: controller.signal
+  }, {
+    buffer: new Uint8Array([1]).buffer,
+    name: "chunk.m4a",
+    mime: "audio/mp4"
+  }, {
+    start: 0,
+    end: 10,
+    duration: 10,
+    coreStart: 0,
+    coreEnd: 10,
+    coreDuration: 10
+  }, 0, 1);
+  if (!abortBeforeStart) {
+    await requestStarted;
+    controller.abort(abortError);
+  }
+  await assert.rejects(operation, /local media cancelled|任务已停止/);
+  assert.deepEqual(
+    { requests, reloads },
+    { requests: abortBeforeStart ? 0 : 1, reloads: 0 },
+    "cancelled local media extraction must not reload or retry Web FFmpeg"
+  );
+}
+
+await assertLocalMediaAbortSkipsRecovery({ abortBeforeStart: true });
+await assertLocalMediaAbortSkipsRecovery({ abortBeforeStart: false });
+
 {
   const order = [];
   let releaseFirst;
@@ -290,6 +400,109 @@ vm.runInContext(source, context, { filename: "offscreen.js" });
     "recovered",
     "单次 FFmpeg 操作失败后不能阻塞后续操作"
   );
+}
+
+{
+  context.setTimeout = setTimeout;
+  context.clearTimeout = clearTimeout;
+  const webFfmpegUrl = "chrome-extension://fuguang-test/web-ffmpeg/index.html";
+  const collectInitBuffer = vm.runInContext("new Uint8Array([1]).buffer", context);
+  const abortQuickly = async (start, label) => {
+    const controller = new AbortController();
+    const pending = start(controller.signal);
+    await Promise.resolve();
+    const reason = new Error(`${label} cancelled`);
+    controller.abort(reason);
+    await assert.rejects(
+      Promise.race([
+        pending,
+        new Promise((_, reject) => setTimeout(() => reject(new Error(`${label} did not cancel promptly`)), 250))
+      ]),
+      /cancelled|任务已停止/
+    );
+    assert.notEqual(vm.runInContext("webFfmpegFrame", context), null, `${label} cancellation must not tear down shared initialization`);
+    context.resetWebFfmpegFrame(new Error(`${label} cleanup`));
+    await Promise.resolve();
+    assert.equal(vm.runInContext("webFfmpegReady", context), null, `${label} cleanup must release the shared ready wait`);
+  };
+
+  {
+    const cancelledController = new AbortController();
+    const activeController = new AbortController();
+    const cancelledWait = context.ensureWebFfmpegFrameForJob(webFfmpegUrl, cancelledController.signal);
+    const activeWait = context.ensureWebFfmpegFrameForJob(webFfmpegUrl, activeController.signal);
+    await Promise.resolve();
+    cancelledController.abort(new Error("first shared waiter cancelled"));
+    await assert.rejects(cancelledWait, /first shared waiter cancelled|任务已停止/);
+    assert.notEqual(vm.runInContext("webFfmpegFrame", context), null, "one cancelled job must not reset another job's shared initialization");
+    vm.runInContext(`webFfmpegFrame.iframe.contentWindow = { postMessage() {} }; webFfmpegFrame.ready = true; webFfmpegFrame.resolveReady()`, context);
+    await activeWait;
+    assert.equal(activeController.signal.aborted, false);
+    context.resetWebFfmpegFrame();
+  }
+
+  await abortQuickly(signal => context.extractAudioWithWebFfmpeg({
+    sourceUrl: "https://media.example/video.mp4",
+    webFfmpegUrl,
+    abortSignal: signal,
+    jobId: "init-cancel-extract",
+    runToken: "run-extract"
+  }), "extract init");
+
+  await abortQuickly(signal => context.FuguangOffscreenAudio.prepareDurableAsrLogicalAudio({
+    file: {
+      parts: [
+        { file: { cacheUrl: "https://fuguang.local/__fuguang_audio_cache/init-cancel/0.mp3" } },
+        { file: { cacheUrl: "https://fuguang.local/__fuguang_audio_cache/init-cancel/1.mp3" } }
+      ]
+    },
+    webFfmpegUrl,
+    cacheNamespace: "init-cancel-logical",
+    abortSignal: signal,
+    jobId: "init-cancel-prepare",
+    runToken: "run-prepare"
+  }), "prepare init");
+
+  await abortQuickly(signal => context.FuguangOffscreenAudio.collectSpeechAudio({
+    file: { name: "source.mp3", mime: "audio/mpeg", buffer: collectInitBuffer },
+    webFfmpegUrl,
+    cacheNamespace: "init-cancel-collect",
+    abortSignal: signal,
+    jobId: "init-cancel-collect",
+    runToken: "run-collect",
+    speechIntervals: [{ start: 0, end: 1 }]
+  }), "collect init");
+
+  const originalRequestWebFfmpegNow = context.requestWebFfmpegNow;
+  context.requestWebFfmpegNow = async payload => payload.id;
+  try {
+    const blockedController = new AbortController();
+    const blocked = context.requestWebFfmpegForJob({
+      jobId: "queued-init-cancel",
+      runToken: "run-blocked",
+      abortSignal: blockedController.signal,
+      webFfmpegUrl
+    }, { id: "blocked-init-request" });
+    await Promise.resolve();
+    blockedController.abort(new Error("queued init cancelled"));
+    await assert.rejects(blocked, /queued init cancelled|任务已停止/);
+
+    const next = context.requestWebFfmpegForJob({
+      jobId: "queued-init-next",
+      runToken: "run-next",
+      abortSignal: new AbortController().signal,
+      webFfmpegUrl
+    }, { id: "next-after-init-cancel" });
+    await Promise.resolve();
+    await Promise.resolve();
+    vm.runInContext(`webFfmpegFrame.iframe.contentWindow = { postMessage() {} }; webFfmpegFrame.ready = true; webFfmpegFrame.resolveReady()`, context);
+    assert.equal(await next, "next-after-init-cancel", "an aborted initialization must not poison the global FFmpeg queue");
+  } finally {
+    context.requestWebFfmpegNow = originalRequestWebFfmpegNow;
+    context.resetWebFfmpegFrame();
+  }
+  delete context.setTimeout;
+  delete context.clearTimeout;
 }
 
 {
@@ -377,26 +590,6 @@ vm.runInContext(source, context, { filename: "offscreen.js" });
     mime: "video/mp4"
   }), false);
   assert.equal(context.shouldUseLocalMediaChunkedExtraction({
-    sourceUrl: "https://cdn.example.test/movie.mp4",
-    mime: "video/mp4",
-    remoteRangeExtraction: true
-  }), true);
-  assert.equal(context.shouldUseRangeDirectMediaExtraction({
-    sourceUrl: "https://cdn.example.test/movie.mp4",
-    mime: "video/mp4",
-    duration: 601
-  }), true);
-  assert.equal(context.shouldUseRangeDirectMediaExtraction({
-    sourceUrl: "https://cdn.example.test/movie.mp4",
-    mime: "video/mp4",
-    duration: 30
-  }), false);
-  assert.equal(context.shouldUseRangeDirectMediaExtraction({
-    sourceUrl: "https://cdn.example.test/master.m3u8",
-    ext: "m3u8",
-    duration: 3600
-  }), false);
-  assert.equal(context.shouldUseLocalMediaChunkedExtraction({
     sourceUrl: "file:///Volumes/share/playlist.m3u8",
     ext: "m3u8"
   }), false);
@@ -408,66 +601,6 @@ vm.runInContext(source, context, { filename: "offscreen.js" });
     sourceUrl: "file:///Volumes/share/fragments.mp4",
     kind: "mse-fragments"
   }), false);
-}
-
-{
-  class FakeUrlSource {
-    constructor(url, options) {
-      this.url = url;
-      this.options = options;
-    }
-  }
-  class FakeInput {
-    constructor(options) {
-      this.options = options;
-    }
-  }
-  const result = context.createRemoteMediaMediabunnyInput(
-    "https://cdn.example.test/movie.mp4",
-    { UrlSource: FakeUrlSource, Input: FakeInput, ALL_FORMATS: ["all"] },
-    {
-      sourceUrl: "https://cdn.example.test/movie.mp4",
-      sourceBytes: 70 * 1024 * 1024,
-      requestHeaders: { authorization: "Bearer media" }
-    }
-  );
-  assert.equal(result.sourceMode, "url-range");
-  assert.equal(result.size, 70 * 1024 * 1024);
-  assert.equal(result.input.options.source.url, "https://cdn.example.test/movie.mp4");
-  assert.equal(result.input.options.source.options.maxCacheSize, 16 * 1024 * 1024);
-  assert.equal(result.input.options.source.options.parallelism, 2);
-  assert.equal(result.input.options.source.options.requestInit.headers.authorization, "Bearer media");
-  assert.equal(result.input.options.source.options.requestInit.redirect, "error");
-}
-
-{
-  let constructed = 0;
-  class FakeUrlSource {
-    constructor() {
-      constructed += 1;
-    }
-  }
-  class FakeInput {}
-  assert.throws(
-    () => context.createRemoteMediaMediabunnyInput(
-      "http://127.0.0.1/private.mp4",
-      { UrlSource: FakeUrlSource, Input: FakeInput, ALL_FORMATS: ["all"] },
-      { sourceUrl: "http://127.0.0.1/private.mp4", sourceBytes: 70 * 1024 * 1024 }
-    ),
-    /未授权的私有网络/
-  );
-  assert.equal(constructed, 0, "an unobserved private Range target must be rejected before UrlSource can fetch");
-
-  assert.doesNotThrow(() => context.createRemoteMediaMediabunnyInput(
-    "http://192.168.1.20/media/movie.mp4",
-    { UrlSource: FakeUrlSource, Input: FakeInput, ALL_FORMATS: ["all"] },
-    {
-      sourceUrl: "http://192.168.1.20/media/movie.mp4",
-      sourceBytes: 70 * 1024 * 1024,
-      allowPrivateNetworkMediaOrigin: true
-    }
-  ));
-  assert.equal(constructed, 1, "a browser-observed private Range target remains allowed");
 }
 
 {
@@ -783,17 +916,13 @@ vm.runInContext(source, context, { filename: "offscreen.js" });
     })
   };
   context.FuguangLocalMediaExtractorOverrides = {
-    muxLocalMediaAudioWindow: async (_mediabunny, _sink, _codec, _decoderConfig, outputSpec, spec) => (
-      spec.index === 5
-        ? null
-        : {
-            name: `local-media-${String(spec.index + 1).padStart(3, "0")}.${outputSpec.extension}`,
-            mime: outputSpec.mime,
-            buffer: vm.runInContext(`new Uint8Array([${spec.index & 0xff}, 2, 3]).buffer`, context),
-            packetCount: 1,
-            spec
-          }
-    )
+    muxLocalMediaAudioWindow: async (_mediabunny, _sink, _codec, _decoderConfig, outputSpec, spec) => ({
+      name: `local-media-${String(spec.index + 1).padStart(3, "0")}.${outputSpec.extension}`,
+      mime: outputSpec.mime,
+      buffer: vm.runInContext(`new Uint8Array([${spec.index & 0xff}, 2, 3]).buffer`, context),
+      packetCount: 1,
+      spec
+    })
   };
   context.reloadWebFfmpegFrame = async url => {
     reloads.push({ url, requestsSeen: requests.length });
@@ -844,8 +973,8 @@ vm.runInContext(source, context, { filename: "offscreen.js" });
     const chunk41RequestIndex = requests.findIndex(request => request.outputName === "local-media-041.mp3");
     const chunk42Requests = requests.filter(request => request.outputName === "local-media-042.mp3");
 
-    assert.equal(result.length, specs.length - 1);
-    assert.equal(requests.some(request => request.outputName === "local-media-006.mp3"), false);
+    assert.equal(result.length, specs.length);
+    assert.equal(requests.some(request => request.outputName === "local-media-006.mp3"), true);
     assert.equal(chunk42Requests.length, 2);
     assert.notEqual(chunk42Requests[0].buffer, chunk42Requests[1].buffer);
     assert.ok(
@@ -897,21 +1026,23 @@ vm.runInContext(source, context, { filename: "offscreen.js" });
       yield packet;
     }
   };
-  const result = await context.muxLocalMediaAudioWindow(
-    {
-      BufferTarget: EmptyWindowBufferTarget,
-      Output: EmptyWindowOutput,
-      EncodedAudioPacketSource: EmptyWindowPacketSource
-    },
-    sink,
-    "aac",
-    null,
-    { createFormat: () => ({}), extension: "aac", mime: "audio/aac" },
-    { index: 1, start: 30, end: 60, coreStart: 32, coreEnd: 58 }
+  await assert.rejects(
+    context.muxLocalMediaAudioWindow(
+      {
+        BufferTarget: EmptyWindowBufferTarget,
+        Output: EmptyWindowOutput,
+        EncodedAudioPacketSource: EmptyWindowPacketSource
+      },
+      sink,
+      "aac",
+      null,
+      { createFormat: () => ({}), extension: "aac", mime: "audio/aac" },
+      { index: 1, start: 30, end: 60, coreStart: 32, coreEnd: 58 }
+    ),
+    /本地媒体音轨分片封装结果为空/
   );
-  assert.equal(result, null);
   assert.equal(sourceClosed, true);
-  assert.equal(outputCancelled, true);
+  assert.equal(outputCancelled, false);
 }
 
 {
@@ -1137,7 +1268,7 @@ audio-stream-inf.m3u8
     }
   });
   assert.equal(fetchOptions.credentials, "include");
-  assert.equal(fetchOptions.redirect, "error", "privileged media fetches must never auto-follow redirects");
+  assert.equal(fetchOptions.redirect, undefined, "media fetches must retain the browser's default redirect-follow behavior");
   assert.deepEqual(JSON.parse(JSON.stringify(fetchOptions.headers)), {
     authorization: "Bearer media-token"
   });
@@ -1152,24 +1283,6 @@ audio-stream-inf.m3u8
   const unchangedFetchOptions = context.buildFetchOptionsWithByteRange(fetchOptions, null);
   assert.equal(unchangedFetchOptions, fetchOptions);
 
-  assert.doesNotThrow(() => context.assertMediaFetchTargetAllowed("https://cdn.example.test/segment.ts", fetchOptions));
-  assert.throws(
-    () => context.assertMediaFetchTargetAllowed("http://127.0.0.1/admin", fetchOptions),
-    /未授权的私有网络/
-  );
-
-  const observedPrivateOptions = context.buildMediaFetchOptions({
-    sourceUrl: "http://192.168.1.20/media/master.m3u8",
-    allowPrivateNetworkMediaOrigin: true
-  });
-  assert.doesNotThrow(() => context.assertMediaFetchTargetAllowed(
-    "http://192.168.1.20/media/segment.ts",
-    observedPrivateOptions
-  ));
-  assert.throws(
-    () => context.assertMediaFetchTargetAllowed("http://192.168.1.21/admin", observedPrivateOptions),
-    /未授权的私有网络/
-  );
 }
 
 {
@@ -1187,17 +1300,11 @@ audio-stream-inf.m3u8
     };
   };
   try {
-    await assert.rejects(
-      () => context.fetchText("http://127.0.0.1/private/master.m3u8", publicOptions),
-      /未授权的私有网络/
-    );
-    assert.equal(fetchCalls, 0, "a derived private URL must be rejected before fetch");
+    assert.equal(await context.fetchText("http://127.0.0.1/private/master.m3u8", publicOptions), "#EXTM3U");
+    assert.equal(fetchCalls, 1, "private media URLs must reach fetch");
 
-    await assert.rejects(
-      () => context.fetchText("https://cdn.example.test/redirect.m3u8", publicOptions),
-      /未授权的私有网络/
-    );
-    assert.equal(fetchCalls, 1, "a public response redirected to a private URL must be rejected before reading its body");
+    assert.equal(await context.fetchText("https://cdn.example.test/redirect.m3u8", publicOptions), "#EXTM3U");
+    assert.equal(fetchCalls, 2, "redirected media responses must remain readable");
   } finally {
     context.fetch = originalFetch;
   }
@@ -1835,6 +1942,91 @@ seg-001.ts
     context.Response = originalResponse;
   }
 }
+
+async function assertHlsAbortSkipsRecovery({ abortBeforeStart }) {
+  const originalFetch = context.fetch;
+  const originalRequestWebFfmpeg = context.requestWebFfmpeg;
+  const originalReloadWebFfmpegFrame = context.reloadWebFfmpegFrame;
+  let fetches = 0;
+  let requests = 0;
+  let reloads = 0;
+  let firstRequestStarted;
+  const requestStarted = new Promise(resolve => {
+    firstRequestStarted = resolve;
+  });
+  const controller = new AbortController();
+  const abortError = Object.assign(new Error("HLS extraction cancelled"), { name: "AbortError" });
+  context.fetch = async url => {
+    fetches += 1;
+    if (String(url).endsWith(".m3u8")) {
+      return {
+        ok: true,
+        status: 200,
+        text: async () => `#EXTM3U
+#EXT-X-MAP:URI="init.mp4"
+#EXTINF:4.000,
+seg-000.m4s
+#EXT-X-ENDLIST`,
+        arrayBuffer: async () => vm.runInContext("new Uint8Array([]).buffer", context),
+        headers: { get: () => "application/vnd.apple.mpegurl" }
+      };
+    }
+    return {
+      ok: true,
+      status: 200,
+      text: async () => "",
+      arrayBuffer: async () => vm.runInContext("new Uint8Array([1, 2, 3]).buffer", context),
+      headers: { get: () => "video/mp4" }
+    };
+  };
+  context.requestWebFfmpeg = async (_payload, _transfer, _onProgress, options) => {
+    requests += 1;
+    firstRequestStarted();
+    if (options?.signal?.aborted) {
+      throw options.signal.reason;
+    }
+    return new Promise((_resolve, reject) => {
+      options?.signal?.addEventListener("abort", () => reject(options.signal.reason), { once: true });
+    });
+  };
+  context.reloadWebFfmpegFrame = async () => {
+    reloads += 1;
+  };
+  if (abortBeforeStart) {
+    controller.abort(abortError);
+  }
+  try {
+    const operation = context.extractHlsAudioWithWebFfmpeg({
+      tabId: 3,
+      jobId: `hls-abort-${abortBeforeStart ? "pre" : "active"}`,
+      runToken: "run-current",
+      sourceUrl: "https://cdn.example.test/audio.m3u8",
+      cacheNamespace: "hls-abort-test",
+      asrChunkSeconds: 900,
+      webFfmpegUrl: "chrome-extension://fuguang-test/web-ffmpeg/index.html",
+      abortSignal: controller.signal
+    });
+    if (!abortBeforeStart) {
+      await requestStarted;
+      controller.abort(abortError);
+    }
+    await assert.rejects(operation, /HLS extraction cancelled|任务已停止/);
+    assert.deepEqual(
+      { fetches, requests, reloads },
+      abortBeforeStart
+        ? { fetches: 0, requests: 0, reloads: 0 }
+        : { fetches: 3, requests: 1, reloads: 0 },
+      "cancelled HLS extraction must not reload FFmpeg, retry FFmpeg, or redownload its media group"
+    );
+  } finally {
+    context.fetch = originalFetch;
+    context.requestWebFfmpeg = originalRequestWebFfmpeg;
+    context.reloadWebFfmpegFrame = originalReloadWebFfmpegFrame;
+  }
+}
+
+await assertHlsAbortSkipsRecovery({ abortBeforeStart: true });
+await assertHlsAbortSkipsRecovery({ abortBeforeStart: false });
 
 {
   const originalFetch = context.fetch;
@@ -2770,13 +2962,23 @@ https://segment-cdn.example.test/seg-000.m4s
 {
   const sent = [];
   const originalSendMessage = chrome.runtime.sendMessage;
+  const mediaHeaderLease = {
+    leaseToken: "lease-hls-header-test",
+    ruleId: 250322,
+    jobId: "hls-header-test",
+    runToken: "run-hls-header-test"
+  };
   chrome.runtime.sendMessage = async message => {
     sent.push(JSON.parse(JSON.stringify(message)));
     return { ok: true, domains: testDomainsFromUrls(message.urls) };
   };
 
   try {
-    await context.updateMediaHeaderRuleDomains({ jobId: "hls-header-test" }, [
+    await context.updateMediaHeaderRuleDomains({
+      jobId: "hls-header-test",
+      runToken: "run-hls-header-test",
+      mediaHeaderLease
+    }, [
       "https://cdn.example.test/master.m3u8",
       "https://cdn.example.test/master.m3u8",
       "https://segment-cdn.example.test/seg.ts"
@@ -2789,6 +2991,8 @@ https://segment-cdn.example.test/seg-000.m4s
   assert.deepEqual(sent, [{
     type: "FUGUANG_UPDATE_MEDIA_HEADER_RULE_DOMAINS",
     jobId: "hls-header-test",
+    runToken: "run-hls-header-test",
+    mediaHeaderLease,
     urls: [
       "https://cdn.example.test/",
       "https://segment-cdn.example.test/"

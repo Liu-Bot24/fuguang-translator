@@ -9,7 +9,11 @@ export const FuguangBrowserTranslationPipeline = (() => {
     requestBrowserTranslationItems,
     browserTranslationErrorIsPermanent,
     browserTranslationErrorIsRateLimited,
-    browserTranslationErrorIsContentPolicy
+    browserTranslationErrorIsContentPolicy,
+    browserTranslationErrorIsDeliveryAmbiguous,
+    browserTranslationErrorIsRepairable,
+    browserTranslationRepairableError,
+    isBrowserTranslationAbortError
   } = FuguangBrowserTranslationProvider;
 
   async function translateBrowserSegments(sourceSegments, llmConfig, targetLanguage, metadata, options = {}) {
@@ -40,10 +44,16 @@ export const FuguangBrowserTranslationPipeline = (() => {
       });
       let batchTranslated = [];
       try {
-        batchTranslated = await translateBrowserSegmentsBatch(
+        batchTranslated = await translateBrowserBatchState(createBrowserTranslationBatchState(
           batches[batchIndex],
-          translationContext
-        );
+          translationContext,
+          0,
+          null,
+          joinBrowserTranslationRequestPath(
+            translationContext.options.semanticRequestPath || translationContext.options.requestPath || "translation",
+            `batch/${batchIndex}`
+          )
+        ));
       } catch (error) {
         throwIfBrowserTranslationAborted(options.signal, error);
         if (browserTranslationErrorIsRateLimited(error) && batches.length > 1) {
@@ -117,12 +127,16 @@ export const FuguangBrowserTranslationPipeline = (() => {
     );
   }
 
-  function createBrowserTranslationBatchState(sourceSegments, translationContext, autoSplitDepth = 0, error = null) {
+  function createBrowserTranslationBatchState(sourceSegments, translationContext, autoSplitDepth = 0, error = null, requestPath = "") {
     return {
       sourceSegments: Array.isArray(sourceSegments) ? sourceSegments : [],
       translationContext,
       autoSplitDepth: Math.max(0, Number(autoSplitDepth) || 0),
-      error
+      error,
+      requestPath: requestPath || joinBrowserTranslationRequestPath(
+        translationContext?.options?.semanticRequestPath || translationContext?.options?.requestPath || "translation",
+        "batch/direct"
+      )
     };
   }
 
@@ -144,7 +158,7 @@ export const FuguangBrowserTranslationPipeline = (() => {
       return await requestAndAlignBrowserTranslationBatch(state);
     } catch (error) {
       throwIfBrowserTranslationAborted(state.translationContext?.options?.signal, error);
-      if (browserTranslationErrorIsRateLimited(error)) {
+      if (browserTranslationErrorMustNotBeRepaired(error)) {
         throw error;
       }
       return await retrySplitBrowserTranslationBatch({
@@ -162,24 +176,32 @@ export const FuguangBrowserTranslationPipeline = (() => {
     for (let attempt = 0; attempt < attempts; attempt += 1) {
       try {
         throwIfBrowserTranslationAborted(translationContext?.options?.signal);
-        items = await requestBrowserTranslationItems(sourceSegments, translationContext);
+        items = await requestBrowserTranslationItems(sourceSegments, {
+          ...translationContext,
+          options: {
+            ...translationContext.options,
+            batchStart: browserTranslationBatchBoundary(sourceSegments[0], 0),
+            batchEnd: browserTranslationBatchBoundary(sourceSegments[sourceSegments.length - 1], sourceSegments.length - 1) + 1,
+            semanticRequestPath: joinBrowserTranslationRequestPath(state.requestPath, `attempt/${attempt}`)
+          }
+        });
         if (items.length) {
           if (shouldRetryWholeBrowserTranslationBatchBeforeSplit(sourceSegments, items, autoSplitDepth, attempt, attempts)) {
             throw translationAlignmentError(sourceSegments, collectTranslationAlignment(sourceSegments, items));
           }
           break;
         }
-        throw new Error("翻译模型没有返回可用字幕条目。");
+        throw browserTranslationRepairableError("翻译模型没有返回可用字幕条目。");
       } catch (error) {
         throwIfBrowserTranslationAborted(translationContext?.options?.signal, error);
         lastError = error;
-        if (browserTranslationErrorIsRateLimited(error) || browserTranslationErrorIsPermanent(error) || attempt === attempts - 1) {
+        if (!browserTranslationErrorIsRepairable(error) || attempt === attempts - 1) {
           break;
         }
       }
     }
     if (!items.length) {
-      throw lastError || new Error("翻译模型没有返回可用字幕条目。");
+      throw lastError || browserTranslationRepairableError("翻译模型没有返回可用字幕条目。");
     }
     return await alignOrRepairTranslatedSegments(
       state,
@@ -198,7 +220,7 @@ export const FuguangBrowserTranslationPipeline = (() => {
   async function retrySplitBrowserTranslationBatch(state) {
     const { sourceSegments, autoSplitDepth, error } = state;
     throwIfBrowserTranslationAborted(state.translationContext?.options?.signal, error);
-    if (browserTranslationErrorIsPermanent(error)) {
+    if (browserTranslationErrorMustNotBeRepaired(error)) {
       throw error;
     }
     if (sourceSegments.length <= 1) {
@@ -234,7 +256,8 @@ export const FuguangBrowserTranslationPipeline = (() => {
       segments: sourceSegments,
       indexes: sourceSegments.map((_, index) => index),
       depth: autoSplitDepth,
-      error: originalError
+      error: originalError,
+      requestPath: state.requestPath
     });
     const translated = [];
     const failures = [];
@@ -251,7 +274,8 @@ export const FuguangBrowserTranslationPipeline = (() => {
             sourceSegments: task.segments,
             translationContext,
             autoSplitDepth: task.depth,
-            error: task.error
+            error: task.error,
+            requestPath: task.requestPath
           });
           failures.push(...browserTranslationFailures(result));
           result.forEach((segment, position) => {
@@ -262,7 +286,11 @@ export const FuguangBrowserTranslationPipeline = (() => {
           });
         } catch (error) {
           throwIfBrowserTranslationAborted(translationContext?.options?.signal, error);
-          if (browserTranslationErrorIsPermanent(error)) {
+          if (browserTranslationErrorIsDeliveryAmbiguous(error)) {
+            failures.push(...createBrowserTranslationFailuresForSources(task.segments, error));
+            continue;
+          }
+          if (browserTranslationErrorMustNotBeRepaired(error)) {
             fatalError = error || task.error || originalError;
             throw fatalError;
           }
@@ -274,7 +302,8 @@ export const FuguangBrowserTranslationPipeline = (() => {
             segments: task.segments,
             indexes: task.indexes,
             depth: task.depth,
-            error: error || task.error || originalError
+            error: error || task.error || originalError,
+            requestPath: task.requestPath
           }));
         }
       }
@@ -296,6 +325,16 @@ export const FuguangBrowserTranslationPipeline = (() => {
     ));
   }
 
+  function browserTranslationErrorMustNotBeRepaired(error) {
+    if (browserTranslationErrorIsRateLimited(error)
+        || browserTranslationErrorIsPermanent(error)
+        || browserTranslationErrorIsDeliveryAmbiguous(error)) {
+      return true;
+    }
+    return !browserTranslationErrorIsRepairable(error)
+      && !browserTranslationErrorIsContentPolicy(error?.message || error);
+  }
+
   function splitBrowserTranslationQueueTask(task) {
     const midpoint = Math.ceil(task.segments.length / 2);
     return [
@@ -303,13 +342,15 @@ export const FuguangBrowserTranslationPipeline = (() => {
         segments: task.segments.slice(0, midpoint),
         indexes: task.indexes.slice(0, midpoint),
         depth: task.depth + 1,
-        error: task.error
+        error: task.error,
+        requestPath: joinBrowserTranslationRequestPath(task.requestPath, "split/0")
       },
       {
         segments: task.segments.slice(midpoint),
         indexes: task.indexes.slice(midpoint),
         depth: task.depth + 1,
-        error: task.error
+        error: task.error,
+        requestPath: joinBrowserTranslationRequestPath(task.requestPath, "split/1")
       }
     ].filter(item => item.segments.length);
   }
@@ -350,7 +391,7 @@ export const FuguangBrowserTranslationPipeline = (() => {
   }
 
   function throwIfBrowserTranslationAborted(signal, error = null) {
-    if (!signal?.aborted && error?.name !== "AbortError") {
+    if (!isBrowserTranslationAbortError(error, signal)) {
       return;
     }
     const aborted = new Error(signal?.reason?.message || error?.message || "任务已停止。");
@@ -372,7 +413,12 @@ export const FuguangBrowserTranslationPipeline = (() => {
         retryTranslated = await translateBrowserBatchState(createBrowserTranslationBatchState(
           retrySourceSegments,
           translationContext,
-          autoSplitDepth + 1
+          autoSplitDepth + 1,
+          null,
+          joinBrowserTranslationRequestPath(
+            state.requestPath,
+            `missing/${alignment.missingIndexes.join("-")}`
+          )
         ));
       } catch (error) {
         retryError = error;
@@ -437,7 +483,7 @@ export const FuguangBrowserTranslationPipeline = (() => {
         if (allowMissing) {
           return [];
         }
-        throw new Error(`翻译模型缺少条目索引：${index}。`);
+        throw browserTranslationRepairableError(`翻译模型缺少条目索引：${index}。`);
       }
       return [{
         start: segment.start,
@@ -560,7 +606,7 @@ export const FuguangBrowserTranslationPipeline = (() => {
     if (alignment.missingIndexes.length) {
       details.push(`缺少条目索引：${alignment.missingIndexes.join(",")}`);
     }
-    return new Error(`翻译模型返回不完整：${details.join("；")}。`);
+    return browserTranslationRepairableError(`翻译模型返回不完整：${details.join("；")}。`);
   }
 
   function translatedItemText(item) {
@@ -584,6 +630,18 @@ export const FuguangBrowserTranslationPipeline = (() => {
 
   function cleanVttText(value) {
     return String(value || "").replace(/<[^>]+>/g, "").replace(/\s+/g, " ").trim();
+  }
+
+  function joinBrowserTranslationRequestPath(...parts) {
+    return parts
+      .map(part => String(part || "").replace(/^\/+|\/+$/g, ""))
+      .filter(Boolean)
+      .join("/");
+  }
+
+  function browserTranslationBatchBoundary(segment, fallback) {
+    const segmentIndex = Number(segment?.segmentIndex);
+    return Number.isInteger(segmentIndex) && segmentIndex >= 0 ? segmentIndex : Math.max(0, Number(fallback) || 0);
   }
 
   const api = {

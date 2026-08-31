@@ -1,5 +1,6 @@
 import { FuguangBrowserAsrProvider } from "./browser-asr-provider.js";
 import { FuguangBrowserAsrPostprocess } from "./browser-asr-postprocess.js";
+import { FuguangBrowserAsrWorkflow } from "./browser-asr-workflow.js";
 import { FuguangBrowserLanguage } from "./browser-language.js";
 import { FuguangBrowserMediaCandidates } from "./browser-media-candidates.js";
 import { FuguangBrowserModelProfiles } from "./browser-model-profiles.js";
@@ -9,7 +10,6 @@ import { FuguangJobStore } from "./job-store.js";
 import { FuguangMediaHeaderRules } from "./media-header-rules.js";
 import { FuguangJobContract } from "../shared/job-contract.js";
 import { FuguangTaskRuntimeProtocol } from "../shared/task-runtime-protocol.js";
-import { FuguangRequestSemaphore } from "../shared/request-semaphore.js";
 
 var normalizeAsrTimeoutMs = FuguangBrowserAsrProvider.normalizeAsrTimeoutMs;
 var ASR_VAD_SPLIT_MIN_SILENCE_SECONDS = FuguangBrowserAsrPostprocess.ASR_VAD_SPLIT_MIN_SILENCE_SECONDS;
@@ -31,7 +31,90 @@ var resolveBrowserAsrSupportedRequestFields = FuguangBrowserAsrProvider.resolveB
 var resolveBrowserAsrSpeechTimestampsEndpoint = FuguangBrowserAsrProvider.resolveBrowserAsrSpeechTimestampsEndpoint;
 var normalizeAsrVadFilterMode = FuguangBrowserAsrProvider.normalizeAsrVadFilterMode;
 var browserAsrEndpoint = FuguangBrowserAsrProvider.browserAsrEndpoint;
+var browserAsrProviderNeedsModel = FuguangBrowserAsrProvider.browserAsrProviderNeedsModel;
 var normalizeAsrLanguage = FuguangBrowserAsrProvider.normalizeAsrLanguage;
+var isUsableBrowserAudioFile = FuguangBrowserAsrWorkflow.isUsableBrowserAudioFile;
+var browserAudioFileByteLength = FuguangBrowserAsrWorkflow.browserAudioFileByteLength;
+var assertBrowserAsrChunkCanUpload = FuguangBrowserAsrWorkflow.assertBrowserAsrChunkCanUpload;
+var assertBrowserAsrUploadAudioBytes = FuguangBrowserAsrWorkflow.assertBrowserAsrUploadAudioBytes;
+var browserAsrExpectedAudioContainer = FuguangBrowserAsrWorkflow.browserAsrExpectedAudioContainer;
+var browserAsrBytesLookLikeWav = FuguangBrowserAsrWorkflow.browserAsrBytesLookLikeWav;
+var browserAsrBytesLookLikeMp3 = FuguangBrowserAsrWorkflow.browserAsrBytesLookLikeMp3;
+var browserAsrMp3AudioFrameScanStart = FuguangBrowserAsrWorkflow.browserAsrMp3AudioFrameScanStart;
+var shouldRetryBrowserAsrClipRequestError = FuguangBrowserAsrWorkflow.shouldRetryBrowserAsrClipRequestError;
+var shouldUseBrowserAsrExternalVadPrecheck = FuguangBrowserAsrWorkflow.shouldUseBrowserAsrExternalVadPrecheck;
+var shouldUseBrowserAsrNativeVadTranscription = FuguangBrowserAsrWorkflow.shouldUseBrowserAsrNativeVadTranscription;
+var shouldUseBrowserAsrCollectedSpeechAudio = FuguangBrowserAsrWorkflow.shouldUseBrowserAsrCollectedSpeechAudio;
+var browserAsrCollectedSpeechAudioExplicitlyEnabled = FuguangBrowserAsrWorkflow.browserAsrCollectedSpeechAudioExplicitlyEnabled;
+var shouldDisableBrowserAsrServerVadForRecall = FuguangBrowserAsrWorkflow.shouldDisableBrowserAsrServerVadForRecall;
+var transcribeBrowserCollectedSpeechAudioChunk = FuguangBrowserAsrWorkflow.transcribeBrowserCollectedSpeechAudioChunk;
+var browserAsrClipTimestampsSkippedReason = FuguangBrowserAsrWorkflow.browserAsrClipTimestampsSkippedReason;
+var browserAsrSpeechIntervalRequiresServerVad = FuguangBrowserAsrWorkflow.browserAsrSpeechIntervalRequiresServerVad;
+var browserAsrAttemptDiagnosticsFromError = FuguangBrowserAsrWorkflow.browserAsrAttemptDiagnosticsFromError;
+var createBrowserAsrMaturePlan = FuguangBrowserAsrWorkflow.createBrowserAsrMaturePlan;
+var browserAsrMaturePlanForRequest = FuguangBrowserAsrWorkflow.browserAsrMaturePlanForRequest;
+var createBrowserAsrPostprocessPolicy = FuguangBrowserAsrWorkflow.createBrowserAsrPostprocessPolicy;
+var browserAsrPostprocessPolicyWithOverrides = FuguangBrowserAsrWorkflow.browserAsrPostprocessPolicyWithOverrides;
+var browserAsrMatureRequestMode = FuguangBrowserAsrWorkflow.browserAsrMatureRequestMode;
+var normalizeBrowserAsrPlanClipTimestamps = FuguangBrowserAsrWorkflow.normalizeBrowserAsrPlanClipTimestamps;
+var normalizeBrowserAsrRequestFieldsForDiagnostics = FuguangBrowserAsrWorkflow.normalizeBrowserAsrRequestFieldsForDiagnostics;
+var postprocessBrowserAsrPayloadOrThrow = FuguangBrowserAsrWorkflow.postprocessBrowserAsrPayloadOrThrow;
+var applyBrowserAsrErrorDiagnostics = FuguangBrowserAsrWorkflow.applyBrowserAsrErrorDiagnostics;
+var createBrowserAsrRequestError = FuguangBrowserAsrWorkflow.createBrowserAsrRequestError;
+var browserAsrResponseErrorMessage = FuguangBrowserAsrWorkflow.browserAsrResponseErrorMessage;
+var browserAsrUploadFileSummary = FuguangBrowserAsrWorkflow.browserAsrUploadFileSummary;
+var browserAsrAsciiHead = FuguangBrowserAsrWorkflow.browserAsrAsciiHead;
+var requestBrowserAsrTranscription = FuguangBrowserAsrWorkflow.requestBrowserAsrTranscription;
+var linkBrowserAbortSignal = FuguangBrowserAsrWorkflow.linkBrowserAbortSignal;
+var browserAbortError = FuguangBrowserAsrWorkflow.browserAbortError;
+var isBrowserAbortError = FuguangBrowserAsrWorkflow.isBrowserAbortError;
+var postprocessBrowserAsrPayload = FuguangBrowserAsrWorkflow.postprocessBrowserAsrPayload;
+var postprocessBrowserAsrCollectedSpeechPayload = FuguangBrowserAsrWorkflow.postprocessBrowserAsrCollectedSpeechPayload;
+var restoreBrowserAsrCollectedSpeechSegments = FuguangBrowserAsrWorkflow.restoreBrowserAsrCollectedSpeechSegments;
+var normalizeBrowserAsrCollectedSpeechTimeMap = FuguangBrowserAsrWorkflow.normalizeBrowserAsrCollectedSpeechTimeMap;
+var browserAsrCollectedSpeechMapItemForTime = FuguangBrowserAsrWorkflow.browserAsrCollectedSpeechMapItemForTime;
+var restoreBrowserAsrCollectedSpeechTime = FuguangBrowserAsrWorkflow.restoreBrowserAsrCollectedSpeechTime;
+var mergeBrowserAsrCollectedSpeechPostprocess = FuguangBrowserAsrWorkflow.mergeBrowserAsrCollectedSpeechPostprocess;
+var browserAsrDroppedSegments = FuguangBrowserAsrWorkflow.browserAsrDroppedSegments;
+var browserAsrSegmentDiagnosticKey = FuguangBrowserAsrWorkflow.browserAsrSegmentDiagnosticKey;
+var browserAsrRoundedDiagnosticSecond = FuguangBrowserAsrWorkflow.browserAsrRoundedDiagnosticSecond;
+var mergeBrowserAsrClipRetryPostprocess = FuguangBrowserAsrWorkflow.mergeBrowserAsrClipRetryPostprocess;
+var mergeBrowserAsrSegmentLists = FuguangBrowserAsrWorkflow.mergeBrowserAsrSegmentLists;
+var browserAsrRequestIncludesClipTimestamps = FuguangBrowserAsrWorkflow.browserAsrRequestIncludesClipTimestamps;
+var browserAsrRequestIncludesVadFilter = FuguangBrowserAsrWorkflow.browserAsrRequestIncludesVadFilter;
+var browserAsrCoverageRetryPlan = FuguangBrowserAsrWorkflow.browserAsrCoverageRetryPlan;
+var browserAsrEmptyVadRecoveryPlan = FuguangBrowserAsrWorkflow.browserAsrEmptyVadRecoveryPlan;
+var filterBrowserAsrStrictVadRecoveryPostprocess = FuguangBrowserAsrWorkflow.filterBrowserAsrStrictVadRecoveryPostprocess;
+var filterBrowserAsrCoverageRetryPostprocess = FuguangBrowserAsrWorkflow.filterBrowserAsrCoverageRetryPostprocess;
+var normalizeBrowserAsrRetryPayloadSegments = FuguangBrowserAsrWorkflow.normalizeBrowserAsrRetryPayloadSegments;
+var browserAsrCoverageRetryFilteredPostprocess = FuguangBrowserAsrWorkflow.browserAsrCoverageRetryFilteredPostprocess;
+var browserAsrUncoveredSpeechIntervalsForSegments = FuguangBrowserAsrWorkflow.browserAsrUncoveredSpeechIntervalsForSegments;
+var browserAsrUncoveredSpeechIntervals = FuguangBrowserAsrWorkflow.browserAsrUncoveredSpeechIntervals;
+var browserAsrSegmentOverlapsCoverageGap = FuguangBrowserAsrWorkflow.browserAsrSegmentOverlapsCoverageGap;
+var browserAsrRepeatedCoverageRetryKeys = FuguangBrowserAsrWorkflow.browserAsrRepeatedCoverageRetryKeys;
+var browserAsrDropRepeatedCoverageRetrySegments = FuguangBrowserAsrWorkflow.browserAsrDropRepeatedCoverageRetrySegments;
+var normalizeBrowserAsrRetryRepeatText = FuguangBrowserAsrWorkflow.normalizeBrowserAsrRetryRepeatText;
+var browserAsrReliableSpeechCoverageStats = FuguangBrowserAsrWorkflow.browserAsrReliableSpeechCoverageStats;
+var browserAsrReliableSpeechCoverageMissingFromStats = FuguangBrowserAsrWorkflow.browserAsrReliableSpeechCoverageMissingFromStats;
+var browserAsrUncoveredSpeechSeconds = FuguangBrowserAsrWorkflow.browserAsrUncoveredSpeechSeconds;
+var browserAsrSpeechCoverageSpans = FuguangBrowserAsrWorkflow.browserAsrSpeechCoverageSpans;
+var detectBrowserAsrSpeechIntervals = FuguangBrowserAsrWorkflow.detectBrowserAsrSpeechIntervals;
+var normalizeBrowserAsrSpeechTimestampsPayload = FuguangBrowserAsrWorkflow.normalizeBrowserAsrSpeechTimestampsPayload;
+var browserAsrSpeechTimestampRangeSeconds = FuguangBrowserAsrWorkflow.browserAsrSpeechTimestampRangeSeconds;
+var browserAsrSpeechTimestampNumber = FuguangBrowserAsrWorkflow.browserAsrSpeechTimestampNumber;
+var inferBrowserAsrBareTimestampUnit = FuguangBrowserAsrWorkflow.inferBrowserAsrBareTimestampUnit;
+var isLikelyBrowserAsrBareIntegerSeconds = FuguangBrowserAsrWorkflow.isLikelyBrowserAsrBareIntegerSeconds;
+var emitBrowserAsrDiagnostics = FuguangBrowserAsrWorkflow.emitBrowserAsrDiagnostics;
+var recordBrowserAsrChunkDiagnostics = FuguangBrowserAsrWorkflow.recordBrowserAsrChunkDiagnostics;
+var browserAsrDiagnosticChunkInfo = FuguangBrowserAsrWorkflow.browserAsrDiagnosticChunkInfo;
+var normalizeBrowserAsrCollectedSpeechChunk = FuguangBrowserAsrWorkflow.normalizeBrowserAsrCollectedSpeechChunk;
+var browserAsrCollectedSpeechChunkInfo = FuguangBrowserAsrWorkflow.browserAsrCollectedSpeechChunkInfo;
+var cloneJsonForDiagnostics = FuguangBrowserAsrWorkflow.cloneJsonForDiagnostics;
+var finiteOrNull = FuguangBrowserAsrWorkflow.finiteOrNull;
+var sanitizeDiagnosticUrl = FuguangBrowserAsrWorkflow.sanitizeDiagnosticUrl;
+var formatAsrFetchError = FuguangBrowserAsrWorkflow.formatAsrFetchError;
+var browserAsrMaxUploadBytes = FuguangBrowserAsrWorkflow.browserAsrMaxUploadBytes;
+var formatBytes = FuguangBrowserAsrWorkflow.formatBytes;
 var normalizeTargetLanguage = FuguangBrowserLanguage.normalizeTargetLanguage;
 var DEFAULT_ASR_PROFILE_ID = FuguangBrowserModelProfiles.DEFAULT_ASR_PROFILE_ID;
 var AUDIO_EXTENSIONS = FuguangBrowserMediaCandidates.AUDIO_EXTENSIONS;
@@ -73,6 +156,10 @@ var browserTranslationFailures = FuguangBrowserTranslationPipeline.browserTransl
 var createDurableJobId = FuguangJobContract.createJobId;
 var createDurableRunToken = FuguangJobContract.createRunToken;
 var withMediaRequestHeaderRules = FuguangMediaHeaderRules.withMediaRequestHeaderRules;
+var acquireMediaHeaderLease = FuguangMediaHeaderRules.acquireMediaHeaderLease;
+var releaseMediaHeaderLease = FuguangMediaHeaderRules.releaseMediaHeaderLease;
+var reconcileMediaHeaderLeases = FuguangMediaHeaderRules.reconcileMediaHeaderLeases;
+var updateMediaHeaderLeaseDomains = FuguangMediaHeaderRules.updateMediaHeaderLeaseDomains;
 var updateMediaRequestHeaderRuleDomains = FuguangMediaHeaderRules.updateMediaRequestHeaderRuleDomains;
 var buildMediaHeaderRules = FuguangMediaHeaderRules.buildMediaHeaderRules;
 
@@ -105,17 +192,25 @@ const MESSAGE = {
   OFFSCREEN_CANCEL_JOB: "FUGUANG_OFFSCREEN_CANCEL_JOB",
   OFFSCREEN_WEB_FFMPEG_PROGRESS: "FUGUANG_OFFSCREEN_WEB_FFMPEG_PROGRESS",
   OFFSCREEN_WEB_FFMPEG_CHUNK_READY: "FUGUANG_OFFSCREEN_WEB_FFMPEG_CHUNK_READY",
+  OFFSCREEN_WEB_FFMPEG_COMPLETED: "FUGUANG_OFFSCREEN_WEB_FFMPEG_COMPLETED",
+  OFFSCREEN_WEB_FFMPEG_FAILED: "FUGUANG_OFFSCREEN_WEB_FFMPEG_FAILED",
+  OFFSCREEN_GET_ACTIVE_MEDIA_HEADER_LEASES: "FUGUANG_OFFSCREEN_GET_ACTIVE_MEDIA_HEADER_LEASES",
   UPDATE_MEDIA_HEADER_RULE_DOMAINS: "FUGUANG_UPDATE_MEDIA_HEADER_RULE_DOMAINS",
   SIDEPANEL_SUBSCRIBE: "FUGUANG_SIDEPANEL_SUBSCRIBE",
   SIDEPANEL_JOB_CHANGED: "FUGUANG_SIDEPANEL_JOB_CHANGED"
 };
 const SIDEPANEL_STATUS_PORT_NAME = "fuguang-sidepanel-status-v1";
+const BROWSER_ABORT_ERROR_BRAND = Symbol("fuguang.browser.abort-error");
+const BROWSER_ASR_RESULT_WARNING = Symbol("fuguang.browser.asr-result-warning");
 
 const DEFAULT_WEB_FFMPEG_PATH = "web-ffmpeg/index.html";
 const WEB_FFMPEG_AUDIO_CACHE = "fuguang-web-ffmpeg-audio";
 const WEB_FFMPEG_AUDIO_CACHE_ORIGIN = "https://fuguang.local";
 const WEB_FFMPEG_AUDIO_CACHE_PREFIX = "/__fuguang_audio_cache";
 const WEB_FFMPEG_AUDIO_CACHE_CLEANUP_ALARM = "fuguang-audio-cache-cleanup";
+const MEDIA_HEADER_RULE_RECOVERY_ALARM = "fuguang-media-header-rule-recovery";
+const MEDIA_HEADER_RULE_RECOVERY_BASE_MINUTES = 0.5;
+const MEDIA_HEADER_RULE_RECOVERY_MAX_MINUTES = 10;
 const OFFSCREEN_IDLE_CLOSE_ALARM = "fuguang-offscreen-idle-close";
 const BROWSER_JOB_LEASE_RECOVERY_ALARM_PREFIX = "fuguang-job-lease-recovery:";
 const OFFSCREEN_IDLE_CLOSE_MINUTES = 2;
@@ -152,6 +247,7 @@ const browserPreloadJobs = new Map();
 const browserJobStore = FuguangJobStore.create();
 const browserJobMirrorPending = new Map();
 const browserJobMirrorActive = new Map();
+const browserJobLifecycleLocks = new Map();
 const offscreenBrowserChunkOperations = new Map();
 const offscreenBrowserFinalizationOperations = new Map();
 const offscreenTaskRuntimeCommands = new Map();
@@ -161,13 +257,17 @@ let browserAudioCacheCleanupPromise = null;
 let browserAudioCacheLastCleanupAt = 0;
 let browserMediaExtractionQueue = Promise.resolve();
 let offscreenDocumentCreationPromise = null;
+let offscreenDocumentClosePromise = null;
 let offscreenTaskRuntimePort = null;
 let offscreenTaskRuntimeConnectionPromise = null;
+let mediaHeaderRuleRecoveryPromise = null;
+let mediaHeaderRuleRecoveryLastResult = null;
+let mediaHeaderRuleRecoveryRetryAttempt = 0;
 let browserJobRecoveryPromise = null;
+let browserJobLedgerMaintenancePromise = null;
 let browserVttAttachmentGeneration = Date.now() * 1000;
 
 const tabState = new Map();
-const activeDocumentIdsByTab = new Map();
 const serviceWorkerExecutionOwnerId = `service-worker:${createDurableRunToken()}`;
 
 try {
@@ -179,6 +279,7 @@ try {
 migrateLegacyCaptionPosition();
 enableSidePanelAction();
 scheduleBrowserAudioCacheMaintenance();
+runMediaHeaderRuleRecovery({ force: true }).catch(() => {});
 browserJobRecoveryPromise = recoverBrowserJobIndex().catch(() => ({ recovered: 0 }));
 
 chrome.action.onClicked.addListener(tab => {
@@ -215,9 +316,7 @@ chrome.webRequest.onBeforeSendHeaders.addListener(
       initiator: details.initiator || details.documentUrl || "",
       requestType: details.type,
       frameId: normalizeFrameId(details.frameId),
-      documentId: String(details.documentId || ""),
-      parentFrameId: Number.isInteger(Number(details.parentFrameId)) ? Number(details.parentFrameId) : -1,
-      parentDocumentId: String(details.parentDocumentId || ""),
+      documentId: normalizeDocumentId(details.documentId),
       seenAt: Date.now()
     });
   },
@@ -246,9 +345,7 @@ chrome.webRequest.onBeforeRequest.addListener(
       initiator: details.initiator || details.documentUrl || "",
       requestType: details.type,
       frameId: normalizeFrameId(details.frameId),
-      documentId: String(details.documentId || ""),
-      parentFrameId: Number.isInteger(Number(details.parentFrameId)) ? Number(details.parentFrameId) : -1,
-      parentDocumentId: String(details.parentDocumentId || ""),
+      documentId: normalizeDocumentId(details.documentId),
       seenAt: Date.now()
     });
   },
@@ -284,12 +381,8 @@ chrome.webRequest.onHeadersReceived.addListener(
       requestHeaders: requestHeadersById.get(details.requestId),
       initiator: details.initiator || details.documentUrl || "",
       requestType: details.type,
-      responseStatus: Number(details.statusCode || 0) || 0,
-      responseIp: String(details.ip || ""),
       frameId: normalizeFrameId(details.frameId),
-      documentId: String(details.documentId || ""),
-      parentFrameId: Number.isInteger(Number(details.parentFrameId)) ? Number(details.parentFrameId) : -1,
-      parentDocumentId: String(details.parentDocumentId || ""),
+      documentId: normalizeDocumentId(details.documentId),
       seenAt: Date.now()
     });
   },
@@ -312,15 +405,13 @@ chrome.webRequest.onErrorOccurred.addListener(
 );
 
 chrome.webNavigation.onCommitted.addListener(details => {
-  noteActiveDocument(details.tabId, details.frameId, details.documentId, { authoritative: true });
   if (details.frameId === 0) {
     return clearTopLevelNavigationState(details.tabId, { detachSubtitles: true });
   }
-  return undefined;
+  return clearFrameNavigationState(details.tabId, details.frameId);
 });
 
 chrome.webNavigation.onHistoryStateUpdated?.addListener(details => {
-  noteActiveDocument(details.tabId, details.frameId, details.documentId, { authoritative: true });
   if (details.frameId === 0) {
     return clearTopLevelNavigationState(details.tabId, { detachSubtitles: true });
   }
@@ -329,7 +420,6 @@ chrome.webNavigation.onHistoryStateUpdated?.addListener(details => {
 
 chrome.tabs.onRemoved.addListener(tabId => {
   tabState.delete(tabId);
-  activeDocumentIdsByTab.delete(tabId);
 });
 
 async function clearTopLevelNavigationState(tabId, { detachSubtitles = false } = {}) {
@@ -343,6 +433,7 @@ async function clearTopLevelNavigationState(tabId, { detachSubtitles = false } =
     }
   } finally {
     tabState.delete(tabId);
+    scheduleSidepanelStatusChange(tabId);
   }
 }
 
@@ -375,6 +466,7 @@ async function clearFrameNavigationState(tabId, frameId) {
   }
   if (state.mediaFrameId === numericFrameId) {
     state.mediaFrameId = null;
+    state.mediaDocumentId = "";
   }
   if (state.context?.frameId === numericFrameId) {
     state.context = {};
@@ -467,27 +559,34 @@ async function handleMessage(message, sender) {
     case MESSAGE.SEEK_MEDIA:
       return seekMedia(message.tabId, message.time);
     case MESSAGE.PAGE_MEDIA_FOUND:
-      if (!await isCurrentDocumentMessage(sender)) {
-        return { ignored: true, reason: "stale-document" };
-      }
       addPageMediaCandidate(sender.tab?.id, message.media, sender.frameId, sender.documentId);
       return {};
     case MESSAGE.PAGE_CONTEXT_FOUND:
-      if (!await isCurrentDocumentMessage(sender)) {
-        return { ignored: true, reason: "stale-document" };
-      }
       updateTabContext(sender.tab?.id, message.context, sender.frameId, sender.documentId);
       return {};
     case MESSAGE.OFFSCREEN_WEB_FFMPEG_PROGRESS:
       return applyOffscreenWebFfmpegProgress(message);
     case MESSAGE.OFFSCREEN_WEB_FFMPEG_CHUNK_READY:
       return applyOffscreenWebFfmpegChunkReady(message);
+    case MESSAGE.OFFSCREEN_WEB_FFMPEG_COMPLETED:
+      return applyOffscreenWebFfmpegCompleted(message);
+    case MESSAGE.OFFSCREEN_WEB_FFMPEG_FAILED:
+      return applyOffscreenWebFfmpegFailed(message);
     case MESSAGE.UPDATE_MEDIA_HEADER_RULE_DOMAINS:
+      if (message.mediaHeaderLease) {
+        return updateMediaHeaderLeaseDomains(message.mediaHeaderLease, message.urls || []);
+      }
       return updateMediaRequestHeaderRuleDomains(message.jobId, message.urls || []);
     case FuguangTaskRuntimeProtocol.MESSAGE.PROCESS_JOB_CHUNK:
       return processOffscreenBrowserJobChunk(message);
     case FuguangTaskRuntimeProtocol.MESSAGE.GET_JOB_WORK:
       return getOffscreenBrowserJobWork(message);
+    case FuguangTaskRuntimeProtocol.MESSAGE.GET_JOB_EXECUTION_INPUT:
+      return getOffscreenBrowserJobExecutionInput(message);
+    case FuguangTaskRuntimeProtocol.MESSAGE.REPORT_JOB_WORK_PROGRESS:
+      return reportOffscreenBrowserJobWorkProgress(message);
+    case FuguangTaskRuntimeProtocol.MESSAGE.COMMIT_JOB_WORK_RESULT:
+      return commitOffscreenBrowserJobWorkResult(message);
     case FuguangTaskRuntimeProtocol.MESSAGE.FINALIZE_JOB:
       return finalizeOffscreenBrowserJob(message);
     case FuguangTaskRuntimeProtocol.MESSAGE.FAIL_JOB:
@@ -498,6 +597,7 @@ async function handleMessage(message, sender) {
 }
 
 async function getStatus(tabId) {
+  await browserJobRecoveryPromise;
   await refreshTabInfo(tabId);
   const state = getState(tabId);
   const webFfmpeg = await getWebFfmpegConfig();
@@ -511,12 +611,19 @@ async function getStatus(tabId) {
     preloadJob = null;
   }
   if (!preloadJob) {
-    const matchingRecord = findBrowserPreloadRecordForTabPage(tabId, currentPageUrl);
+    const matchingRecord = findBrowserPreloadRecordForTabPage(tabId, currentPageUrl)
+      || await recoverBrowserPresentationJobForTabPage(tabId, currentPageUrl);
     if (matchingRecord) {
       preloadJob = browserPreloadJobForRead(matchingRecord);
       state.preload = preloadJob.status || "running";
       state.preloadJob = cloneBrowserJobState(preloadJob);
     }
+  }
+  const visibleRecord = preloadJob?.id ? browserPreloadJobs.get(preloadJob.id) : null;
+  if (visibleRecord) {
+    await refreshBrowserFunAsrCancellationProjection(visibleRecord);
+    preloadJob = browserPreloadJobForRead(visibleRecord);
+    state.preloadJob = cloneBrowserJobState(preloadJob);
   }
   return {
     webFfmpeg,
@@ -553,22 +660,7 @@ async function activatePage(tabId) {
   await injectPageScript(tabId, ["src/content/subtitle-overlay.js"], { allFrames: true });
   await injectPageScript(tabId, ["src/content/media-bridge.js"], { allFrames: true });
   await injectPageScript(tabId, ["src/content/page-sniffer.js"], { allFrames: true, world: "MAIN" });
-  await applyPageSniffingMode(tabId);
   await refreshTabInfo(tabId);
-}
-
-async function applyPageSniffingMode(tabId) {
-  const stored = await chrome.storage.local.get({ mediaSniffingMode: "light" }).catch(() => ({}));
-  const mode = stored.mediaSniffingMode === "deep" ? "deep" : "light";
-  await chrome.scripting.executeScript({
-    target: { tabId, allFrames: true },
-    world: "MAIN",
-    injectImmediately: true,
-    func(selectedMode) {
-      globalThis.__fuguangPageSnifferSetMode?.(selectedMode);
-    },
-    args: [mode]
-  }).catch(() => {});
 }
 
 async function injectPageScript(tabId, files, options = {}) {
@@ -645,16 +737,6 @@ async function startPreload(tabId, candidate) {
   }
   const state = getState(tabId);
   const preloadCandidate = resolvePreloadCandidateForStart(state, candidate);
-  if (preloadCandidate.executionAllowed !== false &&
-      preloadCandidate.trustReason === "browser-observed-response" &&
-      !await isCandidateDocumentStillCurrent(tabId, preloadCandidate)) {
-    throw new Error("这个私有网络媒体地址尚未由当前页面实际请求验证。请先播放媒体并刷新候选列表。");
-  }
-  if (preloadCandidate.executionAllowed === false) {
-    throw new Error(preloadCandidate.trustReason === "local-file-requires-authorization"
-      ? "本地媒体文件需要先授权读取，请重新选择当前文件。"
-      : "这个私有网络媒体地址尚未由浏览器实际请求验证。请先播放媒体并刷新候选列表。");
-  }
   if (isIgnoredMediaUrl(preloadCandidate.url)) {
     throw new Error("这个候选是播放器占位媒体，不是真实视频源。请刷新候选列表后选择真实媒体。");
   }
@@ -668,12 +750,19 @@ async function startPreload(tabId, candidate) {
     };
   }
   state.preloadStartLockUntil = now + 2500;
-  clearPreloadSubtitleSuppression(tabId);
-  await detachPreloadVtt(tabId);
   await refreshTabInfo(tabId);
-  const modelConfig = await getModelConfig();
   const tab = await chrome.tabs.get(tabId).catch(() => null);
   const pageUrl = preloadCandidate.pageUrl || state.page?.url || tab?.url || preloadCandidate.initiator || state.context?.href || "";
+  const modelConfig = await getModelConfig();
+  await preventFunAsrSubmitWhileRemoteCancellationUnresolvedForTabPage(
+    tabId,
+    pageUrl,
+    state.preloadJob,
+    modelConfig,
+    preloadCandidate
+  );
+  clearPreloadSubtitleSuppression(tabId);
+  await detachPreloadVtt(tabId);
   const metadata = buildPreloadMetadata(preloadCandidate, state, pageUrl);
   const payload = await startBrowserPreload(tabId, {
     ...preloadCandidate,
@@ -689,35 +778,6 @@ async function startPreload(tabId, candidate) {
   });
   setTabStatus(tabId, { lastPreloadCandidate: preloadCandidate });
   return { preload: payload.status || "queued", job: payload.job, result: payload.result };
-}
-
-async function isCandidateDocumentStillCurrent(tabId, candidate = {}) {
-  const numericTabId = Number(tabId);
-  const documentId = String(candidate.documentId || "");
-  const frameId = normalizeFrameId(candidate.frameId);
-  if (!Number.isInteger(numericTabId) || numericTabId < 0 || !documentId ||
-      typeof chrome.webNavigation?.getFrame !== "function") {
-    return false;
-  }
-  const frame = await chrome.webNavigation.getFrame({ tabId: numericTabId, frameId }).catch(() => null);
-  if (!frame?.documentId || String(frame.documentId) !== documentId) {
-    return false;
-  }
-  const parentFrameId = Number(candidate.parentFrameId);
-  const parentDocumentId = String(candidate.parentDocumentId || "");
-  if (Number.isInteger(parentFrameId) && parentFrameId >= 0) {
-    if (!parentDocumentId) {
-      return false;
-    }
-    const parentFrame = await chrome.webNavigation.getFrame({
-      tabId: numericTabId,
-      frameId: parentFrameId
-    }).catch(() => null);
-    if (!parentFrame?.documentId || String(parentFrame.documentId) !== parentDocumentId) {
-      return false;
-    }
-  }
-  return true;
 }
 
 async function startBestPreload(tabId, selectedCandidate = null) {
@@ -743,6 +803,7 @@ async function startBrowserPreload(tabId, candidate, metadata, modelConfig) {
     : await browserAsrEffectiveUploadChunkSeconds(modelConfig);
   const jobId = createDurableJobId();
   const runToken = createDurableRunToken();
+  const presentationBinding = createBrowserPresentationBinding(tabId, candidate, executionMetadata.pageUrl || candidate.pageUrl || "");
   const job = {
     id: jobId,
     runToken,
@@ -788,6 +849,7 @@ async function startBrowserPreload(tabId, candidate, metadata, modelConfig) {
     runToken,
     candidate: extractionCandidate,
     selectedCandidate: candidate,
+    presentationBinding,
     metadata: executionMetadata,
     modelConfig,
     job,
@@ -1119,8 +1181,7 @@ function sourcePlanUnsupportedMessage(plan = {}) {
 
 function validateBrowserPreloadModelConfig(modelConfig) {
   const asr = modelConfig.asr || {};
-  const provider = normalizeProviderType(asr.providerType);
-  const needsModel = provider !== "xai";
+  const needsModel = browserAsrProviderNeedsModel(asr);
   if (!asr.baseUrl || !asr.apiKey || (needsModel && !asr.model)) {
     throw new Error(needsModel
       ? "浏览器内预加载需要完整的在线 ASR 配置：接口地址、模型名称和 API 密钥。"
@@ -1140,14 +1201,10 @@ async function runBrowserPreloadJob(jobId, expectedRecord = null) {
   if (!isActiveCurrentBrowserPreloadRecord(record)) {
     return;
   }
-  const executionOwner = await resolveBrowserJobExecutionOwner(record, offscreenStart);
-  if (!isActiveCurrentBrowserPreloadRecord(record)) {
-    return;
-  }
-  const offscreenStarted = executionOwner === "offscreen";
-  if (executionOwner === "local") {
-    startBrowserChunkPipeline(record);
-  }
+  // Paid ASR/translation execution is durable only in offscreen. If the runner
+  // cannot start, still finish extraction and keep the audio for an explicit
+  // retry; never switch back to Service Worker network requests.
+  const offscreenStarted = offscreenStart.status !== "unavailable";
   let audio = {};
   let extractionError = null;
   try {
@@ -1216,6 +1273,21 @@ async function runBrowserPreloadJob(jobId, expectedRecord = null) {
   if (offscreenStarted) {
     return;
   }
+  if ((record.audioChunks || []).length) {
+    record.offscreenExecution = false;
+    record.job.status = "interrupted";
+    record.job.stage = "interrupted";
+    record.job.error = "offscreen 识别执行器不可用，已保留抽取音频，请重试。";
+    record.job.updatedAt = Date.now();
+    record.job.translation = {
+      ...record.job.translation,
+      status: "interrupted",
+      message: "等待 offscreen 识别执行器"
+    };
+    publishBrowserPreloadJob(record);
+    await flushBrowserJobMirror(record.job.id).catch(() => null);
+    return;
+  }
   publishBrowserSubtitle(record);
   const completion = finalizeBrowserCompletionState(record);
   await attachBrowserJobVttIfReady(record);
@@ -1233,14 +1305,10 @@ async function runBrowserFunAsrPreloadJob(jobId, expectedRecord = null) {
   if (!isActiveCurrentBrowserPreloadRecord(record)) {
     return;
   }
-  const executionOwner = await resolveBrowserJobExecutionOwner(record, offscreenStart);
-  if (!isActiveCurrentBrowserPreloadRecord(record)) {
-    return;
-  }
-  const offscreenStarted = executionOwner === "offscreen";
-  if (executionOwner === "local") {
-    startBrowserFunAsrChunkPipeline(record);
-  }
+  // Fun-ASR submit is a paid, asynchronous remote operation. It must never fall
+  // back to the Service Worker when the durable offscreen runner is unavailable.
+  // Media extraction can still finish so the cached audio remains retryable.
+  const offscreenStarted = offscreenStart.status !== "unavailable";
   let audio = {};
   let extractionError = null;
   try {
@@ -1304,12 +1372,18 @@ async function runBrowserFunAsrPreloadJob(jobId, expectedRecord = null) {
   if (offscreenStarted) {
     return;
   }
-  publishBrowserSubtitle(record);
-  const completion = finalizeBrowserCompletionState(record);
-  await attachBrowserJobVttIfReady(record);
-  if (browserCompletionAllowsAudioRelease(completion)) {
-    await releaseBrowserAudioChunks(record);
-  }
+  record.offscreenExecution = false;
+  record.job.status = "interrupted";
+  record.job.stage = "interrupted";
+  record.job.error = "Fun-ASR durable offscreen 执行器不可用，已保留抽取音频，请重试。";
+  record.job.updatedAt = Date.now();
+  record.job.translation = {
+    ...record.job.translation,
+    status: "interrupted",
+    message: "等待 offscreen 识别执行器"
+  };
+  publishBrowserPreloadJob(record);
+  await flushBrowserJobMirror(record.job.id).catch(() => null);
 }
 
 function uniqueBrowserAudioChunks(chunks = []) {
@@ -1398,6 +1472,14 @@ async function processBrowserFunAsrChunk(record, chunk, options = {}) {
     if (!await isBrowserExecutionOperationActive(record, runToken, operation)) {
       return;
     }
+    updateChunkStatus(record, index, {
+      stage: "asr_inflight",
+      status: "识别",
+      attempts: attempt,
+      error: "",
+      message: `Fun-ASR 请求已提交前检查点 · ${index + 1}/${chunksTotal}`
+    });
+    await checkpointBrowserPaidRequest(options, "onAsrStartCheckpoint", "识别请求状态持久化失败。");
     const payload = await transcribeDashScopeFunAsrFile(
       {
         name: chunk.file?.name || `funasr-${index + 1}.mp3`,
@@ -1441,21 +1523,29 @@ async function processBrowserFunAsrChunk(record, chunk, options = {}) {
         stage: "completed",
         status: "完成",
         attempts: attempt,
+        asrRequired: false,
         sourceCount: 0,
         translatedCount: 0,
         message: "Fun-ASR 未返回可显示语音"
       });
       publishBrowserSubtitle(record);
+      await checkpointBrowserAsrResult(options);
       return;
     }
     updateChunkStatus(record, index, {
       stage: "asr_done",
       status: "待翻译",
       attempts: attempt,
+      asrRequired: false,
       sourceCount: sourceSegments.length,
       error: "",
       message: `Fun-ASR 原文 ${sourceSegments.length}`
     });
+    publishBrowserSubtitle(record);
+    await checkpointBrowserAsrResult(options);
+    if (options.deferTranslationToOffscreen) {
+      return;
+    }
     await processBrowserTranslationChunk(record, {
       index,
       start: chunk.start,
@@ -1463,7 +1553,10 @@ async function processBrowserFunAsrChunk(record, chunk, options = {}) {
       duration: chunk.duration
     }, sourceSegments, options);
   } catch (error) {
-    if (isBrowserAbortError(error) ||
+    if (error?.offscreenCheckpointFailure) {
+      throw error;
+    }
+    if (isBrowserAbortError(error, signal) ||
         !await isBrowserExecutionOperationActive(record, runToken, operation)) {
       return;
     }
@@ -1478,6 +1571,35 @@ async function processBrowserFunAsrChunk(record, chunk, options = {}) {
     });
     publishBrowserSubtitle(record);
   }
+}
+
+async function checkpointBrowserAsrResult(options = {}) {
+  if (typeof options.onAsrCheckpoint !== "function") {
+    return;
+  }
+  const committed = await options.onAsrCheckpoint();
+  if (committed?.applied !== false) {
+    return;
+  }
+  const error = new Error(committed.error || committed.reason || "识别结果持久化失败。");
+  error.offscreenCheckpointFailure = true;
+  error.commitResult = committed;
+  throw error;
+}
+
+async function checkpointBrowserPaidRequest(options, callbackName, failureMessage) {
+  const callback = options?.[callbackName];
+  if (typeof callback !== "function") {
+    return;
+  }
+  const committed = await callback();
+  if (committed?.applied !== false) {
+    return;
+  }
+  const error = new Error(committed.error || committed.reason || failureMessage);
+  error.offscreenCheckpointFailure = true;
+  error.commitResult = committed;
+  throw error;
 }
 
 function enqueueBrowserMediaExtraction(task) {
@@ -1506,40 +1628,53 @@ async function extractCandidateAudioInBrowserNow(record) {
     ...(candidate.hlsAudioCandidateUrls || []),
     ...(candidate.dashFragments || []).map(fragment => fragment.url)
   ];
-  const response = await withMediaRequestHeaderRules(headerRuleUrls, pageUrl, async () => chrome.runtime.sendMessage({
-    type: MESSAGE.OFFSCREEN_WEB_FFMPEG_EXTRACT_AUDIO,
-    tabId: record.tabId,
-    webFfmpegUrl: webFfmpeg.url,
-    sourceUrl: candidate.url,
-    originalSourceUrl: candidate.originalSourceUrl || record.selectedCandidate?.url || "",
-    localMediaFileKey: candidate.localMediaFileKey || record.selectedCandidate?.localMediaFileKey || "",
-    localMediaFileName: candidate.localMediaFileName || record.selectedCandidate?.localMediaFileName || "",
-    localMediaFileSize: candidate.localMediaFileSize || record.selectedCandidate?.localMediaFileSize || 0,
-    localMediaFileLastModified: candidate.localMediaFileLastModified || record.selectedCandidate?.localMediaFileLastModified || 0,
-    hlsAudioCandidateUrls: candidate.hlsAudioCandidateUrls || [],
-    kind: candidate.kind || "",
-    ext: candidate.ext || "",
-    requestHeaders: candidate.requestHeaders || null,
-    requestHeadersByOrigin: sanitizeRequestHeadersByOrigin(candidate.requestHeadersByOrigin),
-    allowPrivateNetworkMediaOrigin: candidate.trustTier === "observed-private-network" &&
-      candidate.trustReason === "browser-observed-response",
-    fileName: candidate.fileName || candidate.filename || filenameFromUrl(candidate.url),
-    mime: candidate.contentType || candidate.mime || "",
-    sourceBytes: Number(candidate.size || candidate.responseHeaders?.size || 0) || 0,
+  await runMediaHeaderRuleRecovery();
+  const acquiredHeaderRule = await acquireMediaHeaderLease({
+    sourceUrls: headerRuleUrls,
     pageUrl,
-    initiator: candidate.initiator || "",
-    duration: pickFinite(candidate.duration, record.metadata?.duration),
-    mseFragments: candidate.mseFragments || candidate.sourcePlan?.ffmpegInput?.fragments || [],
-    dashFragments: candidate.dashFragments || [],
-    chunkSeconds: record.modelConfig.chunkSeconds,
-    extractChunkSeconds: record.modelConfig.chunkSeconds,
-    asrChunkSeconds: offscreenAsrChunkSecondsForCandidate(record, candidate),
-    asrMode: (record.pipeline === "funasr" || record.job?.pipeline === "funasr") ? "long-file" : "",
-    webFfmpegPerformance: record.modelConfig.webFfmpegPerformance || DEFAULT_MODEL_SETTINGS.webFfmpegPerformance,
-    cacheNamespace: record.job.id,
     jobId: record.job.id,
     runToken: record.runToken
-  }), record.job.id);
+  });
+  const mediaHeaderLease = acquiredHeaderRule?.lease || null;
+  let response;
+  try {
+    response = await chrome.runtime.sendMessage({
+      type: MESSAGE.OFFSCREEN_WEB_FFMPEG_EXTRACT_AUDIO,
+      tabId: record.tabId,
+      webFfmpegUrl: webFfmpeg.url,
+      sourceUrl: candidate.url,
+      originalSourceUrl: candidate.originalSourceUrl || record.selectedCandidate?.url || "",
+      localMediaFileKey: candidate.localMediaFileKey || record.selectedCandidate?.localMediaFileKey || "",
+      localMediaFileName: candidate.localMediaFileName || record.selectedCandidate?.localMediaFileName || "",
+      localMediaFileSize: candidate.localMediaFileSize || record.selectedCandidate?.localMediaFileSize || 0,
+      localMediaFileLastModified: candidate.localMediaFileLastModified || record.selectedCandidate?.localMediaFileLastModified || 0,
+      hlsAudioCandidateUrls: candidate.hlsAudioCandidateUrls || [],
+      kind: candidate.kind || "",
+      ext: candidate.ext || "",
+      requestHeaders: candidate.requestHeaders || null,
+      requestHeadersByOrigin: sanitizeRequestHeadersByOrigin(candidate.requestHeadersByOrigin),
+      fileName: candidate.fileName || candidate.filename || filenameFromUrl(candidate.url),
+      mime: candidate.contentType || candidate.mime || "",
+      pageUrl,
+      initiator: candidate.initiator || "",
+      duration: pickFinite(candidate.duration, record.metadata?.duration),
+      mseFragments: candidate.mseFragments || candidate.sourcePlan?.ffmpegInput?.fragments || [],
+      dashFragments: candidate.dashFragments || [],
+      chunkSeconds: record.modelConfig.chunkSeconds,
+      extractChunkSeconds: record.modelConfig.chunkSeconds,
+      asrChunkSeconds: offscreenAsrChunkSecondsForCandidate(record, candidate),
+      asrMode: (record.pipeline === "funasr" || record.job?.pipeline === "funasr") ? "long-file" : "",
+      webFfmpegPerformance: record.modelConfig.webFfmpegPerformance || DEFAULT_MODEL_SETTINGS.webFfmpegPerformance,
+      cacheNamespace: record.job.id,
+      jobId: record.job.id,
+      runToken: record.runToken,
+      mediaHeaderLease
+    });
+  } finally {
+    if (mediaHeaderLease) {
+      await releaseMediaHeaderLease(mediaHeaderLease).catch(() => null);
+    }
+  }
   if (!response?.ok) {
     throw new Error(response?.error || "Web FFmpeg 音频提取失败。");
   }
@@ -1554,6 +1689,36 @@ function offscreenAsrChunkSecondsForCandidate(record = {}) {
   return normalizeBrowserAsrUploadChunkSeconds(configured);
 }
 
+async function releaseMediaHeaderLeaseBeforeTerminal(message = {}) {
+  const lease = message.mediaHeaderLease;
+  if (!lease) {
+    return { released: true, alreadyAbsent: true };
+  }
+  if (
+    String(lease.jobId || "") !== String(message.jobId || "") ||
+    String(lease.runToken || "") !== String(message.runToken || "")
+  ) {
+    return { released: false, retryable: false, reason: "lease-message-mismatch" };
+  }
+  try {
+    const result = await releaseMediaHeaderLease(lease);
+    if (result?.released) {
+      return result;
+    }
+    if (result?.reason === "stale-lease") {
+      return { released: true, alreadyAbsent: true, staleLease: true };
+    }
+    return result || { released: false, retryable: true, reason: "lease-release-empty" };
+  } catch (error) {
+    return {
+      released: false,
+      retryable: true,
+      reason: "lease-release-error",
+      error: error?.message || String(error)
+    };
+  }
+}
+
 function applyOffscreenWebFfmpegProgress(message) {
   const record = findBrowserPreloadRecord(message?.jobId, message?.tabId);
   if (!isActiveCurrentBrowserPreloadRecord(record) ||
@@ -1566,7 +1731,7 @@ function applyOffscreenWebFfmpegProgress(message) {
   return {};
 }
 
-function applyOffscreenWebFfmpegChunkReady(message) {
+async function applyOffscreenWebFfmpegChunkReady(message) {
   const record = findBrowserPreloadRecord(message?.jobId, message?.tabId);
   if (!isActiveCurrentBrowserPreloadRecord(record) ||
       record.staleOffscreenOperationDetected ||
@@ -1584,6 +1749,10 @@ function applyOffscreenWebFfmpegChunkReady(message) {
       record.job.extract.internalChunksTotal = pickNonNegativeInteger(message.internalChunksTotal, record.job.extract.internalChunksTotal);
     }
     publishBrowserPreloadJob(record);
+    if (emitted.length) {
+      await flushBrowserJobMirror(record.job.id);
+      await wakeOffscreenBrowserJob(record, "audio-chunk-ready");
+    }
     return { chunks: emitted.length };
   }
   const emitted = appendBrowserInternalAudioChunk(record, message.chunk || {});
@@ -1595,7 +1764,144 @@ function applyOffscreenWebFfmpegChunkReady(message) {
     record.job.extract.internalChunksTotal = pickNonNegativeInteger(message.internalChunksTotal, record.job.extract.internalChunksTotal);
   }
   publishBrowserPreloadJob(record);
+  if (emitted.length) {
+    await flushBrowserJobMirror(record.job.id);
+    await wakeOffscreenBrowserJob(record, "audio-chunk-ready");
+  }
   return { chunks: emitted.length };
+}
+
+async function applyOffscreenWebFfmpegCompleted(message) {
+  const headerRelease = await releaseMediaHeaderLeaseBeforeTerminal(message);
+  if (!headerRelease.released) {
+    return {
+      accepted: false,
+      retryable: Boolean(headerRelease.retryable),
+      error: headerRelease.error || headerRelease.reason || "媒体请求头临时规则释放失败。"
+    };
+  }
+  await browserJobRecoveryPromise;
+  const record = findBrowserPreloadRecord(message?.jobId, message?.tabId);
+  if (!isCurrentBrowserPreloadRecord(record) ||
+      (message?.runToken && String(message.runToken) !== String(record.runToken || ""))) {
+    return { accepted: false, stale: true };
+  }
+  if (isBrowserJobCancelled(record)) {
+    return { accepted: false, cancelled: true };
+  }
+  if (record.job?.extract?.status === "completed") {
+    return { accepted: true, duplicate: true, chunks: (record.audioChunks || []).length };
+  }
+  try {
+    const audio = message?.result || {};
+    if (record.pipeline === "funasr" || record.job?.pipeline === "funasr") {
+      for (const chunk of normalizeBrowserAudioChunks(
+        audio,
+        Number(audio.asrChunkSeconds || audio.chunkSeconds || record.browserAsrChunkSeconds) || dashScopeFunAsrChunkSeconds(record.metadata),
+        record.metadata?.duration
+      )) {
+        appendBrowserFunAsrAudioChunk(record, chunk);
+      }
+      record.audioChunks = uniqueBrowserAudioChunks(record.audioChunks);
+      if (!record.audioChunks.length) {
+        throw createNoBrowserAudioChunksError(audio);
+      }
+      const chunksTotal = browserFunAsrExpectedChunkCount(record);
+      record.job.translation = {
+        ...record.job.translation,
+        status: "running",
+        chunkCount: chunksTotal,
+        chunksTotal,
+        asrWorkers: 1,
+        translationWorkers: record.modelConfig.workers,
+        workers: record.modelConfig.workers,
+        chunkStatuses: record.job.translation.chunkStatuses || []
+      };
+      closeBrowserFunAsrQueue(record);
+    } else {
+      if (record.browserStreamingInternalChunks) {
+        for (const chunk of Array.isArray(audio.chunks) ? audio.chunks : []) {
+          appendBrowserInternalAudioChunk(record, chunk);
+        }
+        flushBrowserInternalAudioChunks(record, true);
+      } else {
+        for (const chunk of normalizeBrowserAudioChunks(
+          audio,
+          Number(audio.asrChunkSeconds || audio.chunkSeconds || record.browserAsrChunkSeconds) || browserAsrUploadChunkSeconds(record.modelConfig),
+          record.metadata?.duration
+        )) {
+          enqueueBrowserLogicalAudioChunk(record, chunk);
+        }
+      }
+      const hasAudioChunks = Boolean((record.audioChunks || []).length);
+      if (
+        !hasAudioChunks &&
+        !browserPreloadRecordHasOnlyKnownNonspeechAudio(record) &&
+        !browserAudioResultHasOnlyKnownNonspeech(audio)
+      ) {
+        throw createNoBrowserAudioChunksError(audio);
+      }
+      record.job.translation = {
+        ...record.job.translation,
+        status: hasAudioChunks ? (record.job.translation?.status || "running") : "completed",
+        chunksTotal: hasAudioChunks
+          ? Math.max(Number(record.job.translation?.chunksTotal || 0) || 0, record.browserTranslationGroups?.size || 0)
+          : 0,
+        chunkStatuses: record.job.translation?.chunkStatuses || []
+      };
+      closeBrowserAsrQueue(record);
+    }
+    const hasAudioChunks = Boolean((record.audioChunks || []).length);
+    record.job.extract = {
+      ...record.job.extract,
+      status: "completed",
+      progress: 100,
+      phase: "completed",
+      message: "",
+      chunkCount: (record.audioChunks || []).length,
+      availableSeconds: Math.round(Number(audio.duration || 0) || (record.audioChunks || []).reduce((sum, chunk) => sum + (chunk.duration || 0), 0)),
+      duration: pickFinite(audio.duration, record.job.extract?.duration, record.metadata?.duration),
+      elapsedSeconds: elapsedSeconds(record.startedAt)
+    };
+    record.job.stage = hasAudioChunks ? "asr" : "completed";
+    record.extractionTerminalAppliedAt = Date.now();
+    publishBrowserPreloadJob(record);
+    await flushBrowserJobMirror(record.job.id);
+    await wakeOffscreenBrowserJob(record, "extraction-completed");
+    return { accepted: true, chunks: (record.audioChunks || []).length };
+  } catch (error) {
+    failBrowserPreloadJob(record, error);
+    await flushBrowserJobMirror(record.job.id).catch(() => null);
+    await wakeOffscreenBrowserJob(record, "extraction-failed");
+    return { accepted: false, failed: true, error: error?.message || String(error) };
+  }
+}
+
+async function applyOffscreenWebFfmpegFailed(message) {
+  const headerRelease = await releaseMediaHeaderLeaseBeforeTerminal(message);
+  if (!headerRelease.released) {
+    return {
+      accepted: false,
+      retryable: Boolean(headerRelease.retryable),
+      error: headerRelease.error || headerRelease.reason || "媒体请求头临时规则释放失败。"
+    };
+  }
+  await browserJobRecoveryPromise;
+  const record = findBrowserPreloadRecord(message?.jobId, message?.tabId);
+  if (!isCurrentBrowserPreloadRecord(record) ||
+      (message?.runToken && String(message.runToken) !== String(record.runToken || ""))) {
+    return { accepted: false, stale: true };
+  }
+  if (isBrowserJobCancelled(record)) {
+    return { accepted: false, cancelled: true };
+  }
+  if (record.job?.extract?.status === "completed") {
+    return { accepted: true, duplicate: true };
+  }
+  failBrowserPreloadJob(record, new Error(message?.error || "Web FFmpeg 音频提取失败。"));
+  await flushBrowserJobMirror(record.job.id).catch(() => null);
+  await wakeOffscreenBrowserJob(record, "extraction-failed");
+  return { accepted: false, failed: true, error: record.job.error || "" };
 }
 
 function findBrowserPreloadRecord(jobId, tabId) {
@@ -1638,7 +1944,8 @@ function applyBrowserExtractionProgress(record, progress = {}) {
   if (!browserJobStageIsPastExtraction(record.job.stage)) {
     record.job.stage = "extracting";
   }
-  publishBrowserPreloadJob(record);
+  refreshBrowserPreloadJobSummary(record);
+  publishBrowserPreloadJobUi(record, browserPreloadJobForRead(record));
   return record.job.extract;
 }
 
@@ -1709,6 +2016,10 @@ function appendBrowserFunAsrAudioChunk(record, chunk) {
   };
   if (!record.job.translation.chunkStatuses[item.index]) {
     record.job.translation.chunkStatuses[item.index] = createChunkStatus(item.index, "queued");
+  }
+  rememberBrowserExpectedAudioChunk(record, item.index, item.index);
+  if (item.asrCompleted !== true) {
+    record.job.translation.chunkStatuses[item.index].asrRequired = true;
   }
   record.job.extract.availableSeconds = Math.max(
     Number(record.job.extract.availableSeconds || 0) || 0,
@@ -1897,6 +2208,10 @@ function enqueueBrowserLogicalAudioChunk(record, chunk) {
   if (!record.job.translation.chunkStatuses[group.index]) {
     record.job.translation.chunkStatuses[group.index] = createChunkStatus(group.index, "queued");
   }
+  rememberBrowserExpectedAudioChunk(record, group.index, normalized.index);
+  if (normalized.asrCompleted !== true) {
+    record.job.translation.chunkStatuses[group.index].asrRequired = true;
+  }
   enqueueAsyncQueue(record.browserAsrQueue, normalized);
   publishBrowserPreloadJob(record);
   return true;
@@ -1941,6 +2256,31 @@ function ensureBrowserTranslationGroupForAudioChunk(record, chunk) {
   return group;
 }
 
+function rememberBrowserExpectedAudioChunk(record, groupIndex, audioChunkIndex) {
+  const index = Number(groupIndex);
+  const audioIndex = Number(audioChunkIndex);
+  if (!Number.isFinite(index) || !Number.isFinite(audioIndex)) {
+    return;
+  }
+  const statuses = record?.job?.translation?.chunkStatuses;
+  if (!Array.isArray(statuses)) {
+    return;
+  }
+  const status = statuses[index] || createChunkStatus(index, "queued");
+  const previous = (Array.isArray(status.expectedAudioChunkIndexes) ? status.expectedAudioChunkIndexes : [])
+    .map(Number).filter(Number.isFinite).sort((left, right) => left - right);
+  const expected = [...new Set([
+    ...(Array.isArray(status.expectedAudioChunkIndexes) ? status.expectedAudioChunkIndexes : []),
+    audioIndex
+  ].map(Number).filter(Number.isFinite))].sort((left, right) => left - right);
+  if (previous.length === expected.length && previous.every((value, position) => value === expected[position])) {
+    statuses[index] = status;
+    return;
+  }
+  status.expectedAudioChunkIndexes = expected;
+  statuses[index] = status;
+}
+
 function browserTranslationGroupTargetEnd(record, groupIndex) {
   const segmentSeconds = browserTranslationSegmentSeconds(record);
   const boundaryEnd = (groupIndex + 1) * segmentSeconds;
@@ -1972,6 +2312,13 @@ function browserTranslationGroupIndex(record, chunk) {
   const segmentSeconds = browserTranslationSegmentSeconds(record);
   const start = Math.max(0, browserAudioChunkCoreStart(chunk));
   return Math.max(0, Math.floor((start + 0.001) / segmentSeconds));
+}
+
+function browserRecognitionGroupIndex(record, chunk) {
+  const mapped = record?.browserAsrChunkToTranslationGroup?.get?.(chunk?.index);
+  return Number.isFinite(Number(mapped))
+    ? Number(mapped)
+    : browserTranslationGroupIndex(record, chunk);
 }
 
 function getBrowserTranslationGroupForAudioChunk(record, chunk) {
@@ -2010,9 +2357,10 @@ function completeBrowserAsrChunkForGroup(record, chunk, sourceSegments, error = 
   if (error) {
     group.failed += 1;
     group.errors.push(error.message || String(error));
-  } else if (Array.isArray(sourceSegments) && sourceSegments.length) {
+  }
+  if (Array.isArray(sourceSegments) && sourceSegments.length) {
     group.sourceSegments.push(...sourceSegments);
-  } else {
+  } else if (!error) {
     group.empty += 1;
   }
   updateChunkStatus(record, group.index, {
@@ -2045,14 +2393,16 @@ function maybeFinalizeBrowserTranslationGroup(record, group) {
     return false;
   }
   const sourceSegments = normalizeBrowserSourceSegmentsForTranslation(group.sourceSegments, group.index);
-  record.sourceSegmentsByChunk.set(group.index, sourceSegments);
   if (group.failed && !sourceSegments.length) {
+    const existingSourceSegments = record.sourceSegmentsByChunk.get(group.index) || [];
+    const existingTranslatedSegments = record.translatedSegmentsByChunk.get(group.index) || [];
     group.translationQueued = true;
     updateChunkStatus(record, group.index, {
       stage: "failed",
       status: "失败",
-      sourceCount: 0,
-      translatedCount: 0,
+      asrRequired: false,
+      sourceCount: existingSourceSegments.length,
+      translatedCount: existingTranslatedSegments.length,
       asrFailures: group.failed,
       asrErrors: group.errors.slice(0, 5),
       error: group.errors[0] || "这个识别分段没有可用原文。"
@@ -2060,12 +2410,14 @@ function maybeFinalizeBrowserTranslationGroup(record, group) {
     publishBrowserSubtitle(record);
     return true;
   }
+  record.sourceSegmentsByChunk.set(group.index, sourceSegments);
   if (!sourceSegments.length) {
     group.translationQueued = true;
     record.translatedSegmentsByChunk.set(group.index, []);
     updateChunkStatus(record, group.index, {
       stage: "completed",
       status: "完成",
+      asrRequired: false,
       sourceCount: 0,
       translatedCount: 0,
       asrFailures: 0,
@@ -2079,6 +2431,7 @@ function maybeFinalizeBrowserTranslationGroup(record, group) {
   updateChunkStatus(record, group.index, {
     stage: "asr_done",
     status: "待翻译",
+    asrRequired: false,
     sourceCount: sourceSegments.length,
     asrFailures: group.failed,
     asrErrors: group.errors.slice(0, 5),
@@ -2262,6 +2615,14 @@ async function processBrowserAsrChunk(record, chunk, options = {}) {
     completeBrowserAsrChunkForGroup(record, chunk, []);
     return;
   }
+  updateChunkStatus(record, group.index, {
+    stage: "asr_inflight",
+    status: "识别",
+    attempts: Math.max(1, current.attempts || 1),
+    error: "",
+    message: `识别请求已提交前检查点 · ${browserAsrChunkTimeRangeText(chunk)}`
+  });
+  await checkpointBrowserPaidRequest(options, "onAsrStartCheckpoint", "识别请求状态持久化失败。");
   let sourceSegments;
   try {
     sourceSegments = await transcribeBrowserAudioChunk(chunk, record.modelConfig.asr, {
@@ -2275,7 +2636,7 @@ async function processBrowserAsrChunk(record, chunk, options = {}) {
       }
     });
   } catch (error) {
-    if (isBrowserAbortError(error) ||
+    if (isBrowserAbortError(error, signal) ||
         !await isBrowserExecutionOperationActive(record, runToken, operation)) {
       return;
     }
@@ -2286,8 +2647,9 @@ async function processBrowserAsrChunk(record, chunk, options = {}) {
   if (!await isBrowserExecutionOperationActive(record, runToken, operation)) {
     return;
   }
-  markBrowserAudioChunkAsrResult(chunk, sourceSegments, null);
-  completeBrowserAsrChunkForGroup(record, chunk, sourceSegments);
+  const warning = browserAsrResultWarning(sourceSegments);
+  markBrowserAudioChunkAsrResult(chunk, sourceSegments, warning);
+  completeBrowserAsrChunkForGroup(record, chunk, sourceSegments, warning);
 }
 
 function markBrowserAudioChunkAsrResult(chunk, sourceSegments, error = null) {
@@ -2297,8 +2659,31 @@ function markBrowserAudioChunkAsrResult(chunk, sourceSegments, error = null) {
   chunk.asrCompleted = true;
   chunk.asrFailed = Boolean(error);
   chunk.asrError = error ? String(error.message || error) : "";
+  if (!error) {
+    chunk.asrErrorStatus = 0;
+    chunk.asrErrorCode = "";
+    chunk.asrDeliveryAmbiguous = false;
+    chunk.asrStage = "";
+  }
   chunk.sourceSegments = Array.isArray(sourceSegments) ? sourceSegments : [];
   chunk.updatedAt = Date.now();
+}
+
+function attachBrowserAsrResultWarning(sourceSegments, warning) {
+  const segments = Array.isArray(sourceSegments) ? sourceSegments : [];
+  if (!warning) {
+    return segments;
+  }
+  Object.defineProperty(segments, BROWSER_ASR_RESULT_WARNING, {
+    value: warning,
+    enumerable: false,
+    configurable: true
+  });
+  return segments;
+}
+
+function browserAsrResultWarning(sourceSegments) {
+  return Array.isArray(sourceSegments) ? sourceSegments[BROWSER_ASR_RESULT_WARNING] || null : null;
 }
 
 async function processBrowserTranslationChunk(record, chunk, sourceSegments, options = {}) {
@@ -2321,6 +2706,7 @@ async function processBrowserTranslationChunk(record, chunk, sourceSegments, opt
     error: "",
     message: `第 ${attempt} 次尝试`
   });
+  await checkpointBrowserPaidRequest(options, "onTranslationStartCheckpoint", "翻译请求状态持久化失败。");
   let translatedSegments;
   try {
     translatedSegments = await translateBrowserSegments(
@@ -2331,6 +2717,7 @@ async function processBrowserTranslationChunk(record, chunk, sourceSegments, opt
       {
         batchWorkers: browserTranslationBatchWorkers(record),
         splitWorkers: browserTranslationSplitWorkers(record),
+        maxConcurrency: browserTranslationProviderConcurrency(record),
         signal,
         onProgress(progress) {
           if (isBrowserRunInactive(record, runToken, operation)) {
@@ -2363,7 +2750,7 @@ async function processBrowserTranslationChunk(record, chunk, sourceSegments, opt
       message: `原文 ${sourceSegments.length} · 译文 ${translatedSegments.length}`
     });
   } catch (error) {
-    if (isBrowserAbortError(error) ||
+    if (isBrowserAbortError(error, signal) ||
         !await isBrowserExecutionOperationActive(record, runToken, operation)) {
       return;
     }
@@ -2497,1859 +2884,6 @@ function createNoBrowserAudioChunksError(audio) {
   return new Error(`Web FFmpeg 没有返回可处理的音频切片：${parts.join("，")}。`);
 }
 
-function isUsableBrowserAudioFile(file) {
-  if (file?.buffer instanceof ArrayBuffer || Boolean(file?.cacheUrl)) {
-    return true;
-  }
-  if (Array.isArray(file?.parts) && file.parts.length) {
-    return file.parts.every(part => isUsableBrowserAudioFile(part?.file || part));
-  }
-  return false;
-}
-
-function browserAudioFileByteLength(file) {
-  if (file?.buffer instanceof ArrayBuffer) {
-    return file.buffer.byteLength;
-  }
-  if (Array.isArray(file?.parts)) {
-    return file.parts.reduce((sum, part) => sum + browserAudioFileByteLength(part?.file || part), 0);
-  }
-  return Number(file?.bytes || 0) || 0;
-}
-
-function assertBrowserAsrChunkCanUpload(chunk = {}, asrConfig = {}, byteLength = null, fileBuffer = null) {
-  if (Array.isArray(chunk.file?.parts) && chunk.file.parts.length) {
-    throw new Error("识别音频分段仍由多个 MP3 片段组成，不能直接字节拼接上传；请重新抽取音频。");
-  }
-  const bytes = Math.max(
-    0,
-    Number(byteLength) || browserAudioFileByteLength(chunk.file) || Number(chunk.bytes || 0) || 0
-  );
-  const maxBytes = browserAsrMaxUploadBytes(asrConfig);
-  if (bytes > maxBytes) {
-    throw new Error(`识别音频分段过大（${formatBytes(bytes)}），超过当前 ASR 上传限制（${formatBytes(maxBytes)}）。请降低 ASR 上传窗口或改用支持长文件的 ASR。`);
-  }
-  if (fileBuffer instanceof ArrayBuffer) {
-    assertBrowserAsrUploadAudioBytes(chunk.file || {}, fileBuffer);
-  }
-}
-
-function assertBrowserAsrUploadAudioBytes(file = {}, buffer) {
-  if (!(buffer instanceof ArrayBuffer) || buffer.byteLength < 8) {
-    return;
-  }
-  const kind = browserAsrExpectedAudioContainer(file);
-  if (!kind) {
-    return;
-  }
-  const bytes = new Uint8Array(buffer, 0, Math.min(buffer.byteLength, 64 * 1024));
-  const valid = kind === "wav"
-    ? browserAsrBytesLookLikeWav(bytes)
-    : browserAsrBytesLookLikeMp3(bytes);
-  if (valid) {
-    return;
-  }
-  throw new Error(`ASR 音频格式校验失败：${file.name || "音频分段"} 标记为 ${file.mime || kind}，但文件头不是有效的 ${kind.toUpperCase()} 音频；请重新抽取音频。`);
-}
-
-function browserAsrExpectedAudioContainer(file = {}) {
-  const mime = String(file.mime || "").split(";")[0].trim().toLowerCase();
-  const name = String(file.name || "").split(/[?#]/)[0].toLowerCase();
-  if (mime === "audio/wav" || mime === "audio/x-wav" || /\.wav$/i.test(name)) {
-    return "wav";
-  }
-  if (mime === "audio/mpeg" || mime === "audio/mp3" || /\.mp3$/i.test(name)) {
-    return "mp3";
-  }
-  return "";
-}
-
-function browserAsrBytesLookLikeWav(bytes) {
-  return bytes.length >= 12
-    && bytes[0] === 0x52
-    && bytes[1] === 0x49
-    && bytes[2] === 0x46
-    && bytes[3] === 0x46
-    && bytes[8] === 0x57
-    && bytes[9] === 0x41
-    && bytes[10] === 0x56
-    && bytes[11] === 0x45;
-}
-
-function browserAsrBytesLookLikeMp3(bytes) {
-  if (!bytes || bytes.length < 2) {
-    return false;
-  }
-  const start = browserAsrMp3AudioFrameScanStart(bytes);
-  for (let index = start; index + 1 < bytes.length; index += 1) {
-    if (bytes[index] === 0xff && (bytes[index + 1] & 0xe0) === 0xe0) {
-      return true;
-    }
-  }
-  return false;
-}
-
-function browserAsrMp3AudioFrameScanStart(bytes) {
-  if (
-    bytes.length < 10 ||
-    bytes[0] !== 0x49 ||
-    bytes[1] !== 0x44 ||
-    bytes[2] !== 0x33
-  ) {
-    return 0;
-  }
-  const tagSize =
-    ((bytes[6] & 0x7f) << 21) |
-    ((bytes[7] & 0x7f) << 14) |
-    ((bytes[8] & 0x7f) << 7) |
-    (bytes[9] & 0x7f);
-  const footerSize = (bytes[5] & 0x10) ? 10 : 0;
-  return Math.min(bytes.length, 10 + tagSize + footerSize);
-}
-
-async function transcribeBrowserAudioChunk(chunk, asrConfig, options = {}) {
-  const endpoint = browserAsrEndpoint(asrConfig);
-  const timeoutMs = normalizeAsrTimeoutMs(asrConfig?.timeoutMs, chunk);
-  const supportedRequestFields = await resolveBrowserAsrSupportedRequestFields(asrConfig, { signal: options.signal });
-  const speechTimestampsEndpoint = await resolveBrowserAsrSpeechTimestampsEndpoint(asrConfig, { signal: options.signal });
-  const useExternalVadPrecheck = shouldUseBrowserAsrExternalVadPrecheck(supportedRequestFields, speechTimestampsEndpoint);
-  const nativeVadAvailable = shouldUseBrowserAsrNativeVadTranscription(supportedRequestFields, speechTimestampsEndpoint);
-  const fileName = chunk.file?.name || `chunk-${chunk.index + 1}.mp3`;
-  assertBrowserAsrChunkCanUpload(chunk, asrConfig);
-  const fileBuffer = await getBrowserAudioChunkBuffer(chunk.file);
-  assertBrowserAsrChunkCanUpload(chunk, asrConfig, fileBuffer.byteLength, fileBuffer);
-  const diagnostics = {
-    chunk: browserAsrDiagnosticChunkInfo(chunk),
-    request: {
-      endpoint: sanitizeDiagnosticUrl(endpoint),
-      timeoutMs,
-      fields: [],
-      authorizationIncluded: false
-    },
-    vad: null,
-    rawPayload: null,
-    normalizedSegments: [],
-    speechFilteredSegments: [],
-    hallucinationFilteredSegments: [],
-    finalSegments: [],
-    matureAsrPlan: null,
-    collectedSpeech: null,
-    postprocess: null
-  };
-  const reliableSpeechIntervals = useExternalVadPrecheck
-    ? await detectBrowserAsrSpeechIntervals(chunk, asrConfig, fileBuffer, fileName, diagnostics, {
-        endpoint: speechTimestampsEndpoint,
-        signal: options.signal
-      })
-    : null;
-  const effectiveChunk = Array.isArray(reliableSpeechIntervals)
-    ? { ...chunk, speechIntervals: reliableSpeechIntervals, speechIntervalsReliable: undefined }
-    : chunk;
-  const clipTimestampsSkippedReason = browserAsrClipTimestampsSkippedReason(reliableSpeechIntervals, supportedRequestFields);
-  if (clipTimestampsSkippedReason && diagnostics.vad) {
-    diagnostics.vad.clipTimestampsSkippedReason = clipTimestampsSkippedReason;
-  }
-  const clipTimestamps = Array.isArray(reliableSpeechIntervals) && !clipTimestampsSkippedReason
-    ? browserAsrClipTimestampsValue(reliableSpeechIntervals, effectiveChunk)
-    : "";
-  const matureAsrPlan = createBrowserAsrMaturePlan({
-    reliableSpeechIntervals,
-    clipTimestamps,
-    clipTimestampsSkippedReason,
-    diagnostics,
-    nativeVadAvailable,
-    speechTimestampsEndpointAvailable: Boolean(speechTimestampsEndpoint)
-  });
-  diagnostics.matureAsrPlan = cloneJsonForDiagnostics(matureAsrPlan);
-  if (shouldUseBrowserAsrCollectedSpeechAudio(reliableSpeechIntervals, supportedRequestFields, speechTimestampsEndpoint, clipTimestamps, asrConfig)) {
-    return transcribeBrowserCollectedSpeechAudioChunk({
-      endpoint,
-      timeoutMs,
-      asrConfig,
-      supportedRequestFields,
-      sourceChunk: effectiveChunk,
-      fileBuffer,
-      fileName,
-      reliableSpeechIntervals,
-      matureAsrPlan,
-      diagnostics,
-      options
-    });
-  }
-  let transcription = null;
-  let postprocessed = null;
-  try {
-    try {
-      transcription = await requestBrowserAsrTranscription({
-        endpoint,
-        timeoutMs,
-        asrConfig,
-        supportedRequestFields,
-        effectiveChunk,
-        fileBuffer,
-        fileName,
-        clipTimestamps,
-        matureAsrPlan,
-        signal: options.signal,
-        disableVadFilter: shouldDisableBrowserAsrServerVadForRecall(asrConfig, reliableSpeechIntervals, clipTimestamps)
-      });
-    } catch (error) {
-      if (!shouldRetryBrowserAsrClipRequestError(error, clipTimestamps)) {
-        throw error;
-      }
-      diagnostics.clipTimestampsAttempt = browserAsrAttemptDiagnosticsFromError(error);
-      const retry = await requestBrowserAsrTranscription({
-        endpoint,
-        timeoutMs,
-        asrConfig,
-        supportedRequestFields,
-        effectiveChunk,
-        fileBuffer,
-        fileName,
-        clipTimestamps: "",
-        matureAsrPlan,
-        signal: options.signal,
-        disableVadFilter: shouldDisableBrowserAsrServerVadForRecall(asrConfig, reliableSpeechIntervals, "")
-      });
-      const retryPostprocessed = postprocessBrowserAsrPayloadOrThrow(retry.payload, effectiveChunk, asrConfig, {
-        requestFields: retry.requestFields,
-        disableVadPostFilters: Array.isArray(reliableSpeechIntervals),
-        externalVadServiceAvailable: Boolean(diagnostics.vad?.endpoint),
-        matureAsrPlan: retry.matureAsrPlan
-      });
-      diagnostics.retry = {
-        reason: "clip_timestamps 请求失败，已不带 clip_timestamps 重试。",
-        request: {
-          fields: retry.requestFields.map(([name, value]) => [name, String(value)])
-        },
-        rawPayload: cloneJsonForDiagnostics(retry.payload),
-        matureAsrPlan: cloneJsonForDiagnostics(retry.matureAsrPlan),
-        normalizedSegments: cloneJsonForDiagnostics(retryPostprocessed.normalized),
-        speechFilteredSegments: cloneJsonForDiagnostics(retryPostprocessed.speechFiltered),
-        hallucinationFilteredSegments: cloneJsonForDiagnostics(retryPostprocessed.hallucinationFiltered),
-        finalSegments: cloneJsonForDiagnostics(retryPostprocessed.finalSegments),
-        postprocess: cloneJsonForDiagnostics(retryPostprocessed.postprocess)
-      };
-      transcription = retry;
-      postprocessed = retryPostprocessed;
-      diagnostics.matureAsrPlan = cloneJsonForDiagnostics(retry.matureAsrPlan);
-    }
-    if (!postprocessed) {
-      postprocessed = postprocessBrowserAsrPayloadOrThrow(transcription.payload, effectiveChunk, asrConfig, {
-        requestFields: transcription.requestFields,
-        disableVadPostFilters: Array.isArray(reliableSpeechIntervals),
-        externalVadServiceAvailable: Boolean(diagnostics.vad?.endpoint),
-        matureAsrPlan: transcription.matureAsrPlan
-      });
-      diagnostics.matureAsrPlan = cloneJsonForDiagnostics(transcription.matureAsrPlan);
-    }
-    const emptyVadRecovery = browserAsrEmptyVadRecoveryPlan(postprocessed.finalSegments, reliableSpeechIntervals, transcription.requestFields);
-    if (emptyVadRecovery) {
-      diagnostics.emptyVadAttempt = {
-        request: {
-          fields: transcription.requestFields.map(([name, value]) => [name, String(value)])
-        },
-        rawPayload: cloneJsonForDiagnostics(transcription.payload),
-        matureAsrPlan: cloneJsonForDiagnostics(transcription.matureAsrPlan),
-        normalizedSegments: cloneJsonForDiagnostics(postprocessed.normalized),
-        speechFilteredSegments: cloneJsonForDiagnostics(postprocessed.speechFiltered),
-        hallucinationFilteredSegments: cloneJsonForDiagnostics(postprocessed.hallucinationFiltered),
-        finalSegments: cloneJsonForDiagnostics(postprocessed.finalSegments),
-        postprocess: cloneJsonForDiagnostics(postprocessed.postprocess)
-      };
-      const retry = await requestBrowserAsrTranscription({
-        endpoint,
-        timeoutMs,
-        asrConfig,
-        supportedRequestFields,
-        effectiveChunk,
-        fileBuffer,
-        fileName,
-        clipTimestamps: "",
-        matureAsrPlan,
-        signal: options.signal,
-        disableVadFilter: true
-      });
-      const rawRetryPostprocessed = postprocessBrowserAsrPayloadOrThrow(retry.payload, {
-        ...effectiveChunk,
-        speechIntervalsReliable: false
-      }, asrConfig, {
-        requestFields: retry.requestFields,
-        externalVadServiceAvailable: Boolean(diagnostics.vad?.endpoint),
-        matureAsrPlan: retry.matureAsrPlan,
-        forceQualityFilters: true,
-        forceCustomRunFilters: true
-      });
-      const retryPostprocessed = filterBrowserAsrStrictVadRecoveryPostprocess(rawRetryPostprocessed);
-      diagnostics.retry = {
-        reason: emptyVadRecovery.reason,
-        request: {
-          fields: retry.requestFields.map(([name, value]) => [name, String(value)])
-        },
-        rawPayload: cloneJsonForDiagnostics(retry.payload),
-        matureAsrPlan: cloneJsonForDiagnostics(retry.matureAsrPlan),
-        normalizedSegments: cloneJsonForDiagnostics(retryPostprocessed.normalized),
-        speechFilteredSegments: cloneJsonForDiagnostics(retryPostprocessed.speechFiltered),
-        hallucinationFilteredSegments: cloneJsonForDiagnostics(retryPostprocessed.hallucinationFiltered),
-        finalSegments: cloneJsonForDiagnostics(retryPostprocessed.finalSegments),
-        postprocess: cloneJsonForDiagnostics(retryPostprocessed.postprocess)
-      };
-      transcription = retry;
-      postprocessed = retryPostprocessed;
-      diagnostics.matureAsrPlan = cloneJsonForDiagnostics(retry.matureAsrPlan);
-    }
-    const coverageRetry = browserAsrCoverageRetryPlan(postprocessed.finalSegments, effectiveChunk, clipTimestamps, transcription.requestFields, supportedRequestFields, {
-      externalVadPrecheck: Boolean(diagnostics.vad?.endpoint)
-    });
-    if (coverageRetry) {
-      const clipTimestampsPostprocessed = postprocessed;
-      diagnostics[coverageRetry.attemptKey] = {
-        request: {
-          fields: transcription.requestFields.map(([name, value]) => [name, String(value)])
-        },
-        rawPayload: cloneJsonForDiagnostics(transcription.payload),
-        matureAsrPlan: cloneJsonForDiagnostics(transcription.matureAsrPlan),
-        normalizedSegments: cloneJsonForDiagnostics(postprocessed.normalized),
-        speechFilteredSegments: cloneJsonForDiagnostics(postprocessed.speechFiltered),
-        hallucinationFilteredSegments: cloneJsonForDiagnostics(postprocessed.hallucinationFiltered),
-        finalSegments: cloneJsonForDiagnostics(postprocessed.finalSegments),
-        postprocess: cloneJsonForDiagnostics(postprocessed.postprocess)
-      };
-      const retry = await requestBrowserAsrTranscription({
-        endpoint,
-        timeoutMs,
-        asrConfig,
-        supportedRequestFields,
-        effectiveChunk,
-        fileBuffer,
-        fileName,
-        clipTimestamps: "",
-        matureAsrPlan,
-        signal: options.signal,
-        disableVadFilter: coverageRetry.disableVadFilter
-      });
-      const rawRetryPostprocessed = postprocessBrowserAsrPayloadOrThrow(retry.payload, effectiveChunk, asrConfig, {
-        requestFields: retry.requestFields,
-        disableVadPostFilters: Array.isArray(reliableSpeechIntervals),
-        externalVadServiceAvailable: Boolean(diagnostics.vad?.endpoint),
-        matureAsrPlan: retry.matureAsrPlan,
-        forceSpeechActivityFilter: coverageRetry.forceSpeechActivityFilter,
-        forceQualityFilters: coverageRetry.forceQualityFilters,
-        forceCustomRunFilters: coverageRetry.forceCustomRunFilters,
-        forceVadHallucinationGuard: coverageRetry.forceVadHallucinationGuard
-      });
-      const retryPostprocessed = coverageRetry.filterToCoverageGap
-        ? filterBrowserAsrCoverageRetryPostprocess(clipTimestampsPostprocessed, rawRetryPostprocessed, effectiveChunk, retry.payload, asrConfig, {
-          strictVadRecoveryFilter: coverageRetry.strictVadRecoveryFilter
-        })
-        : rawRetryPostprocessed;
-      diagnostics.retry = {
-        reason: coverageRetry.reason,
-        request: {
-          fields: retry.requestFields.map(([name, value]) => [name, String(value)])
-        },
-        rawPayload: cloneJsonForDiagnostics(retry.payload),
-        matureAsrPlan: cloneJsonForDiagnostics(retry.matureAsrPlan),
-        normalizedSegments: cloneJsonForDiagnostics(retryPostprocessed.normalized),
-        speechFilteredSegments: cloneJsonForDiagnostics(retryPostprocessed.speechFiltered),
-        hallucinationFilteredSegments: cloneJsonForDiagnostics(retryPostprocessed.hallucinationFiltered),
-        finalSegments: cloneJsonForDiagnostics(retryPostprocessed.finalSegments),
-        postprocess: cloneJsonForDiagnostics(retryPostprocessed.postprocess)
-      };
-      transcription = retry;
-      postprocessed = mergeBrowserAsrClipRetryPostprocess(clipTimestampsPostprocessed, retryPostprocessed);
-      diagnostics.matureAsrPlan = cloneJsonForDiagnostics(retry.matureAsrPlan);
-    }
-  } catch (error) {
-    diagnostics.chunk = browserAsrDiagnosticChunkInfo(effectiveChunk);
-    if (transcription) {
-      diagnostics.request.fields = transcription.requestFields.map(([name, value]) => [name, String(value)]);
-      diagnostics.rawPayload = cloneJsonForDiagnostics(transcription.payload);
-    }
-    applyBrowserAsrErrorDiagnostics(diagnostics, error);
-    emitBrowserAsrDiagnostics(options, diagnostics);
-    throw error;
-  }
-  diagnostics.request.fields = transcription.requestFields.map(([name, value]) => [name, String(value)]);
-  diagnostics.rawPayload = cloneJsonForDiagnostics(transcription.payload);
-  diagnostics.matureAsrPlan = cloneJsonForDiagnostics(transcription.matureAsrPlan);
-  diagnostics.chunk = browserAsrDiagnosticChunkInfo(effectiveChunk);
-  diagnostics.normalizedSegments = cloneJsonForDiagnostics(postprocessed.normalized);
-  diagnostics.speechFilteredSegments = cloneJsonForDiagnostics(postprocessed.speechFiltered);
-  diagnostics.hallucinationFilteredSegments = cloneJsonForDiagnostics(postprocessed.hallucinationFiltered);
-  diagnostics.finalSegments = cloneJsonForDiagnostics(postprocessed.finalSegments);
-  diagnostics.postprocess = cloneJsonForDiagnostics(postprocessed.postprocess);
-  emitBrowserAsrDiagnostics(options, diagnostics);
-  return postprocessed.finalSegments;
-}
-
-function shouldRetryBrowserAsrClipRequestError(error, clipTimestamps = "") {
-  if (!clipTimestamps) {
-    return false;
-  }
-  return Array.isArray(error?.asrRequestFields)
-    && error.asrRequestFields.some(([name]) => name === "clip_timestamps");
-}
-
-function shouldUseBrowserAsrExternalVadPrecheck(supportedRequestFields, speechTimestampsEndpoint = "") {
-  return Boolean(
-    speechTimestampsEndpoint
-    && (
-      asrRequestFieldSupported({ supportedRequestFields }, "clip_timestamps")
-      || asrRequestFieldSupported({ supportedRequestFields }, "vad_filter")
-    )
-  );
-}
-
-function shouldUseBrowserAsrNativeVadTranscription(supportedRequestFields, speechTimestampsEndpoint = "") {
-  return Boolean(
-    speechTimestampsEndpoint
-    && asrRequestFieldSupported({ supportedRequestFields }, "without_timestamps")
-    && !asrRequestFieldSupported({ supportedRequestFields }, "clip_timestamps")
-    && !asrRequestFieldSupported({ supportedRequestFields }, "vad_filter")
-  );
-}
-
-function shouldUseBrowserAsrCollectedSpeechAudio(reliableSpeechIntervals, supportedRequestFields, speechTimestampsEndpoint = "", clipTimestamps = "", asrConfig = {}) {
-  const clipTimestampsRequestAvailable = Boolean(clipTimestamps)
-    && asrRequestFieldSupported({ supportedRequestFields }, "clip_timestamps");
-  return Boolean(
-    speechTimestampsEndpoint
-    && Array.isArray(reliableSpeechIntervals)
-    && reliableSpeechIntervals.length
-    && !clipTimestampsRequestAvailable
-    && browserAsrCollectedSpeechAudioExplicitlyEnabled(asrConfig)
-  );
-}
-
-function browserAsrCollectedSpeechAudioExplicitlyEnabled(asrConfig = {}) {
-  const value = String(asrConfig?.collectedSpeechAudio || asrConfig?.collectSpeechAudio || "").trim().toLowerCase();
-  return ["1", "true", "on", "force", "collect"].includes(value);
-}
-
-function shouldDisableBrowserAsrServerVadForRecall(asrConfig = {}, reliableSpeechIntervals = null, clipTimestamps = "") {
-  if (normalizeProviderType(asrConfig?.providerType) !== "openai") {
-    return false;
-  }
-  return normalizeAsrVadFilterMode(asrConfig?.vadFilter || asrConfig?.vad_filter || asrConfig?.vadFilterMode) === "auto";
-}
-
-async function transcribeBrowserCollectedSpeechAudioChunk({
-  endpoint,
-  timeoutMs,
-  asrConfig,
-  supportedRequestFields,
-  sourceChunk,
-  fileBuffer,
-  fileName,
-  reliableSpeechIntervals,
-  matureAsrPlan,
-  diagnostics,
-  options = {}
-}) {
-  const collected = await collectBrowserAsrSpeechAudioChunks(sourceChunk, fileBuffer, fileName, reliableSpeechIntervals, asrConfig, options);
-  const chunks = (collected?.chunks || [])
-    .map((chunk, index) => normalizeBrowserAsrCollectedSpeechChunk(sourceChunk, chunk, index))
-    .filter(Boolean);
-  diagnostics.collectedSpeech = {
-    strategy: "external_vad_collect_chunks",
-    chunks: cloneJsonForDiagnostics(chunks.map(browserAsrCollectedSpeechChunkInfo)),
-    sourceSpeechIntervals: cloneJsonForDiagnostics(reliableSpeechIntervals)
-  };
-  if (!chunks.length) {
-    diagnostics.chunk = browserAsrDiagnosticChunkInfo(sourceChunk);
-    diagnostics.finalSegments = [];
-    diagnostics.postprocess = {
-      policySource: "collected_external_vad",
-      segmentCounts: { normalized: 0, speechFiltered: 0, hallucinationFiltered: 0, final: 0 },
-      dropCounts: { speechActivity: 0, hallucinationGuard: 0, chunkOwnership: 0, total: 0 },
-      droppedSegments: []
-    };
-    emitBrowserAsrDiagnostics(options, diagnostics);
-    return [];
-  }
-
-  const collectedPlan = createBrowserAsrMaturePlan({
-    reliableSpeechIntervals,
-    diagnostics,
-    speechTimestampsEndpointAvailable: true,
-    collectedSpeechAudio: true
-  });
-  const attempts = [];
-  let mergedPostprocessed = {
-    normalized: [],
-    speechFiltered: [],
-    hallucinationFiltered: [],
-    finalSegments: [],
-    postprocess: null
-  };
-  for (const collectedChunk of chunks) {
-    assertBrowserAsrChunkCanUpload(collectedChunk, asrConfig);
-    const collectedBuffer = await getBrowserAudioChunkBuffer(collectedChunk.file);
-    assertBrowserAsrChunkCanUpload(collectedChunk, asrConfig, collectedBuffer.byteLength, collectedBuffer);
-    const transcription = await requestBrowserAsrTranscription({
-      endpoint,
-      timeoutMs,
-      asrConfig,
-      supportedRequestFields,
-      effectiveChunk: collectedChunk,
-      fileBuffer: collectedBuffer,
-      fileName: collectedChunk.file?.name || fileName,
-      clipTimestamps: "",
-      matureAsrPlan: collectedPlan,
-      signal: options.signal,
-      disableVadFilter: true
-    });
-    const postprocessed = postprocessBrowserAsrCollectedSpeechPayload(transcription.payload, sourceChunk, collectedChunk, asrConfig, {
-      requestFields: transcription.requestFields,
-      matureAsrPlan: transcription.matureAsrPlan
-    });
-    attempts.push({
-      chunk: browserAsrCollectedSpeechChunkInfo(collectedChunk),
-      request: {
-        fields: transcription.requestFields.map(([name, value]) => [name, String(value)])
-      },
-      rawPayload: cloneJsonForDiagnostics(transcription.payload),
-      matureAsrPlan: cloneJsonForDiagnostics(transcription.matureAsrPlan),
-      normalizedSegments: cloneJsonForDiagnostics(postprocessed.normalized),
-      speechFilteredSegments: cloneJsonForDiagnostics(postprocessed.speechFiltered),
-      hallucinationFilteredSegments: cloneJsonForDiagnostics(postprocessed.hallucinationFiltered),
-      finalSegments: cloneJsonForDiagnostics(postprocessed.finalSegments),
-      postprocess: cloneJsonForDiagnostics(postprocessed.postprocess)
-    });
-    mergedPostprocessed = mergeBrowserAsrCollectedSpeechPostprocess(mergedPostprocessed, postprocessed);
-    diagnostics.request.fields = transcription.requestFields.map(([name, value]) => [name, String(value)]);
-    diagnostics.rawPayload = cloneJsonForDiagnostics(transcription.payload);
-    diagnostics.matureAsrPlan = cloneJsonForDiagnostics(transcription.matureAsrPlan);
-  }
-  diagnostics.collectedSpeech.attempts = attempts;
-  diagnostics.chunk = browserAsrDiagnosticChunkInfo(sourceChunk);
-  diagnostics.normalizedSegments = cloneJsonForDiagnostics(mergedPostprocessed.normalized);
-  diagnostics.speechFilteredSegments = cloneJsonForDiagnostics(mergedPostprocessed.speechFiltered);
-  diagnostics.hallucinationFilteredSegments = cloneJsonForDiagnostics(mergedPostprocessed.hallucinationFiltered);
-  diagnostics.finalSegments = cloneJsonForDiagnostics(mergedPostprocessed.finalSegments);
-  diagnostics.postprocess = cloneJsonForDiagnostics(mergedPostprocessed.postprocess);
-  emitBrowserAsrDiagnostics(options, diagnostics);
-  return mergedPostprocessed.finalSegments;
-}
-
-async function collectBrowserAsrSpeechAudioChunks(sourceChunk, fileBuffer, fileName, reliableSpeechIntervals, asrConfig = {}, options = {}) {
-  await ensureOffscreenDocument();
-  const webFfmpeg = await getWebFfmpegConfig();
-  const response = await chrome.runtime.sendMessage({
-    type: MESSAGE.OFFSCREEN_WEB_FFMPEG_COLLECT_SPEECH_AUDIO,
-    webFfmpegUrl: webFfmpeg.url,
-    file: {
-      name: fileName || sourceChunk?.file?.name || `asr-${Number(sourceChunk?.index || 0)}.mp3`,
-      mime: sourceChunk?.file?.mime || "audio/mpeg",
-      cacheUrl: sourceChunk?.file?.cacheUrl || "",
-      buffer: fileBuffer
-    },
-    outputName: `speech-${fileName || sourceChunk?.file?.name || "asr.mp3"}`,
-    speechIntervals: cloneJsonForDiagnostics(reliableSpeechIntervals),
-    duration: Math.max(0, Number(sourceChunk?.duration || (Number(sourceChunk?.end) - Number(sourceChunk?.start)) || 0) || 0),
-    sourceStart: Number(sourceChunk?.start || 0) || 0,
-    maxChunkSeconds: BROWSER_ASR_MATURE_MAX_SPEECH_DURATION_SECONDS,
-    cacheNamespace: "",
-    jobId: options.jobId || "",
-    runToken: options.runToken || "",
-    asr: {
-      model: asrConfig?.model || "",
-      providerType: asrConfig?.providerType || ""
-    }
-  });
-  if (!response?.ok) {
-    throw new Error(response?.error || "Web FFmpeg 生成 VAD 语音窗口失败。");
-  }
-  return response.result || {};
-}
-
-function browserAsrClipTimestampsSkippedReason(reliableSpeechIntervals, supportedRequestFields) {
-  if (!Array.isArray(reliableSpeechIntervals) || !reliableSpeechIntervals.length) {
-    return "";
-  }
-  if (!asrRequestFieldSupported({ supportedRequestFields }, "vad_filter")) {
-    return "";
-  }
-  return reliableSpeechIntervals.some(browserAsrSpeechIntervalRequiresServerVad)
-    ? "long_speech_interval_requires_server_vad"
-    : "";
-}
-
-function browserAsrSpeechIntervalRequiresServerVad(interval = {}) {
-  const start = Number(interval?.start);
-  const end = Number(interval?.end);
-  if (!Number.isFinite(start) || !Number.isFinite(end) || end <= start) {
-    return false;
-  }
-  return end - start > BROWSER_ASR_MATURE_MAX_SPEECH_DURATION_SECONDS + BROWSER_ASR_LONG_SPEECH_INTERVAL_TOLERANCE_SECONDS;
-}
-
-function browserAsrAttemptDiagnosticsFromError(error) {
-  return {
-    request: {
-      fields: Array.isArray(error?.asrRequestFields)
-        ? error.asrRequestFields.map(([name, value]) => [name, String(value)])
-        : []
-    },
-    rawPayload: error?.asrRawPayload === undefined ? null : cloneJsonForDiagnostics(error.asrRawPayload),
-    ...(error?.asrMaturePlan ? { matureAsrPlan: cloneJsonForDiagnostics(error.asrMaturePlan) } : {}),
-    error: {
-      stage: error?.asrStage || "asr_request",
-      message: error?.message || String(error || "ASR 请求失败"),
-      ...(Number.isFinite(Number(error?.asrStatus)) ? { status: Number(error.asrStatus) } : {})
-    }
-  };
-}
-
-function createBrowserAsrMaturePlan({ reliableSpeechIntervals, clipTimestamps = "", clipTimestampsSkippedReason = "", diagnostics = null, nativeVadAvailable = false, speechTimestampsEndpointAvailable = false, collectedSpeechAudio = false } = {}) {
-  const externalPrecheckAttempted = Boolean(diagnostics?.vad?.endpoint);
-  const vadEndpointAvailable = externalPrecheckAttempted || Boolean(speechTimestampsEndpointAvailable);
-  const hasReliableIntervals = Array.isArray(reliableSpeechIntervals);
-  const speechIntervalCount = hasReliableIntervals ? reliableSpeechIntervals.length : 0;
-  const precheckState = nativeVadAvailable
-    ? "native"
-    : (hasReliableIntervals
-    ? (speechIntervalCount ? "reliable" : "empty")
-    : (externalPrecheckAttempted ? "unavailable" : "none"));
-  return browserAsrMaturePlanForRequest({
-    version: 1,
-    strategy: "speaches_faster_whisper",
-    vad: {
-      endpointAvailable: vadEndpointAvailable,
-      externalPrecheckAttempted,
-      nativeTranscription: nativeVadAvailable === true,
-      collectedSpeechAudio: collectedSpeechAudio === true,
-      precheckState,
-      speechIntervalCount,
-      clipTimestampsSkippedReason: String(clipTimestampsSkippedReason || "")
-    },
-    clipTimestamps: normalizeBrowserAsrPlanClipTimestamps(clipTimestamps)
-  }, []);
-}
-
-function browserAsrMaturePlanForRequest(basePlan = {}, requestFields = []) {
-  const normalizedFields = normalizeBrowserAsrRequestFieldsForDiagnostics(requestFields);
-  const policy = createBrowserAsrPostprocessPolicy({
-    requestFields: normalizedFields,
-    externalVadPrecheck: basePlan?.vad?.precheckState === "reliable",
-    externalVadServiceAvailable: basePlan?.vad?.externalPrecheckAttempted === true,
-    nativeVadRequest: basePlan?.vad?.nativeTranscription === true,
-    collectedSpeechRequest: basePlan?.vad?.collectedSpeechAudio === true
-  });
-  return {
-    version: Number(basePlan?.version) || 1,
-    strategy: basePlan?.strategy || "speaches_faster_whisper",
-    vad: {
-      endpointAvailable: basePlan?.vad?.endpointAvailable === true,
-      externalPrecheckAttempted: basePlan?.vad?.externalPrecheckAttempted === true,
-      nativeTranscription: basePlan?.vad?.nativeTranscription === true,
-      collectedSpeechAudio: basePlan?.vad?.collectedSpeechAudio === true,
-      precheckState: basePlan?.vad?.precheckState || "none",
-      speechIntervalCount: Math.max(0, Number(basePlan?.vad?.speechIntervalCount || 0) || 0),
-      clipTimestampsSkippedReason: String(basePlan?.vad?.clipTimestampsSkippedReason || "")
-    },
-    clipTimestamps: normalizeBrowserAsrPlanClipTimestamps(basePlan?.clipTimestamps),
-    request: {
-      mode: browserAsrMatureRequestMode(policy, basePlan),
-      clipTimestampRequest: policy.clipTimestampRequest,
-      vadFilterRequest: policy.vadFilterRequest,
-      fieldNames: normalizedFields.map(([name]) => name)
-    },
-    postprocessPolicy: policy
-  };
-}
-
-function createBrowserAsrPostprocessPolicy(options = {}) {
-  const clipTimestampRequest = browserAsrRequestIncludesClipTimestamps(options.requestFields);
-  const vadFilterRequest = browserAsrRequestIncludesVadFilter(options.requestFields);
-  const externalVadPrecheck = options.externalVadPrecheck === true || options.disableVadPostFilters === true;
-  const externalVadServiceAvailable = options.externalVadServiceAvailable === true;
-  const nativeVadRequest = options.nativeVadRequest === true;
-  const collectedSpeechRequest = options.collectedSpeechRequest === true;
-  const matureVadRequest = clipTimestampRequest
-    || vadFilterRequest
-    || nativeVadRequest
-    || collectedSpeechRequest;
-  return {
-    clipTimestampRequest,
-    vadFilterRequest,
-    externalVadPrecheck,
-    externalVadServiceAvailable,
-    nativeVadRequest,
-    collectedSpeechRequest,
-    matureVadRequest,
-    speechActivityFilterApplied: nativeVadRequest && !clipTimestampRequest && !collectedSpeechRequest,
-    qualityFiltersDisabled: matureVadRequest,
-    customRunFiltersDisabled: clipTimestampRequest,
-    vadHallucinationGuardDisabled: false
-  };
-}
-
-function browserAsrPostprocessPolicyWithOverrides(policy = {}, options = {}) {
-  const adjusted = { ...policy };
-  if (options.forceSpeechActivityFilter === true) {
-    adjusted.speechActivityFilterApplied = true;
-  }
-  if (options.forceQualityFilters === true) {
-    adjusted.qualityFiltersDisabled = false;
-  }
-  if (options.forceCustomRunFilters === true) {
-    adjusted.customRunFiltersDisabled = false;
-  }
-  if (options.forceVadHallucinationGuard === true) {
-    adjusted.vadHallucinationGuardDisabled = false;
-  }
-  return adjusted;
-}
-
-function browserAsrMatureRequestMode(policy = {}, basePlan = {}) {
-  if (policy.clipTimestampRequest) {
-    return "external_vad_clip";
-  }
-  if (policy.vadFilterRequest) {
-    return "compatible_vad_filter";
-  }
-  if (policy.nativeVadRequest || basePlan?.vad?.nativeTranscription) {
-    return "speaches_native";
-  }
-  if (policy.collectedSpeechRequest || basePlan?.vad?.collectedSpeechAudio) {
-    return "collected_external_vad";
-  }
-  return "direct";
-}
-
-function normalizeBrowserAsrPlanClipTimestamps(value = "") {
-  return String(value || "").trim();
-}
-
-function normalizeBrowserAsrRequestFieldsForDiagnostics(requestFields = []) {
-  return (requestFields || []).map(([name, value]) => [name, String(value)]);
-}
-
-function postprocessBrowserAsrPayloadOrThrow(payload, effectiveChunk, asrConfig, options = {}) {
-  try {
-    return postprocessBrowserAsrPayload(payload, effectiveChunk, asrConfig, options);
-  } catch (error) {
-    if (error && typeof error === "object" && !error.asrStage) {
-      error.asrStage = "postprocess";
-    }
-    throw error;
-  }
-}
-
-function applyBrowserAsrErrorDiagnostics(diagnostics, error) {
-  if (!diagnostics || !error) {
-    return;
-  }
-  if (Array.isArray(error.asrRequestFields)) {
-    diagnostics.request.fields = error.asrRequestFields.map(([name, value]) => [name, String(value)]);
-  }
-  if (error.asrRawPayload !== undefined) {
-    diagnostics.rawPayload = cloneJsonForDiagnostics(error.asrRawPayload);
-  }
-  if (error.asrMaturePlan) {
-    diagnostics.matureAsrPlan = cloneJsonForDiagnostics(error.asrMaturePlan);
-  }
-  diagnostics.error = {
-    stage: error.asrStage || "asr_request",
-    message: error.message || String(error || "ASR 请求失败"),
-    ...(Number.isFinite(Number(error.asrStatus)) ? { status: Number(error.asrStatus) } : {})
-  };
-}
-
-function createBrowserAsrRequestError(message, details = {}) {
-  const error = new Error(message);
-  error.asrStage = details.stage || "asr_request";
-  error.asrRequestFields = Array.isArray(details.requestFields) ? details.requestFields : [];
-  if (Number.isFinite(Number(details.status))) {
-    error.asrStatus = Number(details.status);
-  }
-  if (details.rawPayload !== undefined) {
-    error.asrRawPayload = details.rawPayload;
-  }
-  if (details.matureAsrPlan) {
-    error.asrMaturePlan = details.matureAsrPlan;
-  }
-  return error;
-}
-
-function browserAsrResponseErrorMessage(payload, status) {
-  const detail = payload?.error?.message ?? payload?.message ?? payload?.detail;
-  if (typeof detail === "string" && detail.trim()) {
-    return detail.trim();
-  }
-  if (Array.isArray(detail) && detail.length) {
-    return detail.map(item => {
-      if (typeof item === "string") {
-        return item;
-      }
-      try {
-        return JSON.stringify(item);
-      } catch {
-        return String(item || "");
-      }
-    }).filter(Boolean).join("；").slice(0, 500);
-  }
-  if (detail && typeof detail === "object") {
-    try {
-      const text = JSON.stringify(detail);
-      if (text && text !== "{}") {
-        return text.slice(0, 500);
-      }
-    } catch {
-      // Fall back to the status message below.
-    }
-  }
-  return `ASR 返回 HTTP ${status}`;
-}
-
-function browserAsrUploadFileSummary(file = {}, buffer = null, fileName = "") {
-  const bytes = buffer instanceof ArrayBuffer ? new Uint8Array(buffer, 0, Math.min(buffer.byteLength, 16)) : new Uint8Array();
-  const headHex = [...bytes].map(value => value.toString(16).padStart(2, "0")).join("");
-  const headAscii = browserAsrAsciiHead(bytes);
-  const size = buffer instanceof ArrayBuffer
-    ? formatBytes(buffer.byteLength)
-    : formatBytes(browserAudioFileByteLength(file));
-  const mime = file.mime || "audio/mpeg";
-  const name = fileName || file.name || "audio";
-  const signature = headAscii || headHex || "-";
-  return `${name}（${mime}，${size}，文件头 ${signature}）`;
-}
-
-function browserAsrAsciiHead(bytes) {
-  if (!bytes?.length) {
-    return "";
-  }
-  if (bytes.length >= 4 && bytes[0] === 0x52 && bytes[1] === 0x49 && bytes[2] === 0x46 && bytes[3] === 0x46) {
-    return "RIFF";
-  }
-  if (bytes.length >= 3 && bytes[0] === 0x49 && bytes[1] === 0x44 && bytes[2] === 0x33) {
-    return "ID3";
-  }
-  return "";
-}
-
-async function requestBrowserAsrTranscription({ endpoint, timeoutMs, asrConfig, supportedRequestFields, effectiveChunk, fileBuffer, fileName, clipTimestamps, matureAsrPlan, disableVadFilter = false, signal = null }) {
-  const formData = new FormData();
-  const requestAsrConfig = disableVadFilter ? { ...asrConfig, vadFilter: "off" } : asrConfig;
-  const requestFields = browserAsrRequestFields(requestAsrConfig, requestAsrConfig.language || requestAsrConfig.sourceLanguage || "", {
-    supportedRequestFields,
-    clientSpeechIntervalsAvailable: Array.isArray(effectiveChunk?.speechIntervals) && effectiveChunk?.speechIntervalsReliable !== false,
-    clipTimestamps
-  });
-  const requestMatureAsrPlan = browserAsrMaturePlanForRequest(matureAsrPlan, requestFields);
-  for (const [name, value] of requestFields) {
-    formData.append(name, value);
-  }
-  formData.append("file", new Blob([fileBuffer], { type: effectiveChunk.file.mime || "audio/mpeg" }), fileName);
-  const controller = new AbortController();
-  const unlink = linkBrowserAbortSignal(signal, controller);
-  let timedOut = false;
-  const timer = setTimeout(() => {
-    timedOut = true;
-    controller.abort();
-  }, timeoutMs);
-  let response;
-  let payload = {};
-  try {
-    const key = FuguangRequestSemaphore.providerKey("asr", asrConfig);
-    const limit = Math.max(1, Math.min(4, Number(asrConfig.maxConcurrency || 2) || 2));
-    for (let attempt = 0; attempt < 2; attempt += 1) {
-      const result = await FuguangRequestSemaphore.withPermit(key, limit, async () => {
-        const currentResponse = await fetch(endpoint, {
-          method: "POST",
-          headers: {
-            Authorization: `Bearer ${asrConfig.apiKey}`
-          },
-          body: formData,
-          signal: controller.signal
-        });
-        const retryAfterMs = currentResponse?.status === 429
-          ? FuguangRequestSemaphore.retryAfterMs(currentResponse.headers)
-          : 0;
-        if (attempt === 0 && retryAfterMs > 0) {
-          return { response: currentResponse, retryAfterMs, payload: {} };
-        }
-        let currentPayload = {};
-        try {
-          currentPayload = await currentResponse.json();
-        } catch (error) {
-          if (controller.signal.aborted) {
-            throw error;
-          }
-        }
-        return { response: currentResponse, retryAfterMs, payload: currentPayload };
-      }, controller.signal);
-      response = result.response;
-      payload = result.payload;
-      const retryAfterMs = result.retryAfterMs;
-      if (attempt === 0 && retryAfterMs > 0) {
-        response.body?.cancel?.().catch?.(() => {});
-        await FuguangRequestSemaphore.delay(retryAfterMs, controller.signal);
-        continue;
-      }
-      break;
-    }
-  } catch (error) {
-    if (signal?.aborted) {
-      throw browserAbortError(signal.reason);
-    }
-    if (timedOut || controller.signal.aborted) {
-      throw createBrowserAsrRequestError(`ASR 请求超时（${Math.round(timeoutMs / 1000)} 秒）：${endpoint}`, {
-        requestFields,
-        matureAsrPlan: requestMatureAsrPlan
-      });
-    }
-    throw createBrowserAsrRequestError(`ASR 请求失败：${formatAsrFetchError(error, endpoint)}`, {
-      requestFields,
-      matureAsrPlan: requestMatureAsrPlan
-    });
-  } finally {
-    clearTimeout(timer);
-    unlink();
-  }
-  if (!response.ok) {
-    const responseMessage = browserAsrResponseErrorMessage(payload, response.status);
-    const uploadSummary = response.status === 415
-      ? `。上传文件：${browserAsrUploadFileSummary(effectiveChunk.file || {}, fileBuffer, fileName)}`
-      : "";
-    throw createBrowserAsrRequestError(`${responseMessage}${uploadSummary}`, {
-      requestFields,
-      status: response.status,
-      rawPayload: payload,
-      matureAsrPlan: requestMatureAsrPlan
-    });
-  }
-  return { payload, requestFields, matureAsrPlan: requestMatureAsrPlan };
-}
-
-function linkBrowserAbortSignal(signal, controller) {
-  if (!signal || !controller) {
-    return () => {};
-  }
-  if (signal.aborted) {
-    controller.abort(signal.reason);
-    return () => {};
-  }
-  const onAbort = () => controller.abort(signal.reason);
-  signal.addEventListener?.("abort", onAbort, { once: true });
-  return () => signal.removeEventListener?.("abort", onAbort);
-}
-
-function browserAbortError(reason) {
-  const error = new Error(reason?.message || "任务已停止。");
-  error.name = "AbortError";
-  if (reason instanceof Error) {
-    error.cause = reason;
-  }
-  return error;
-}
-
-function isBrowserAbortError(error) {
-  return error?.name === "AbortError" || /任务已停止|cancel(?:led)?|aborted/i.test(String(error?.message || error || ""));
-}
-
-function postprocessBrowserAsrPayload(payload, effectiveChunk, asrConfig, options = {}) {
-  const planPolicy = options.matureAsrPlan?.postprocessPolicy || null;
-  const policy = browserAsrPostprocessPolicyWithOverrides(
-    planPolicy || createBrowserAsrPostprocessPolicy(options),
-    options
-  );
-  const normalized = normalizeAsrSegments(payload, effectiveChunk.start, effectiveChunk.end, {
-    providerType: asrConfig?.providerType,
-    disableCustomRunFilters: policy.customRunFiltersDisabled,
-    disableCustomQualityFilters: policy.qualityFiltersDisabled
-  });
-  const speechFiltered = policy.speechActivityFilterApplied
-    ? filterAsrSegmentsBySpeechActivity(normalized, effectiveChunk)
-    : normalized;
-  const hallucinationChunk = policy.vadHallucinationGuardDisabled
-    ? { ...effectiveChunk, speechIntervalsReliable: false }
-    : effectiveChunk;
-  const hallucinationFiltered = filterAsrSegmentsByHallucinationGuard(speechFiltered, hallucinationChunk, {
-    disableCustomRunFilters: policy.customRunFiltersDisabled
-  });
-  const finalSegments = filterAsrSegmentsByChunkOwnership(hallucinationFiltered, effectiveChunk);
-  const segmentCounts = {
-    normalized: normalized.length,
-    speechFiltered: speechFiltered.length,
-    hallucinationFiltered: hallucinationFiltered.length,
-    final: finalSegments.length
-  };
-  const dropCounts = {
-    speechActivity: Math.max(0, normalized.length - speechFiltered.length),
-    hallucinationGuard: Math.max(0, speechFiltered.length - hallucinationFiltered.length),
-    chunkOwnership: Math.max(0, hallucinationFiltered.length - finalSegments.length)
-  };
-  dropCounts.total = dropCounts.speechActivity + dropCounts.hallucinationGuard + dropCounts.chunkOwnership;
-  const droppedSegments = [
-    ...browserAsrDroppedSegments("speechActivity", "outside_speech_activity", normalized, speechFiltered),
-    ...browserAsrDroppedSegments("hallucinationGuard", "hallucination_guard", speechFiltered, hallucinationFiltered),
-    ...browserAsrDroppedSegments("chunkOwnership", "outside_chunk_core", hallucinationFiltered, finalSegments)
-  ];
-  return {
-    normalized,
-    speechFiltered,
-    hallucinationFiltered,
-    finalSegments,
-    postprocess: {
-      policySource: planPolicy ? "matureAsrPlan" : "requestFields",
-      clipTimestampRequest: policy.clipTimestampRequest,
-      vadFilterRequest: policy.vadFilterRequest,
-      externalVadPrecheck: policy.externalVadPrecheck,
-      externalVadServiceAvailable: policy.externalVadServiceAvailable,
-      nativeVadRequest: policy.nativeVadRequest,
-      matureVadRequest: policy.matureVadRequest,
-      speechActivityFilterApplied: policy.speechActivityFilterApplied,
-      qualityFiltersDisabled: policy.qualityFiltersDisabled,
-      customRunFiltersDisabled: policy.customRunFiltersDisabled,
-      vadHallucinationGuardDisabled: policy.vadHallucinationGuardDisabled,
-      segmentCounts,
-      dropCounts,
-      droppedSegments
-    }
-  };
-}
-
-function postprocessBrowserAsrCollectedSpeechPayload(payload, sourceChunk, collectedChunk, asrConfig, options = {}) {
-  const planPolicy = options.matureAsrPlan?.postprocessPolicy || null;
-  const policy = browserAsrPostprocessPolicyWithOverrides(
-    planPolicy || createBrowserAsrPostprocessPolicy(options),
-    options
-  );
-  const collectedDuration = Math.max(0, Number(collectedChunk?.duration || collectedChunk?.end || 0) || 0);
-  const normalizedCompressed = normalizeAsrSegments(payload, 0, collectedDuration, {
-    providerType: asrConfig?.providerType,
-    disableCustomRunFilters: policy.customRunFiltersDisabled,
-    disableCustomQualityFilters: false
-  });
-  const normalized = restoreBrowserAsrCollectedSpeechSegments(normalizedCompressed, collectedChunk?.timeMap || []);
-  const speechFiltered = filterAsrSegmentsBySpeechActivity(normalized, sourceChunk);
-  const hallucinationFiltered = filterAsrSegmentsByHallucinationGuard(speechFiltered, sourceChunk, {
-    disableCustomRunFilters: policy.customRunFiltersDisabled
-  });
-  const finalSegments = filterAsrSegmentsByChunkOwnership(hallucinationFiltered, sourceChunk);
-  const segmentCounts = {
-    normalized: normalized.length,
-    speechFiltered: speechFiltered.length,
-    hallucinationFiltered: hallucinationFiltered.length,
-    final: finalSegments.length
-  };
-  const dropCounts = {
-    speechActivity: Math.max(0, normalized.length - speechFiltered.length),
-    hallucinationGuard: Math.max(0, speechFiltered.length - hallucinationFiltered.length),
-    chunkOwnership: Math.max(0, hallucinationFiltered.length - finalSegments.length)
-  };
-  dropCounts.total = dropCounts.speechActivity + dropCounts.hallucinationGuard + dropCounts.chunkOwnership;
-  const droppedSegments = [
-    ...browserAsrDroppedSegments("speechActivity", "outside_speech_activity", normalized, speechFiltered),
-    ...browserAsrDroppedSegments("hallucinationGuard", "hallucination_guard", speechFiltered, hallucinationFiltered),
-    ...browserAsrDroppedSegments("chunkOwnership", "outside_chunk_core", hallucinationFiltered, finalSegments)
-  ];
-  return {
-    normalized,
-    speechFiltered,
-    hallucinationFiltered,
-    finalSegments,
-    postprocess: {
-      policySource: "collected_external_vad",
-      clipTimestampRequest: false,
-      vadFilterRequest: false,
-      externalVadPrecheck: true,
-      externalVadServiceAvailable: true,
-      nativeVadRequest: false,
-      collectedSpeechRequest: true,
-      matureVadRequest: true,
-      speechActivityFilterApplied: true,
-      qualityFiltersDisabled: false,
-      customRunFiltersDisabled: policy.customRunFiltersDisabled,
-      vadHallucinationGuardDisabled: policy.vadHallucinationGuardDisabled,
-      segmentCounts,
-      dropCounts,
-      droppedSegments
-    }
-  };
-}
-
-function restoreBrowserAsrCollectedSpeechSegments(segments = [], timeMap = []) {
-  const map = normalizeBrowserAsrCollectedSpeechTimeMap(timeMap);
-  if (!map.length) {
-    return segments || [];
-  }
-  return (segments || []).map(segment => {
-    const words = Array.isArray(segment?.words)
-      ? segment.words.map(word => {
-          const middle = (Number(word?.start) + Number(word?.end)) / 2;
-          const mapItem = browserAsrCollectedSpeechMapItemForTime(middle, map);
-          return {
-            ...word,
-            start: restoreBrowserAsrCollectedSpeechTime(word.start, map, { mapItem }),
-            end: restoreBrowserAsrCollectedSpeechTime(word.end, map, { mapItem })
-          };
-        }).filter(word => Number.isFinite(word.start) && Number.isFinite(word.end) && word.end > word.start)
-      : undefined;
-    const start = words?.length
-      ? words[0].start
-      : restoreBrowserAsrCollectedSpeechTime(segment?.start, map);
-    const end = words?.length
-      ? words.at(-1).end
-      : restoreBrowserAsrCollectedSpeechTime(segment?.end, map, { isEnd: true });
-    return {
-      ...segment,
-      start,
-      end,
-      ...(words?.length ? { words } : {})
-    };
-  }).filter(segment => Number.isFinite(segment.start) && Number.isFinite(segment.end) && segment.end > segment.start);
-}
-
-function normalizeBrowserAsrCollectedSpeechTimeMap(timeMap = []) {
-  return (Array.isArray(timeMap) ? timeMap : [])
-    .map(item => ({
-      outputStart: Number(item?.outputStart),
-      outputEnd: Number(item?.outputEnd),
-      sourceStart: Number(item?.sourceStart),
-      sourceEnd: Number(item?.sourceEnd)
-    }))
-    .filter(item =>
-      Number.isFinite(item.outputStart)
-      && Number.isFinite(item.outputEnd)
-      && Number.isFinite(item.sourceStart)
-      && Number.isFinite(item.sourceEnd)
-      && item.outputEnd > item.outputStart
-      && item.sourceEnd > item.sourceStart
-    )
-    .sort((left, right) => left.outputStart - right.outputStart || left.outputEnd - right.outputEnd);
-}
-
-function browserAsrCollectedSpeechMapItemForTime(value, timeMap = [], options = {}) {
-  const time = Number(value);
-  if (!Number.isFinite(time)) {
-    return null;
-  }
-  if (!Array.isArray(timeMap) || !timeMap.length) {
-    return null;
-  }
-  const boundarySlack = 0.001;
-  for (const item of timeMap) {
-    if (time < item.outputEnd || (options?.isEnd && Math.abs(time - item.outputEnd) <= boundarySlack)) {
-      return item;
-    }
-  }
-  return timeMap.at(-1);
-}
-
-function restoreBrowserAsrCollectedSpeechTime(value, timeMap = [], options = {}) {
-  const time = Number(value);
-  if (!Number.isFinite(time)) {
-    return NaN;
-  }
-  const mapItem = options?.mapItem || browserAsrCollectedSpeechMapItemForTime(time, timeMap, { isEnd: options?.isEnd });
-  if (!mapItem) {
-    return time;
-  }
-  const outputDuration = mapItem.outputEnd - mapItem.outputStart;
-  const sourceDuration = mapItem.sourceEnd - mapItem.sourceStart;
-  if (!outputDuration || !sourceDuration) {
-    return mapItem.sourceStart;
-  }
-  const sourceOffset = (time - mapItem.outputStart) * (sourceDuration / outputDuration);
-  return mapItem.sourceStart + sourceOffset;
-}
-
-function mergeBrowserAsrCollectedSpeechPostprocess(current, next) {
-  const normalized = mergeBrowserAsrSegmentLists(current?.normalized || [], next?.normalized || []);
-  const speechFiltered = mergeBrowserAsrSegmentLists(current?.speechFiltered || [], next?.speechFiltered || []);
-  const hallucinationFiltered = mergeBrowserAsrSegmentLists(current?.hallucinationFiltered || [], next?.hallucinationFiltered || []);
-  const finalSegments = mergeBrowserAsrSegmentLists(current?.finalSegments || [], next?.finalSegments || []);
-  const dropCounts = {
-    speechActivity: Math.max(0, normalized.length - speechFiltered.length),
-    hallucinationGuard: Math.max(0, speechFiltered.length - hallucinationFiltered.length),
-    chunkOwnership: Math.max(0, hallucinationFiltered.length - finalSegments.length)
-  };
-  dropCounts.total = dropCounts.speechActivity + dropCounts.hallucinationGuard + dropCounts.chunkOwnership;
-  return {
-    normalized,
-    speechFiltered,
-    hallucinationFiltered,
-    finalSegments,
-    postprocess: {
-      policySource: "collected_external_vad",
-      collectedChunkCount: (Number(current?.postprocess?.collectedChunkCount || 0) || 0) + 1,
-      segmentCounts: {
-        normalized: normalized.length,
-        speechFiltered: speechFiltered.length,
-        hallucinationFiltered: hallucinationFiltered.length,
-        final: finalSegments.length
-      },
-      dropCounts,
-      droppedSegments: [
-        ...((current?.postprocess || {}).droppedSegments || []),
-        ...((next?.postprocess || {}).droppedSegments || [])
-      ]
-    }
-  };
-}
-
-function browserAsrDroppedSegments(stage, reason, before = [], after = []) {
-  const remaining = new Map();
-  for (const segment of after || []) {
-    const key = browserAsrSegmentDiagnosticKey(segment);
-    remaining.set(key, (remaining.get(key) || 0) + 1);
-  }
-  const dropped = [];
-  for (const segment of before || []) {
-    const key = browserAsrSegmentDiagnosticKey(segment);
-    const count = remaining.get(key) || 0;
-    if (count > 0) {
-      remaining.set(key, count - 1);
-      continue;
-    }
-    dropped.push({
-      stage,
-      reason,
-      segment: cloneJsonForDiagnostics(segment)
-    });
-  }
-  return dropped;
-}
-
-function browserAsrSegmentDiagnosticKey(segment = {}) {
-  return JSON.stringify([
-    browserAsrRoundedDiagnosticSecond(segment.start),
-    browserAsrRoundedDiagnosticSecond(segment.end),
-    cleanVttText(segment.text || "")
-  ]);
-}
-
-function browserAsrRoundedDiagnosticSecond(value) {
-  const number = Number(value);
-  return Number.isFinite(number) ? Math.round(number * 1000) / 1000 : null;
-}
-
-function mergeBrowserAsrClipRetryPostprocess(clipTimestampsPostprocessed, retryPostprocessed) {
-  const finalSegments = mergeBrowserAsrSegmentLists(
-    clipTimestampsPostprocessed?.finalSegments || [],
-    retryPostprocessed?.finalSegments || []
-  );
-  return {
-    ...retryPostprocessed,
-    finalSegments,
-    postprocess: {
-      ...(retryPostprocessed?.postprocess || {}),
-      mergedClipTimestampsRetry: true,
-      clipTimestampsAttemptFinalCount: (clipTimestampsPostprocessed?.finalSegments || []).length,
-      retryFinalCount: (retryPostprocessed?.finalSegments || []).length,
-      mergedFinalCount: finalSegments.length,
-      segmentCounts: {
-        ...((retryPostprocessed?.postprocess || {}).segmentCounts || {}),
-        final: finalSegments.length
-      }
-    }
-  };
-}
-
-function mergeBrowserAsrSegmentLists(...segmentLists) {
-  const segments = segmentLists
-    .flat()
-    .filter(segment => segment && typeof segment === "object")
-    .sort((left, right) => Number(left.start || 0) - Number(right.start || 0) || Number(left.end || 0) - Number(right.end || 0));
-  return mergeAdjacentDuplicateAsrSegments(segments);
-}
-
-function browserAsrRequestIncludesClipTimestamps(requestFields = []) {
-  return (requestFields || []).some(([name]) => name === "clip_timestamps");
-}
-
-function browserAsrRequestIncludesVadFilter(requestFields = []) {
-  return (requestFields || []).some(([name, value]) => (
-    name === "vad_filter" && String(value).trim().toLowerCase() !== "false"
-  ));
-}
-
-function browserAsrCoverageRetryPlan(segments, chunk = {}, clipTimestamps = "", requestFields = [], supportedRequestFields = new Set(), options = {}) {
-  const coverageStats = browserAsrReliableSpeechCoverageStats(segments, chunk);
-  if (!browserAsrReliableSpeechCoverageMissingFromStats(coverageStats)) {
-    return null;
-  }
-  if (clipTimestamps && browserAsrRequestIncludesClipTimestamps(requestFields)) {
-    return {
-      attemptKey: "clipTimestampsAttempt",
-      reason: "可靠 VAD 语音区间未被 clip_timestamps 识别结果覆盖，已不带 clip_timestamps 重试。",
-      disableVadFilter: false,
-      forceSpeechActivityFilter: true,
-      forceQualityFilters: true,
-      forceCustomRunFilters: true,
-      forceVadHallucinationGuard: true,
-      filterToCoverageGap: true
-    };
-  }
-  if (!browserAsrRequestIncludesClipTimestamps(requestFields)
-    && !browserAsrRequestIncludesVadFilter(requestFields)
-    && options.externalVadPrecheck === true
-    && asrRequestFieldSupported({ supportedRequestFields }, "vad_filter")) {
-    return {
-      attemptKey: "directAttempt",
-      reason: "可靠 VAD 语音区间未被直连识别结果覆盖，已开启服务端 VAD 重试。",
-      disableVadFilter: false,
-      forceSpeechActivityFilter: true,
-      forceQualityFilters: true,
-      forceCustomRunFilters: true,
-      forceVadHallucinationGuard: true,
-      filterToCoverageGap: true,
-      strictVadRecoveryFilter: true
-    };
-  }
-  return null;
-}
-
-function browserAsrEmptyVadRecoveryPlan(segments, reliableSpeechIntervals, requestFields = []) {
-  if (!Array.isArray(reliableSpeechIntervals) || reliableSpeechIntervals.length) {
-    return null;
-  }
-  if (Array.isArray(segments) && segments.length) {
-    return null;
-  }
-  if (!browserAsrRequestIncludesVadFilter(requestFields)) {
-    return null;
-  }
-  return {
-    reason: "外部 VAD 预检为空且服务端 VAD 首轮无字幕，已追加一次严格过滤的非 VAD 补救识别。"
-  };
-}
-
-function filterBrowserAsrStrictVadRecoveryPostprocess(postprocessed = {}) {
-  const inputSegments = postprocessed?.finalSegments || [];
-  const finalSegments = filterAsrStrictVadRecoverySegments(inputSegments);
-  const inputCount = inputSegments.length;
-  const finalCount = finalSegments.length;
-  return {
-    ...(postprocessed || {}),
-    finalSegments,
-    postprocess: {
-      ...((postprocessed || {}).postprocess || {}),
-      strictVadRecoveryFilterApplied: true,
-      strictVadRecoveryInputFinalCount: inputCount,
-      strictVadRecoveryFinalCount: finalCount,
-      segmentCounts: {
-        ...(((postprocessed || {}).postprocess || {}).segmentCounts || {}),
-        final: finalCount
-      },
-      dropCounts: {
-        ...(((postprocessed || {}).postprocess || {}).dropCounts || {}),
-        strictVadRecovery: Math.max(0, inputCount - finalCount)
-      }
-    }
-  };
-}
-
-function filterBrowserAsrCoverageRetryPostprocess(attemptPostprocessed, retryPostprocessed, chunk = {}, rawPayload = null, asrConfig = {}, options = {}) {
-  const retrySegments = retryPostprocessed?.finalSegments || [];
-  const uncoveredIntervals = browserAsrUncoveredSpeechIntervalsForSegments(attemptPostprocessed?.finalSegments || [], chunk);
-  if (!uncoveredIntervals.length || !retrySegments.length) {
-    return {
-      ...retryPostprocessed,
-      finalSegments: [],
-      postprocess: browserAsrCoverageRetryFilteredPostprocess(retryPostprocessed?.postprocess, retrySegments.length, 0)
-    };
-  }
-  const rawRetrySegments = normalizeBrowserAsrRetryPayloadSegments(rawPayload, chunk, asrConfig);
-  const repeatedKeys = browserAsrRepeatedCoverageRetryKeys(rawRetrySegments.length ? rawRetrySegments : retrySegments);
-  const coverageSegments = retrySegments.filter(segment => browserAsrSegmentOverlapsCoverageGap(segment, uncoveredIntervals));
-  const gapSegments = browserAsrDropRepeatedCoverageRetrySegments(coverageSegments, repeatedKeys);
-  const finalSegments = options.strictVadRecoveryFilter
-    ? filterAsrStrictVadRecoverySegments(gapSegments)
-    : gapSegments;
-  return {
-    ...retryPostprocessed,
-    finalSegments,
-    postprocess: browserAsrCoverageRetryFilteredPostprocess(
-      retryPostprocessed?.postprocess,
-      retrySegments.length,
-      finalSegments.length
-    )
-  };
-}
-
-function normalizeBrowserAsrRetryPayloadSegments(rawPayload, chunk = {}, asrConfig = {}) {
-  if (!rawPayload || typeof rawPayload !== "object") {
-    return [];
-  }
-  try {
-    return normalizeAsrSegments(rawPayload, chunk.start, chunk.end, {
-      providerType: asrConfig?.providerType,
-      disableCustomRunFilters: true,
-      disableCustomQualityFilters: true
-    });
-  } catch (_error) {
-    return [];
-  }
-}
-
-function browserAsrCoverageRetryFilteredPostprocess(postprocess = {}, inputCount = 0, finalCount = 0) {
-  return {
-    ...(postprocess || {}),
-    coverageRetryFilterApplied: true,
-    coverageRetryInputFinalCount: Math.max(0, Number(inputCount) || 0),
-    coverageRetryFinalCount: Math.max(0, Number(finalCount) || 0),
-    segmentCounts: {
-      ...((postprocess || {}).segmentCounts || {}),
-      final: Math.max(0, Number(finalCount) || 0)
-    }
-  };
-}
-
-function browserAsrUncoveredSpeechIntervalsForSegments(segments, chunk = {}) {
-  const speechIntervals = normalizeAsrSpeechIntervals(chunk?.speechIntervals) || [];
-  return speechIntervals.flatMap(interval => browserAsrUncoveredSpeechIntervals(segments, interval));
-}
-
-function browserAsrUncoveredSpeechIntervals(segments, interval) {
-  const intervalStart = Number(interval?.start);
-  const intervalEnd = Number(interval?.end);
-  if (!Number.isFinite(intervalStart) || !Number.isFinite(intervalEnd) || intervalEnd <= intervalStart) {
-    return [];
-  }
-  const coverageSpans = browserAsrSpeechCoverageSpans(segments, intervalStart, intervalEnd);
-  const gaps = [];
-  let cursor = intervalStart;
-  for (const span of coverageSpans) {
-    const start = Math.max(intervalStart, Number(span.start));
-    const end = Math.min(intervalEnd, Number(span.end));
-    if (!Number.isFinite(start) || !Number.isFinite(end) || end <= start) {
-      continue;
-    }
-    if (start > cursor) {
-      gaps.push({ start: cursor, end: start });
-    }
-    cursor = Math.max(cursor, end);
-  }
-  if (cursor < intervalEnd) {
-    gaps.push({ start: cursor, end: intervalEnd });
-  }
-  return gaps.filter(gap => gap.end - gap.start >= 0.08);
-}
-
-function browserAsrSegmentOverlapsCoverageGap(segment, intervals = []) {
-  const start = Number(segment?.start);
-  const end = Number(segment?.end);
-  if (!Number.isFinite(start) || !Number.isFinite(end) || end <= start) {
-    return false;
-  }
-  const duration = Math.max(0, end - start);
-  return intervals.some(interval => {
-    const overlap = Math.max(0, Math.min(end, interval.end + 0.2) - Math.max(start, interval.start - 0.2));
-    if (overlap <= 0) {
-      return false;
-    }
-    return overlap >= Math.min(0.35, Math.max(0.08, duration * 0.25));
-  });
-}
-
-function browserAsrRepeatedCoverageRetryKeys(segments = []) {
-  const groups = new Map();
-  for (const segment of segments) {
-    const key = normalizeBrowserAsrRetryRepeatText(segment?.text);
-    if (!key || key.length < 6) {
-      continue;
-    }
-    if (!groups.has(key)) {
-      groups.set(key, []);
-    }
-    groups.get(key).push(segment);
-  }
-  const repeatedKeys = new Set();
-  for (const [key, group] of groups.entries()) {
-    if (group.length < 2) {
-      continue;
-    }
-    const firstStart = Math.min(...group.map(segment => Number(segment.start)).filter(Number.isFinite));
-    const lastEnd = Math.max(...group.map(segment => Number(segment.end)).filter(Number.isFinite));
-    if (Number.isFinite(firstStart) && Number.isFinite(lastEnd) && lastEnd - firstStart >= 6) {
-      repeatedKeys.add(key);
-    }
-  }
-  return repeatedKeys;
-}
-
-function browserAsrDropRepeatedCoverageRetrySegments(segments = [], repeatedKeys = browserAsrRepeatedCoverageRetryKeys(segments)) {
-  if (!repeatedKeys.size) {
-    return segments;
-  }
-  return segments.filter(segment => !repeatedKeys.has(normalizeBrowserAsrRetryRepeatText(segment?.text)));
-}
-
-function normalizeBrowserAsrRetryRepeatText(text = "") {
-  return String(text || "")
-    .replace(/<[^>]+>/g, "")
-    .replace(/&nbsp;/g, " ")
-    .replace(/&amp;/g, "&")
-    .replace(/&lt;/g, "<")
-    .replace(/&gt;/g, ">")
-    .toLowerCase()
-    .replace(/[\s,.!?;:'"()[\]{}，。！？；：“”‘’（）【】《》、·…—\-~〜ー]+/g, "")
-    .trim();
-}
-
-function browserAsrReliableSpeechCoverageStats(segments, chunk = {}) {
-  const speechIntervals = normalizeAsrSpeechIntervals(chunk?.speechIntervals) || [];
-  if (!speechIntervals.length) {
-    return null;
-  }
-  const significantIntervals = speechIntervals.filter(interval => interval.end - interval.start >= 0.15);
-  if (!significantIntervals.length) {
-    return null;
-  }
-  const speechSeconds = significantIntervals.reduce((sum, interval) => sum + (interval.end - interval.start), 0);
-  const uncoveredSeconds = significantIntervals.reduce((sum, interval) => (
-    sum + browserAsrUncoveredSpeechSeconds(segments, interval)
-  ), 0);
-  return {
-    speechSeconds,
-    uncoveredSeconds,
-    uncoveredRatio: speechSeconds > 0 ? uncoveredSeconds / speechSeconds : 0,
-    intervalCount: significantIntervals.length
-  };
-}
-
-function browserAsrReliableSpeechCoverageMissingFromStats(stats) {
-  if (!stats) {
-    return false;
-  }
-  const recoveryThreshold = Math.min(1, Math.max(0.15, stats.speechSeconds * 0.25));
-  return stats.uncoveredSeconds >= recoveryThreshold;
-}
-
-function browserAsrUncoveredSpeechSeconds(segments, interval) {
-  const intervalStart = Number(interval?.start);
-  const intervalEnd = Number(interval?.end);
-  if (!Number.isFinite(intervalStart) || !Number.isFinite(intervalEnd) || intervalEnd <= intervalStart) {
-    return 0;
-  }
-  const coverageSpans = browserAsrSpeechCoverageSpans(segments, intervalStart, intervalEnd);
-  if (!coverageSpans.length) {
-    return intervalEnd - intervalStart;
-  }
-  let coveredSeconds = 0;
-  let coveredUntil = intervalStart;
-  for (const span of coverageSpans) {
-    const start = Math.max(intervalStart, Number(span.start));
-    const end = Math.min(intervalEnd, Number(span.end));
-    if (!Number.isFinite(start) || !Number.isFinite(end) || end <= start || end <= coveredUntil) {
-      continue;
-    }
-    const effectiveStart = Math.max(start, coveredUntil);
-    coveredSeconds += Math.max(0, end - effectiveStart);
-    coveredUntil = Math.max(coveredUntil, end);
-  }
-  return Math.max(0, (intervalEnd - intervalStart) - coveredSeconds);
-}
-
-function browserAsrSpeechCoverageSpans(segments, intervalStart, intervalEnd) {
-  return (segments || []).map(segment => {
-    const start = Number(segment?.start);
-    const end = Number(segment?.end);
-    if (!Number.isFinite(start) || !Number.isFinite(end) || end <= start) {
-      return null;
-    }
-    const paddedStart = start - 0.35;
-    const paddedEnd = end + 0.35;
-    const coverageStart = Math.max(intervalStart, paddedStart);
-    const coverageEnd = Math.min(intervalEnd, paddedEnd);
-    if (coverageEnd <= coverageStart) {
-      return null;
-    }
-    return { start: coverageStart, end: coverageEnd };
-  }).filter(Boolean).sort((left, right) => left.start - right.start || left.end - right.end);
-}
-
-async function detectBrowserAsrSpeechIntervals(chunk, asrConfig, fileBuffer, fileName, diagnostics = null, options = {}) {
-  const endpoint = options.endpoint || await resolveBrowserAsrSpeechTimestampsEndpoint(asrConfig);
-  if (!endpoint) {
-    return null;
-  }
-  if (diagnostics) {
-    diagnostics.vad = {
-      endpoint: sanitizeDiagnosticUrl(endpoint),
-      requestFields: [
-        ["threshold", "0.15"],
-        ["min_speech_duration_ms", "0"],
-        ["max_speech_duration_s", "30"],
-        ["min_silence_duration_ms", "160"],
-        ["speech_pad_ms", "800"]
-      ],
-      speechIntervals: null,
-      reliable: false
-    };
-  }
-  const controller = new AbortController();
-  const unlink = linkBrowserAbortSignal(options.signal, controller);
-  const timer = setTimeout(() => controller.abort(), 30_000);
-  try {
-    const formData = new FormData();
-    formData.append("file", new Blob([fileBuffer], { type: chunk.file?.mime || "audio/mpeg" }), fileName);
-    formData.append("threshold", "0.15");
-    formData.append("min_speech_duration_ms", "0");
-    formData.append("max_speech_duration_s", "30");
-    formData.append("min_silence_duration_ms", "160");
-    formData.append("speech_pad_ms", "800");
-    const response = await fetch(endpoint, {
-      method: "POST",
-      headers: {
-        Authorization: `Bearer ${asrConfig.apiKey}`
-      },
-      body: formData,
-      signal: controller.signal
-    });
-    if (!response.ok) {
-      if (diagnostics?.vad) {
-        diagnostics.vad.error = `HTTP ${response.status}`;
-      }
-      return null;
-    }
-    const payload = await response.json().catch(() => null);
-    const intervals = normalizeBrowserAsrSpeechTimestampsPayload(payload, chunk);
-    if (diagnostics?.vad) {
-      diagnostics.vad.rawPayload = cloneJsonForDiagnostics(payload);
-      diagnostics.vad.speechIntervals = Array.isArray(intervals) ? cloneJsonForDiagnostics(intervals) : null;
-      diagnostics.vad.reliable = Array.isArray(intervals);
-    }
-    return Array.isArray(intervals) ? intervals : null;
-  } catch (error) {
-    if (options.signal?.aborted) {
-      throw browserAbortError(options.signal.reason);
-    }
-    if (diagnostics?.vad) {
-      diagnostics.vad.error = error?.message || String(error || "VAD 请求失败");
-    }
-    return null;
-  } finally {
-    clearTimeout(timer);
-    unlink();
-  }
-}
-
-function normalizeBrowserAsrSpeechTimestampsPayload(payload, chunk = {}) {
-  const items = Array.isArray(payload)
-    ? payload
-    : (Array.isArray(payload?.speech_segments)
-        ? payload.speech_segments
-        : (Array.isArray(payload?.segments)
-            ? payload.segments
-            : (Array.isArray(payload?.timestamps) ? payload.timestamps : null)));
-  if (!Array.isArray(items)) {
-    return null;
-  }
-  const start = Number(chunk?.start || 0) || 0;
-  const end = Number(chunk?.end || (start + Number(chunk?.duration || 0))) || start;
-  const duration = Math.max(0, end - start);
-  const raw = items
-    .map(item => browserAsrSpeechTimestampRangeSeconds(item, duration))
-    .filter(item => item.end > item.start);
-  return raw
-    .map(item => ({
-      start: Math.max(start, start + item.start),
-      end: Math.min(end, start + item.end)
-    }))
-    .filter(item => item.end > item.start)
-    .sort((a, b) => a.start - b.start || a.end - b.end);
-}
-
-function browserAsrSpeechTimestampRangeSeconds(item, chunkDuration = 0) {
-  const startMs = browserAsrSpeechTimestampNumber(item, "start_ms");
-  const endMs = browserAsrSpeechTimestampNumber(item, "end_ms");
-  if (Number.isFinite(startMs) || Number.isFinite(endMs)) {
-    return { start: startMs / 1000, end: endMs / 1000 };
-  }
-  const startTime = browserAsrSpeechTimestampNumber(item, "start_time");
-  const endTime = browserAsrSpeechTimestampNumber(item, "end_time");
-  if (Number.isFinite(startTime) || Number.isFinite(endTime)) {
-    return { start: startTime, end: endTime };
-  }
-  const start = browserAsrSpeechTimestampNumber(item, "start");
-  const end = browserAsrSpeechTimestampNumber(item, "end");
-  if (!Number.isFinite(start) || !Number.isFinite(end)) {
-    return { start: NaN, end: NaN };
-  }
-  const unit = inferBrowserAsrBareTimestampUnit(start, end, chunkDuration);
-  return unit === "milliseconds"
-    ? { start: start / 1000, end: end / 1000 }
-    : { start, end };
-}
-
-function browserAsrSpeechTimestampNumber(item, key) {
-  if (!Object.prototype.hasOwnProperty.call(item || {}, key)) {
-    return NaN;
-  }
-  const value = Number(item[key]);
-  return Number.isFinite(value) ? value : NaN;
-}
-
-function inferBrowserAsrBareTimestampUnit(start, end, chunkDuration = 0) {
-  const duration = Math.max(0, Number(chunkDuration) || 0);
-  const span = Math.max(0, Number(end) - Number(start));
-  const maxValue = Math.max(Math.abs(Number(start)), Math.abs(Number(end)));
-  if (!Number.isInteger(Number(start)) || !Number.isInteger(Number(end))) {
-    return "seconds";
-  }
-  if (isLikelyBrowserAsrBareIntegerSeconds(start, end, duration, span, maxValue)) {
-    return "seconds";
-  }
-  if (span > 45) {
-    return "milliseconds";
-  }
-  if (duration && maxValue > duration + 1) {
-    return "milliseconds";
-  }
-  return "seconds";
-}
-
-function isLikelyBrowserAsrBareIntegerSeconds(start, end, duration, span, maxValue) {
-  return duration >= BROWSER_ASR_BARE_TIMESTAMP_SECONDS_LONG_CHUNK_SECONDS
-    && maxValue < BROWSER_ASR_BARE_TIMESTAMP_SECONDS_MAX_VALUE
-    && maxValue <= duration + 1
-    && span > BROWSER_ASR_BARE_TIMESTAMP_SECONDS_MIN_SPAN
-    && Number(end) > Number(start);
-}
-
-function emitBrowserAsrDiagnostics(options = {}, diagnostics = {}) {
-  if (typeof options.onDiagnostics !== "function") {
-    return;
-  }
-  try {
-    options.onDiagnostics(cloneJsonForDiagnostics(diagnostics));
-  } catch {
-    // Diagnostics must not affect the ASR pipeline.
-  }
-}
-
-function recordBrowserAsrChunkDiagnostics(record, chunk, diagnostics = {}) {
-  if (!record) {
-    return;
-  }
-  if (!record.browserAsrDiagnosticsByChunk) {
-    record.browserAsrDiagnosticsByChunk = new Map();
-  }
-  const index = Number.isInteger(Number(chunk?.index)) ? Number(chunk.index) : Number(diagnostics?.chunk?.index);
-  const key = Number.isFinite(index) ? index : record.browserAsrDiagnosticsByChunk.size;
-  record.browserAsrDiagnosticsByChunk.set(key, {
-    ...cloneJsonForDiagnostics(diagnostics),
-    recordedAt: new Date().toISOString()
-  });
-}
-
-function browserAsrDiagnosticChunkInfo(chunk = {}) {
-  const file = chunk.file || {};
-  const parts = Array.isArray(file.parts)
-    ? file.parts.map(part => browserAsrDiagnosticChunkInfo(part))
-    : undefined;
-  return {
-    index: Number.isInteger(Number(chunk.index)) ? Number(chunk.index) : undefined,
-    start: finiteOrNull(chunk.start),
-    end: finiteOrNull(chunk.end),
-    duration: finiteOrNull(chunk.duration),
-    coreStart: finiteOrNull(chunk.coreStart),
-    coreEnd: finiteOrNull(chunk.coreEnd),
-    coreDuration: finiteOrNull(chunk.coreDuration),
-    bytes: Number(chunk.bytes || file.bytes || 0) || 0,
-    internalChunkCount: Number(chunk.internalChunkCount || 0) || (parts?.length || undefined),
-    speechIntervalsReliable: chunk.speechIntervalsReliable === false ? false : undefined,
-    speechIntervals: Array.isArray(chunk.speechIntervals) ? cloneJsonForDiagnostics(chunk.speechIntervals) : undefined,
-    file: {
-      name: file.name || "",
-      mime: file.mime || "",
-      bytes: Number(file.bytes || chunk.bytes || 0) || 0,
-      cacheUrl: file.cacheUrl || "",
-      parts
-    }
-  };
-}
-
-function normalizeBrowserAsrCollectedSpeechChunk(sourceChunk = {}, chunk = {}, fallbackIndex = 0) {
-  if (!chunk || typeof chunk !== "object" || !isUsableBrowserAudioFile(chunk.file)) {
-    return null;
-  }
-  const duration = Math.max(0, Number(chunk.duration || (Number(chunk.end) - Number(chunk.start)) || 0) || 0);
-  const sourceStart = Number.isFinite(Number(chunk.sourceStart)) ? Number(chunk.sourceStart) : Number(chunk.start || sourceChunk.start || 0);
-  const sourceEnd = Number.isFinite(Number(chunk.sourceEnd)) ? Number(chunk.sourceEnd) : Number(chunk.end || sourceStart);
-  const timeMap = normalizeBrowserAsrCollectedSpeechTimeMap(chunk.timeMap);
-  return {
-    index: Number.isInteger(Number(chunk.index)) ? Number(chunk.index) : fallbackIndex,
-    start: 0,
-    end: duration,
-    duration,
-    coreStart: 0,
-    coreEnd: duration,
-    coreDuration: duration,
-    sourceStart,
-    sourceEnd,
-    sourceChunkIndex: Number.isInteger(Number(sourceChunk.index)) ? Number(sourceChunk.index) : undefined,
-    speechIntervals: Array.isArray(chunk.speechIntervals) ? normalizeAsrSpeechIntervals(chunk.speechIntervals) || [] : [],
-    speechIntervalsReliable: false,
-    timeMap,
-    file: chunk.file,
-    bytes: chunk.bytes || browserAudioFileByteLength(chunk.file) || 0
-  };
-}
-
-function browserAsrCollectedSpeechChunkInfo(chunk = {}) {
-  return {
-    index: Number.isInteger(Number(chunk.index)) ? Number(chunk.index) : undefined,
-    sourceChunkIndex: Number.isInteger(Number(chunk.sourceChunkIndex)) ? Number(chunk.sourceChunkIndex) : undefined,
-    sourceStart: finiteOrNull(chunk.sourceStart),
-    sourceEnd: finiteOrNull(chunk.sourceEnd),
-    duration: finiteOrNull(chunk.duration),
-    bytes: Number(chunk.bytes || chunk.file?.bytes || 0) || 0,
-    speechIntervals: Array.isArray(chunk.speechIntervals) ? cloneJsonForDiagnostics(chunk.speechIntervals) : undefined,
-    timeMap: Array.isArray(chunk.timeMap) ? cloneJsonForDiagnostics(chunk.timeMap) : undefined,
-    file: {
-      name: chunk.file?.name || "",
-      mime: chunk.file?.mime || "",
-      bytes: Number(chunk.file?.bytes || chunk.bytes || 0) || 0,
-      cacheUrl: chunk.file?.cacheUrl || ""
-    }
-  };
-}
-
-function cloneJsonForDiagnostics(value) {
-  if (value === undefined) {
-    return undefined;
-  }
-  try {
-    return JSON.parse(JSON.stringify(value));
-  } catch {
-    return null;
-  }
-}
-
-function finiteOrNull(value) {
-  const number = Number(value);
-  return Number.isFinite(number) ? number : null;
-}
-
-function sanitizeDiagnosticUrl(value = "") {
-  const text = String(value || "");
-  if (!text) {
-    return "";
-  }
-  try {
-    const url = new URL(text);
-    url.username = "";
-    url.password = "";
-    url.search = "";
-    url.hash = "";
-    return url.toString().replace(/\/$/, "");
-  } catch {
-    return text.replace(/[?#].*$/, "");
-  }
-}
-
-function formatAsrFetchError(error, endpoint) {
-  const message = error?.message || String(error || "网络不可达");
-  return `${endpoint} 无法连接（${message}）。请确认浏览器能访问该 API 地址，并且目标服务允许扩展发起跨域请求。`;
-}
-
 async function getBrowserAudioChunkBuffer(file) {
   if (file?.buffer instanceof ArrayBuffer) {
     return file.buffer;
@@ -4366,6 +2900,27 @@ async function getBrowserAudioChunkBuffer(file) {
     return response.arrayBuffer();
   }
   throw new Error("识别音频分段缺少可上传的数据。");
+}
+
+async function transcribeBrowserAudioChunk(chunk, asrConfig, options = {}) {
+  return FuguangBrowserAsrWorkflow.transcribeBrowserAudioChunk(chunk, asrConfig, {
+    ...options,
+    getAudioBuffer: getBrowserAudioChunkBuffer,
+    attachResultWarning: attachBrowserAsrResultWarning,
+    collectSpeechAudio: async payload => {
+      await ensureOffscreenDocument();
+      const { url: webFfmpegUrl } = await getWebFfmpegConfig();
+      const response = await chrome.runtime.sendMessage({
+        type: MESSAGE.OFFSCREEN_WEB_FFMPEG_COLLECT_SPEECH_AUDIO,
+        webFfmpegUrl,
+        ...payload
+      });
+      if (!response?.ok) {
+        throw new Error(response?.error || "Web FFmpeg 语音收集失败。");
+      }
+      return response;
+    }
+  });
 }
 
 function normalizeBrowserSourceSegmentsForTranslation(segments, chunkIndex) {
@@ -4415,7 +2970,7 @@ function createChunkStatus(index, stage) {
   };
 }
 
-function updateChunkStatus(record, index, patch) {
+function updateChunkStatus(record, index, patch, options = {}) {
   const statuses = record.job.translation.chunkStatuses;
   const current = statuses[index] || createChunkStatus(index, "queued");
   if (isBrowserJobCancelled(record)) {
@@ -4432,7 +2987,7 @@ function updateChunkStatus(record, index, patch) {
   };
   const completed = statuses.filter(item => ["completed", "completed_with_warnings", "failed"].includes(item.stage)).length;
   const failed = statuses.filter(item => item.stage === "failed").length;
-  const asrRunning = statuses.filter(item => item.stage === "asr").length;
+  const asrRunning = statuses.filter(item => ["asr", "asr_inflight"].includes(item.stage)).length;
   const translating = statuses.filter(item => item.stage === "translation").length;
   const asrPartialFailed = statuses.filter(item => item?.stage !== "failed" && chunkStatusAsrFailureCount(item) > 0).length;
   record.job.translation.chunksDone = completed;
@@ -4443,7 +2998,9 @@ function updateChunkStatus(record, index, patch) {
   record.job.translation.asrRunning = asrRunning;
   record.job.translation.chunksTranslating = translating;
   record.job.translation.translationRunning = translating;
-  publishBrowserPreloadJob(record);
+  if (options.publish !== false) {
+    publishBrowserPreloadJob(record);
+  }
 }
 
 function chunkStatusAsrFailureCount(status) {
@@ -4451,7 +3008,24 @@ function chunkStatusAsrFailureCount(status) {
 }
 
 function publishBrowserSubtitle(record) {
+  refreshBrowserSubtitleProjection(record);
+  publishBrowserPreloadJob(record);
+  if (isCurrentBrowserPreloadRecord(record) && !record.offscreenMirrorSuppressionCount) {
+    attachBrowserJobVttIfReady(record).catch(() => {});
+  }
+}
+
+function refreshBrowserSubtitleProjection(record) {
   const source = collectChunkSegments(record.sourceSegmentsByChunk);
+  if (record.job.subtitleCleared) {
+    record.job.translation.sourceSegments = source.length;
+    record.job.translation.translatedSegments = 0;
+    record.job.translation.segmentCount = 0;
+    record.job.translation.vttPath = "";
+    record.job.translation.vttText = "";
+    record.job.translation.transcript = { source, translated: [], metadata: record.metadata };
+    return;
+  }
   const translated = collectChunkSegments(record.translatedSegmentsByChunk);
   const display = mergeTranslatedDisplaySegments(source, translated);
   record.job.translation.sourceSegments = source.length;
@@ -4460,10 +3034,6 @@ function publishBrowserSubtitle(record) {
   record.job.translation.vttPath = display.length ? "browser-memory" : "";
   record.job.translation.vttText = display.length ? segmentsToVtt(display) : "";
   record.job.translation.transcript = { source, translated, metadata: record.metadata };
-  publishBrowserPreloadJob(record);
-  if (isCurrentBrowserPreloadRecord(record) && !record.offscreenMirrorSuppressionCount) {
-    attachBrowserJobVttIfReady(record).catch(() => {});
-  }
 }
 
 function mergeTranslatedDisplaySegments(source, translated) {
@@ -4535,8 +3105,10 @@ function finalizeBrowserCompletionState(record) {
   const asrPartialWarning = browserAsrPartialFailureSummary(record);
   const partialWarning = browserPartialTranslationSummary(record);
   const messages = [failed ? browserFailureSummary(record) : "", asrPartialWarning, partialWarning, coverageWarning].filter(Boolean);
+  const finalTranslationStage = messages.length ? "completed_with_warnings" : "completed";
   record.job.status = "completed";
-  record.job.stage = messages.length ? "completed_with_warnings" : "completed";
+  record.job.stage = finalTranslationStage;
+  record.job.translation.status = finalTranslationStage;
   record.job.error = messages.join(" ");
   releaseLocalBrowserExecutionLease(record).catch(() => {});
   record.job.extract.elapsedSeconds = elapsedSeconds(record.startedAt);
@@ -4678,7 +3250,7 @@ function segmentsToVtt(segments) {
 async function attachBrowserJobVttIfReady(record, job = record?.job) {
   const snapshot = cloneBrowserJobState(job);
   const jobId = String(snapshot?.id || record?.job?.id || "");
-  if (!record?.tabId || !snapshot?.translation?.vttText ||
+  if (!record?.tabId || snapshot?.subtitleCleared || !snapshot?.translation?.vttText ||
       !browserVttAttachmentSnapshotIsCurrent(record, snapshot)) {
     return;
   }
@@ -4719,7 +3291,7 @@ async function attachBrowserJobVttIfReady(record, job = record?.job) {
     return;
   }
   const attachmentGeneration = nextBrowserVttAttachmentGeneration();
-  const response = await sendMessageToMediaFrame(record.tabId, {
+  const response = await sendBrowserJobVttToBoundMedia(record, {
     type: MESSAGE.ATTACH_VTT,
     vtt: attachment.vtt,
     label: "流声字幕",
@@ -4973,8 +3545,8 @@ function publishBrowserPreloadJob(record) {
   }
   if (!record.offscreenMirrorSuppressionCount) {
     scheduleBrowserJobMirror(record);
-    publishBrowserPreloadJobUi(record);
   }
+  publishBrowserPreloadJobUi(record, browserPreloadJobForRead(record));
 }
 
 function refreshBrowserPreloadJobSummary(record) {
@@ -5067,7 +3639,28 @@ async function flushBrowserJobMirror(jobId) {
   return browserJobStore.getJob(jobId);
 }
 
-async function beginBrowserJobAttempt(record, stage) {
+function withBrowserJobLifecycleLock(jobId, task) {
+  const key = String(jobId || "").trim();
+  if (!key) return Promise.resolve().then(task);
+  const previous = browserJobLifecycleLocks.get(key) || Promise.resolve();
+  let release;
+  const current = new Promise(resolve => {
+    release = resolve;
+  });
+  browserJobLifecycleLocks.set(key, current);
+  return previous.catch(() => null).then(task).finally(() => {
+    release();
+    if (browserJobLifecycleLocks.get(key) === current) {
+      browserJobLifecycleLocks.delete(key);
+    }
+  });
+}
+
+async function beginBrowserJobAttempt(record, stage, options = {}) {
+  return withBrowserJobLifecycleLock(record?.job?.id, () => beginBrowserJobAttemptUnlocked(record, stage, options));
+}
+
+async function beginBrowserJobAttemptUnlocked(record, stage, options = {}) {
   if (!record?.job?.id) {
     throw new Error("任务缺少可重试的运行标识。请重新开始任务。");
   }
@@ -5075,8 +3668,16 @@ async function beginBrowserJobAttempt(record, stage) {
     throw new Error("任务正在运行，已忽略重复的重试请求。");
   }
   record.attemptStartInFlight = true;
+  let rollbackRecognitionPreparation = null;
+  let attemptAccepted = false;
   try {
     const previousRunToken = String(record.runToken || record.job.runToken || createDurableRunToken());
+    await preventFunAsrSubmitWhileRemoteCancellationUnresolved({
+      ...record.job,
+      id: record.job.id,
+      runToken: previousRunToken,
+      pipeline: record.pipeline || record.job.pipeline
+    }, record.modelConfig || {});
     record.runToken = previousRunToken;
     record.job.runToken = previousRunToken;
     record.abortController ||= new AbortController();
@@ -5084,11 +3685,20 @@ async function beginBrowserJobAttempt(record, stage) {
     await flushBrowserJobMirror(record.job.id).catch(() => null);
     const previousState = {
       cancelled: record.cancelled,
+      hadCancelled: Object.hasOwn(record, "cancelled"),
       cancelRequested: record.cancelRequested,
+      hadCancelRequested: Object.hasOwn(record, "cancelRequested"),
       abortController: record.abortController,
+      hadAbortController: Object.hasOwn(record, "abortController"),
+      preserveExistingOnCancel: record.preserveExistingOnCancel,
+      hadPreserveExistingOnCancel: Object.hasOwn(record, "preserveExistingOnCancel"),
       jobStatus: record.job.status,
       jobStage: record.job.stage,
+      jobUpdatedAt: record.job.updatedAt,
+      jobPreserveExistingOnCancel: record.job.preserveExistingOnCancel,
+      jobHadPreserveExistingOnCancel: Object.hasOwn(record.job, "preserveExistingOnCancel"),
       jobCancelRequested: record.job.cancelRequested,
+      jobHadCancelRequested: Object.hasOwn(record.job, "cancelRequested"),
       jobCancelRequestedAt: record.job.cancelRequestedAt
     };
     const runToken = createDurableRunToken();
@@ -5099,9 +3709,16 @@ async function beginBrowserJobAttempt(record, stage) {
     record.job.runToken = runToken;
     record.job.status = "running";
     record.job.stage = stage;
+    record.preserveExistingOnCancel = ["retrying", "retry_translation"].includes(String(stage || ""));
+    record.job.preserveExistingOnCancel = record.preserveExistingOnCancel;
     record.job.cancelRequested = false;
     record.job.updatedAt = Date.now();
     delete record.job.cancelRequestedAt;
+    const asrIndexes = [...new Set((Array.isArray(options.asrIndexes) ? options.asrIndexes : [])
+      .map(Number).filter(Number.isFinite))];
+    if (asrIndexes.length) {
+      rollbackRecognitionPreparation = prepareBrowserRecognitionAttemptSnapshot(record, asrIndexes);
+    }
     const snapshot = createBrowserJobLedgerSnapshot(record);
     const result = await browserJobStore.beginAttempt(snapshot, previousRunToken).catch(() => ({
       applied: false,
@@ -5109,24 +3726,43 @@ async function beginBrowserJobAttempt(record, stage) {
     }));
     if (result.applied === false && !["unavailable", "stale-snapshot"].includes(result.reason)) {
       record.runToken = previousRunToken;
-      record.cancelled = previousState.cancelled;
-      record.cancelRequested = previousState.cancelRequested;
-      record.abortController = previousState.abortController;
+      restoreBrowserAttemptProperty(record, "cancelled", previousState.hadCancelled, previousState.cancelled);
+      restoreBrowserAttemptProperty(record, "cancelRequested", previousState.hadCancelRequested, previousState.cancelRequested);
+      restoreBrowserAttemptProperty(record, "abortController", previousState.hadAbortController, previousState.abortController);
+      restoreBrowserAttemptProperty(record, "preserveExistingOnCancel", previousState.hadPreserveExistingOnCancel, previousState.preserveExistingOnCancel);
       record.job.runToken = previousRunToken;
       record.job.status = previousState.jobStatus;
       record.job.stage = previousState.jobStage;
-      record.job.cancelRequested = previousState.jobCancelRequested;
+      record.job.updatedAt = previousState.jobUpdatedAt;
+      restoreBrowserAttemptProperty(record.job, "preserveExistingOnCancel", previousState.jobHadPreserveExistingOnCancel, previousState.jobPreserveExistingOnCancel);
+      restoreBrowserAttemptProperty(record.job, "cancelRequested", previousState.jobHadCancelRequested, previousState.jobCancelRequested);
       if (previousState.jobCancelRequestedAt == null) {
         delete record.job.cancelRequestedAt;
       } else {
         record.job.cancelRequestedAt = previousState.jobCancelRequestedAt;
       }
+      rollbackRecognitionPreparation?.();
+      rollbackRecognitionPreparation = null;
       throw new Error("任务已由另一个运行实例接管，请刷新状态后重试。");
     }
+    attemptAccepted = true;
     previousState.abortController?.abort(new Error("任务已由新的执行尝试替换。"));
     return runToken;
+  } catch (error) {
+    if (!attemptAccepted) {
+      rollbackRecognitionPreparation?.();
+    }
+    throw error;
   } finally {
     record.attemptStartInFlight = false;
+  }
+}
+
+function restoreBrowserAttemptProperty(target, key, hadProperty, value) {
+  if (hadProperty) {
+    target[key] = value;
+  } else {
+    delete target[key];
   }
 }
 
@@ -5140,7 +3776,26 @@ async function recoverBrowserJobIndex() {
     if (!ledger?.id || !ledger.runToken || browserPreloadJobs.has(ledger.id)) {
       continue;
     }
-    const chunks = await browserJobStore.getChunks(ledger.id, ledger.runToken);
+    let chunks = await browserJobStore.getChunks(ledger.id, ledger.runToken);
+    const cache = await caches.open(WEB_FFMPEG_AUDIO_CACHE);
+    const missingAudioRefs = [];
+    for (const chunk of chunks.filter(entry => String(entry?.entryType || "") === "audio-chunk")) {
+      for (const ref of browserAudioCacheRefsFromLedgerChunk(chunk)) {
+        try {
+          if (!await cache.match(ref)) {
+            missingAudioRefs.push(ref);
+          }
+        } catch {
+          // A transient CacheStorage read error does not prove that the durable
+          // audio is missing. Leave the ledger intact so a later verification
+          // can retry without destroying reusable audio metadata.
+        }
+      }
+    }
+    if (missingAudioRefs.length) {
+      await reconcileBrowserAudioCacheDeletion(missingAudioRefs, chunks);
+      chunks = await browserJobStore.getChunks(ledger.id, ledger.runToken);
+    }
     const modelResolution = await resolveRecoveredModelConfig(ledger);
     const record = recoverBrowserJobRecord(ledger, chunks, modelResolution.modelConfig, {
       recoveryError: modelResolution.error
@@ -5179,6 +3834,7 @@ function recoverBrowserJobRecord(ledger, chunks = [], modelConfig = null, option
   const translatedSegmentsByChunk = new Map();
   const audioChunks = [];
   const browserAsrChunkToTranslationGroup = new Map();
+  const browserAsrDiagnosticsByChunk = new Map();
   for (const chunk of chunks) {
     const index = Math.max(0, Number(chunk?.index) || 0);
     const entryType = String(chunk?.entryType || "legacy");
@@ -5195,6 +3851,10 @@ function recoverBrowserJobRecord(ledger, chunks = [], modelConfig = null, option
       const audio = recoverBrowserAudioChunk(chunk, index);
       if (audio) {
         audioChunks.push(audio);
+        const asrDiagnostics = FuguangJobContract.sanitizeAsrDiagnostics(chunk.asrDiagnostics);
+        if (asrDiagnostics) {
+          browserAsrDiagnosticsByChunk.set(index, asrDiagnostics);
+        }
         browserAsrChunkToTranslationGroup.set(
           index,
           entryType === "audio-chunk"
@@ -5205,14 +3865,33 @@ function recoverBrowserJobRecord(ledger, chunks = [], modelConfig = null, option
     }
   }
   const recoveryError = String(options.recoveryError || "");
+  const presentationOnly = Boolean(options.presentationOnly);
   const offscreenExecutionActive = Boolean(
+    !presentationOnly &&
     !recoveryError &&
     !ledger.cancelRequested &&
     ledger.executionRunToken === ledger.runToken &&
     ledger.executionStartedAt &&
     ["queued", "running"].includes(String(ledger.status || ""))
   );
-  const status = ledger.cancelRequested ? "cancelled" : (offscreenExecutionActive ? "running" : "interrupted");
+  const preservedRetryCancel = Boolean(ledger.cancelRequested && ledger.preserveExistingOnCancel);
+  const durableStatus = String(ledger.status || "");
+  const durableError = String(ledger.error || "");
+  const status = presentationOnly
+    ? durableStatus
+    : (ledger.cancelRequested && !preservedRetryCancel ? "cancelled" : (offscreenExecutionActive ? "running" : "interrupted"));
+  const recoveredError = presentationOnly
+    ? durableError
+    : ledger.cancelRequested
+    ? (preservedRetryCancel ? "已停止本次重试，保留现有字幕和音频缓存。" : "任务已停止。")
+    : (recoveryError || (status === "interrupted"
+        ? (durableStatus === "interrupted"
+            ? durableError
+            : "浏览器后台重启中断了任务。已保留完成分段，可继续处理或重新抽取。")
+        : ""));
+  const recoveredUpdatedAt = durableStatus !== status || durableError !== recoveredError
+    ? Date.now()
+    : Number(ledger.updatedAt || ledger.createdAt || Date.now());
   const metadata = { pageUrl: ledger.pageIdentity || "" };
   const job = {
     id: ledger.id,
@@ -5224,13 +3903,17 @@ function recoverBrowserJobRecord(ledger, chunks = [], modelConfig = null, option
     sourceUrl: ledger.source?.identity || "",
     metadata,
     createdAt: Number(ledger.createdAt || Date.now()),
-    updatedAt: Date.now(),
+    updatedAt: recoveredUpdatedAt,
     cancelRequested: Boolean(ledger.cancelRequested),
-    error: ledger.cancelRequested
-      ? "任务已停止。"
-      : (recoveryError || (offscreenExecutionActive
-          ? ""
-          : "浏览器后台重启中断了任务。已保留完成分段，可继续处理或重新抽取。")),
+    preserveExistingOnCancel: Boolean(ledger.preserveExistingOnCancel),
+    subtitleCleared: Boolean(ledger.subtitleCleared),
+    reusableAudioChunks: Math.max(0, Number(ledger.reusableAudioChunks || 0) || 0),
+    audioCacheRemoved: Boolean(ledger.audioCacheRemoved),
+    audioCacheRemovedCount: Math.max(0, Number(ledger.audioCacheRemovedCount || 0) || 0),
+    audioCacheVerified: Boolean(ledger.audioCacheVerified),
+    audioCacheVerifiedAt: Number(ledger.audioCacheVerifiedAt || 0) || 0,
+    audioCacheRemovedRefs: Array.isArray(ledger.audioCacheRemovedRefs) ? [...ledger.audioCacheRemovedRefs] : [],
+    error: recoveredError,
     extract: { ...(ledger.extract || {}) },
     translation: {
       ...(ledger.translation || {}),
@@ -5240,8 +3923,8 @@ function recoverBrowserJobRecord(ledger, chunks = [], modelConfig = null, option
     }
   };
   const source = collectChunkSegments(sourceSegmentsByChunk);
-  const translated = collectChunkSegments(translatedSegmentsByChunk);
-  const display = mergeTranslatedDisplaySegments(source, translated);
+  const translated = ledger.subtitleCleared ? [] : collectChunkSegments(translatedSegmentsByChunk);
+  const display = ledger.subtitleCleared ? [] : mergeTranslatedDisplaySegments(source, translated);
   job.translation.sourceSegments = source.length;
   job.translation.translatedSegments = translated.length;
   job.translation.segmentCount = display.length;
@@ -5252,15 +3935,31 @@ function recoverBrowserJobRecord(ledger, chunks = [], modelConfig = null, option
   if (ledger.cancelRequested) {
     abortController.abort(new Error("任务已停止。"));
   }
+  const recoveredFrameId = optionalBrowserFrameId(ledger.source?.frameId);
+  const recoveredDocumentId = normalizeDocumentId(ledger.source?.documentId);
+  const recoveredLineageKey = browserLedgerMediaLineageKey(ledger);
+  const presentationBinding = recoveredFrameId !== null || recoveredDocumentId || recoveredLineageKey
+    ? {
+      frameId: recoveredFrameId,
+      documentId: recoveredDocumentId,
+      lineageKey: recoveredLineageKey
+    }
+    : null;
+  const recoveredCandidate = {
+    url: ledger.source?.identity || "",
+    kind: ledger.source?.kind || "",
+    ext: ledger.source?.ext || "",
+    pageUrl: ledger.pageIdentity || "",
+    ...(recoveredFrameId !== null ? { frameId: recoveredFrameId } : {}),
+    ...(recoveredDocumentId ? { documentId: recoveredDocumentId } : {}),
+    ...(recoveredLineageKey ? { lineageKey: recoveredLineageKey } : {})
+  };
   const record = {
     tabId: Number(ledger.tabId),
     runToken: ledger.runToken,
-    candidate: {
-      url: ledger.source?.identity || "",
-      kind: ledger.source?.kind || "",
-      ext: ledger.source?.ext || "",
-      pageUrl: ledger.pageIdentity || ""
-    },
+    candidate: recoveredCandidate,
+    selectedCandidate: recoveredCandidate,
+    presentationBinding,
     metadata,
     modelConfig: modelConfig || {
       asr: {},
@@ -5275,10 +3974,11 @@ function recoverBrowserJobRecord(ledger, chunks = [], modelConfig = null, option
     startedAt: Number(ledger.createdAt || Date.now()),
     cancelled: Boolean(ledger.cancelRequested),
     cancelRequested: Boolean(ledger.cancelRequested),
+    preserveExistingOnCancel: Boolean(ledger.preserveExistingOnCancel),
     abortController,
     sourceSegmentsByChunk,
     translatedSegmentsByChunk,
-    browserAsrDiagnosticsByChunk: new Map(),
+    browserAsrDiagnosticsByChunk,
     browserAsrChunkSeconds: Number(ledger.extract?.asrChunkSeconds || 0) || 0,
     audioChunks,
     browserAsrChunkToTranslationGroup,
@@ -5289,7 +3989,55 @@ function recoverBrowserJobRecord(ledger, chunks = [], modelConfig = null, option
     recoveryError,
     recovered: true
   };
+  record.presentationOnly = presentationOnly;
   rebuildRecoveredBrowserTranslationGroups(record);
+  return record;
+}
+
+async function recoverBrowserPresentationJobForTabPage(tabId, pageUrl) {
+  if (!tabId || !normalizeBrowserPageIdentity(pageUrl)) {
+    return null;
+  }
+  const ledgers = await browserJobStore.listJobs().catch(() => []);
+  const ledger = ledgers
+    .filter(item =>
+      Number(item?.tabId) === Number(tabId) &&
+      ["completed", "done"].includes(String(item?.status || "")) &&
+      browserPageIdentitiesMatch(item?.pageIdentity || "", pageUrl)
+    )
+    .sort((left, right) => Number(right.updatedAt || 0) - Number(left.updatedAt || 0))[0];
+  return ledger ? recoverBrowserPresentationJob(ledger.id, tabId, pageUrl, ledger) : null;
+}
+
+async function recoverBrowserPresentationJob(jobId, tabId = 0, pageUrl = "", knownLedger = null) {
+  const id = String(jobId || "");
+  if (!id) {
+    return null;
+  }
+  const existing = browserPreloadJobs.get(id);
+  if (existing) {
+    return existing;
+  }
+  const snapshot = knownLedger
+    ? { job: knownLedger, chunks: await browserJobStore.getChunks(id, knownLedger.runToken).catch(() => []) }
+    : await browserJobStore.getSnapshot(id).catch(() => ({ job: null, chunks: [] }));
+  const ledger = snapshot?.job;
+  if (!ledger || !["completed", "done"].includes(String(ledger.status || ""))) {
+    return null;
+  }
+  const expectedPage = pageUrl || getState(tabId || Number(ledger.tabId)).page?.url || "";
+  if (tabId && Number(ledger.tabId) !== Number(tabId)) {
+    return null;
+  }
+  if (expectedPage && !browserPageIdentitiesMatch(ledger.pageIdentity || "", expectedPage)) {
+    return null;
+  }
+  const record = recoverBrowserJobRecord(ledger, snapshot.chunks || [], null, { presentationOnly: true });
+  if (!record.job?.translation?.vttText && !record.job?.subtitleCleared) {
+    return null;
+  }
+  browserPreloadJobs.set(id, record);
+  await restoreRecoveredBrowserJobToTab(record);
   return record;
 }
 
@@ -5301,8 +4049,18 @@ function recoverBrowserTranslationChunkStatus(chunk, index, ledger) {
     attempts: Number(chunk.attempts || 0) || 0,
     sourceCount: Number(chunk.sourceCount || 0) || 0,
     translatedCount: Number(chunk.translatedCount || 0) || 0,
+    expectedAudioChunkIndexes: [...new Set((Array.isArray(chunk.expectedAudioChunkIndexes)
+      ? chunk.expectedAudioChunkIndexes
+      : []).map(Number).filter(Number.isFinite))].sort((left, right) => left - right),
+    asrRequired: Boolean(chunk.asrRequired),
     asrFailures: Number(chunk.asrFailures || 0) || 0,
     translationFailures: Number(chunk.translationFailures || 0) || 0,
+    translationErrorStatus: Number(chunk.translationErrorStatus || 0) || 0,
+    translationErrorCode: String(chunk.translationErrorCode || ""),
+    translationDeliveryAmbiguous: Boolean(chunk.translationDeliveryAmbiguous),
+    translationExecutionMode: chunk.translationExecutionMode === "offscreen-durable-v1"
+      ? "offscreen-durable-v1"
+      : "",
     message: String(chunk.message || ""),
     error: String(chunk.error || ""),
     updatedAt: Number(chunk.updatedAt || ledger.updatedAt || Date.now())
@@ -5364,6 +4122,7 @@ function recoverBrowserAudioChunk(chunk, index) {
         mime: "audio/mpeg",
         cacheUrl: directCacheRef
       });
+  const speechIntervals = normalizeAsrSpeechIntervals(chunk.speechIntervals);
   return {
     index,
     start: Number(chunk.audioStart || 0) || 0,
@@ -5372,9 +4131,20 @@ function recoverBrowserAudioChunk(chunk, index) {
     coreStart: Number(chunk.audioCoreStart || chunk.audioStart || 0) || 0,
     coreEnd: Number(chunk.audioCoreEnd || chunk.audioEnd || 0) || 0,
     file,
+    ...(speechIntervals ? { speechIntervals } : {}),
+    ...(typeof chunk.speechIntervalsReliable === "boolean"
+      ? { speechIntervalsReliable: chunk.speechIntervalsReliable }
+      : {}),
     asrCompleted: Boolean(chunk.asrCompleted),
     asrFailed: Boolean(chunk.asrFailed),
     asrError: String(chunk.asrError || ""),
+    asrErrorStatus: Math.max(0, Number(chunk.asrErrorStatus || 0) || 0),
+    asrErrorCode: String(chunk.asrErrorCode || ""),
+    asrDeliveryAmbiguous: Boolean(chunk.asrDeliveryAmbiguous),
+    asrStage: String(chunk.asrStage || ""),
+    asrExecutionMode: chunk.asrExecutionMode === "offscreen-durable-v1"
+      ? "offscreen-durable-v1"
+      : "",
     sourceSegments: Array.isArray(chunk.sourceSegments) ? chunk.sourceSegments : []
   };
 }
@@ -5386,6 +4156,10 @@ function rebuildRecoveredBrowserTranslationGroups(record) {
       ? record.browserAsrChunkToTranslationGroup.get(chunk.index)
       : browserTranslationGroupIndex(record, chunk);
     record.browserAsrChunkToTranslationGroup.set(chunk.index, groupIndex);
+    rememberBrowserExpectedAudioChunk(record, groupIndex, chunk.index);
+    if (chunk.asrCompleted !== true && record.job.translation.chunkStatuses[groupIndex]) {
+      record.job.translation.chunkStatuses[groupIndex].asrRequired = true;
+    }
     let group = record.browserTranslationGroups.get(groupIndex);
     if (!group) {
       const segmentSeconds = browserTranslationSegmentSeconds(record);
@@ -5402,7 +4176,7 @@ function rebuildRecoveredBrowserTranslationGroups(record) {
         empty: 0,
         sourceSegments: [],
         errors: [],
-        closed: true,
+        closed: false,
         translationQueued: false
       };
       record.browserTranslationGroups.set(groupIndex, group);
@@ -5419,22 +4193,80 @@ function rebuildRecoveredBrowserTranslationGroups(record) {
         if (chunk.asrError) {
           group.errors.push(chunk.asrError);
         }
-      } else if (chunk.sourceSegments?.length) {
+      }
+      if (chunk.sourceSegments?.length) {
         group.sourceSegments.push(...chunk.sourceSegments);
-      } else {
+      } else if (!chunk.asrFailed) {
         group.empty += 1;
       }
     }
   }
+  const extractionTerminal = ["completed", "failed"].includes(String(record.job.extract?.status || ""));
+  const recoveredGroupIndexes = [...record.browserTranslationGroups.keys()];
   for (const [groupIndex, group] of record.browserTranslationGroups) {
     if (record.sourceSegmentsByChunk.has(groupIndex)) {
       group.sourceSegments = record.sourceSegmentsByChunk.get(groupIndex);
     }
     const stage = String(record.job.translation?.chunkStatuses?.[groupIndex]?.stage || "");
-    group.translationQueued = ["asr_done", "translation", "completed", "completed_with_warnings", "failed"].includes(stage);
+    const stageProvesGroupFinalized = [
+      "asr_done",
+      "translation",
+      "completed",
+      "completed_with_warnings",
+      "failed"
+    ].includes(stage);
+    const hasLaterGroup = recoveredGroupIndexes.some(index => index > groupIndex);
+    const reachedTargetEnd = group.chunks.some(chunk => (
+      browserAudioChunkCoreEnd(chunk) + 0.001 >= Number(group.targetEnd || 0)
+    ));
+    group.closed = extractionTerminal || hasLaterGroup || reachedTargetEnd || stageProvesGroupFinalized;
+    const translationPersisted = record.translatedSegmentsByChunk.has(groupIndex);
+    const durableAsrResume = group.chunks.some(chunk => (
+      !chunk.asrCompleted && chunk.asrExecutionMode === "offscreen-durable-v1"
+    ));
+    if (stage === "asr_inflight" && !translationPersisted && durableAsrResume) {
+      group.translationQueued = false;
+      continue;
+    }
+    if (stage === "asr_inflight" && !translationPersisted) {
+      group.translationQueued = true;
+      markRecoveredBrowserPaidOperationAsAmbiguous(record, stage);
+      continue;
+    }
+    if (stage === "translation" && !translationPersisted &&
+        record.job.translation?.chunkStatuses?.[groupIndex]?.translationExecutionMode === "offscreen-durable-v1") {
+      // The paid operation ledger and response cache live in offscreen. A replacement
+      // Service Worker must expose the same translation work so offscreen can replay
+      // the completed response or keep an ambiguous submitted request blocked.
+      group.translationQueued = true;
+      continue;
+    }
+    if (stage === "translation" && !translationPersisted) {
+      group.translationQueued = true;
+      markRecoveredBrowserPaidOperationAsAmbiguous(record, stage);
+      continue;
+    }
+    group.translationQueued = ["completed", "completed_with_warnings", "failed"].includes(stage);
     if (group.translationQueued && group.completed < group.total) {
       group.completed = group.total;
     }
+    if (stage === "asr_done" && group.completed >= group.total) {
+      maybeFinalizeBrowserTranslationGroup(record, group);
+    }
+  }
+}
+
+function markRecoveredBrowserPaidOperationAsAmbiguous(record, stage) {
+  const action = stage === "asr_inflight" ? "识别" : "翻译";
+  const message = `浏览器后台在${action}请求期间重启。为避免重复计费，任务已中断；请明确重试失败分段。`;
+  record.recoveryBlocked = true;
+  record.recoveryError = message;
+  record.offscreenExecution = false;
+  record.job.status = "interrupted";
+  record.job.stage = "interrupted";
+  record.job.error = message;
+  if (record.job.translation) {
+    record.job.translation.status = "interrupted";
   }
 }
 
@@ -5474,9 +4306,11 @@ async function startBrowserJobInOffscreen(record, options = {}) {
       resumeExisting,
       runtime: {
         pipeline: record.pipeline || record.job.pipeline || "browser",
+        funAsrExecutionMode: record.pipeline === "funasr" ? "offscreen-durable-v1" : "",
         asrWorkers: record.pipeline === "funasr"
-          ? 1
-          : Math.max(1, Number(record.modelConfig?.asrWorkers || 1) || 1)
+          ? browserFunAsrConcurrency(record)
+          : Math.max(1, Number(record.modelConfig?.asrWorkers || 1) || 1),
+        translationWorkers: Math.max(1, Number(record.modelConfig?.workers || 1) || 1)
       }
     });
     if (response?.accepted) {
@@ -5495,6 +4329,7 @@ async function startBrowserJobInOffscreen(record, options = {}) {
     }
     record.offscreenExecution = false;
     if (response?.retryable) {
+      scheduleBrowserJobLeaseRecovery(record, Date.now() + 1000);
       return { status: "unknown", reason: String(response?.reason || "start-retryable") };
     }
     return { status: "unavailable", reason: String(response?.reason || "start-rejected") };
@@ -5879,6 +4714,16 @@ async function processOffscreenBrowserJobChunk(message = {}) {
     return interruptBrowserJobForStaleOffscreenOperation(record, fence);
   }
   const index = Math.max(0, Number(message.chunkIndex) || 0);
+  const workType = String(message.workType || "asr") === "translation" ? "translation" : "asr";
+  if (workType === "translation") {
+    return {
+      accepted: false,
+      stale: true,
+      reason: "translation-requires-offscreen-executor",
+      chunkIndex: index,
+      workType
+    };
+  }
   const chunk = (record.audioChunks || []).find(item => Number(item?.index) === index);
   if (!chunk) {
     throw new Error(`Offscreen task audio chunk ${index} is unavailable.`);
@@ -5886,54 +4731,138 @@ async function processOffscreenBrowserJobChunk(message = {}) {
   if (chunk.asrCompleted) {
     return { accepted: true, duplicate: true, chunkIndex: index };
   }
-  if (hasOffscreenBrowserChunkOperation(record.job.id, record.runToken, index)) {
+  if (record.pipeline === "funasr" || record.job?.pipeline === "funasr") {
+    return {
+      accepted: false,
+      stale: true,
+      reason: "funasr-requires-offscreen-executor",
+      chunkIndex: index,
+      workType
+    };
+  }
+  if (hasOffscreenBrowserChunkOperation(record.job.id, record.runToken, index, "asr")) {
     return { accepted: true, duplicate: true, inProgress: true, chunkIndex: index };
   }
   const operationKey = offscreenBrowserChunkOperationKey(
     record.job.id,
     record.runToken,
     fence.executionEpoch,
-    index
+    index,
+    "asr"
   );
-  const operation = createOffscreenBrowserOperation(record, fence, { chunkIndex: index });
+  const operation = createOffscreenBrowserOperation(record, fence, { chunkIndex: index, workType: "asr" });
   offscreenBrowserChunkOperations.set(operationKey, operation);
   try {
     record.offscreenExecution = true;
     record.job.status = "running";
     record.job.stage = "asr";
-    if (record.pipeline === "funasr" || record.job?.pipeline === "funasr") {
-      await processBrowserFunAsrChunk(record, chunk, {
-        labelSpeakers: browserFunAsrShouldLabelSpeakers(record),
-        operation,
-        runToken: operation.runToken,
-        signal: operation.controller.signal
+    const operationOptions = {
+      operation,
+      runToken: operation.runToken,
+      signal: operation.controller.signal,
+      onAsrStartCheckpoint: () => commitOffscreenBrowserRecord(record, operation)
+    };
+    await processBrowserAsrChunk(record, chunk, operationOptions);
+    const asrCommitted = await commitOffscreenBrowserRecord(record, operation);
+    if (!asrCommitted.applied) {
+      return offscreenCommitFailureResponse(asrCommitted);
+    }
+    return { accepted: true, chunkIndex: index, workType: "asr" };
+  } catch (error) {
+    if (error?.offscreenCheckpointFailure) {
+      return offscreenCommitFailureResponse(error.commitResult || {
+        applied: false,
+        reason: "checkpoint-failed",
+        retryable: true,
+        error: error.message || String(error)
       });
-    } else {
-      const operationOptions = {
-        operation,
-        runToken: operation.runToken,
-        signal: operation.controller.signal
-      };
-      await processBrowserAsrChunk(record, chunk, operationOptions);
-      await drainBrowserTranslationQueue(record, operationOptions);
     }
-    const committed = await commitOffscreenBrowserRecord(record, operation);
-    if (!committed.applied) {
-      return {
-        accepted: false,
-        stale: true,
-        retryable: Boolean(committed.retryable),
-        reason: committed.reason || "stale-execution",
-        error: committed.error || ""
-      };
-    }
-    return { accepted: true, chunkIndex: index };
+    throw error;
   } finally {
     if (offscreenBrowserChunkOperations.get(operationKey) === operation) {
       offscreenBrowserChunkOperations.delete(operationKey);
     }
     disposeOffscreenBrowserOperation(record, operation);
   }
+}
+
+async function processOffscreenBrowserJobTranslation(record, message, fence, index) {
+  const funAsr = record.pipeline === "funasr" || record.job?.pipeline === "funasr";
+  if (funAsr && hasOffscreenBrowserChunkOperation(record.job.id, record.runToken, index, "asr")) {
+    return { accepted: true, duplicate: true, inProgress: true, chunkIndex: index, workType: "translation" };
+  }
+  const status = record.job.translation?.chunkStatuses?.[index] || {};
+  if (["completed", "completed_with_warnings", "failed"].includes(String(status.stage || "")) ||
+      record.translatedSegmentsByChunk.has(index)) {
+    return { accepted: true, duplicate: true, chunkIndex: index, workType: "translation" };
+  }
+  const sourceSegments = record.sourceSegmentsByChunk.get(index);
+  if (!Array.isArray(sourceSegments) || !sourceSegments.length || String(status.stage || "") !== "asr_done") {
+    return { accepted: false, stale: true, reason: "translation-work-unavailable", chunkIndex: index };
+  }
+  if (hasOffscreenBrowserChunkOperation(record.job.id, record.runToken, index, "translation")) {
+    return { accepted: true, duplicate: true, inProgress: true, chunkIndex: index, workType: "translation" };
+  }
+  const operationKey = offscreenBrowserChunkOperationKey(
+    record.job.id,
+    record.runToken,
+    fence.executionEpoch,
+    index,
+    "translation"
+  );
+  const operation = createOffscreenBrowserOperation(record, fence, { chunkIndex: index, workType: "translation" });
+  offscreenBrowserChunkOperations.set(operationKey, operation);
+  const queuedIndex = record.browserTranslationQueue?.items?.findIndex(payload => Number(payload?.chunk?.index) === index) ?? -1;
+  if (queuedIndex >= 0) {
+    record.browserTranslationQueue.items.splice(queuedIndex, 1);
+  }
+  try {
+    record.offscreenExecution = true;
+    record.job.status = "running";
+    record.job.stage = "translation";
+    const group = record.browserTranslationGroups?.get(index);
+    await processBrowserTranslationChunk(record, {
+      index,
+      start: Number(group?.start || 0) || 0,
+      end: Number(group?.end || 0) || 0,
+      duration: Math.max(0, Number(group?.end || 0) - Number(group?.start || 0))
+    }, sourceSegments, {
+      operation,
+      runToken: operation.runToken,
+      signal: operation.controller.signal,
+      onTranslationStartCheckpoint: () => commitOffscreenBrowserRecord(record, operation)
+    });
+    const committed = await commitOffscreenBrowserRecord(record, operation);
+    if (!committed.applied) {
+      return offscreenCommitFailureResponse(committed);
+    }
+    return { accepted: true, chunkIndex: index, workType: "translation" };
+  } catch (error) {
+    if (error?.offscreenCheckpointFailure) {
+      return offscreenCommitFailureResponse(error.commitResult || {
+        applied: false,
+        reason: "checkpoint-failed",
+        retryable: true,
+        error: error.message || String(error)
+      });
+    }
+    throw error;
+  } finally {
+    if (offscreenBrowserChunkOperations.get(operationKey) === operation) {
+      offscreenBrowserChunkOperations.delete(operationKey);
+    }
+    disposeOffscreenBrowserOperation(record, operation);
+  }
+}
+
+function offscreenCommitFailureResponse(committed = {}) {
+  return {
+    accepted: false,
+    stale: true,
+    retryable: Boolean(committed.retryable),
+    reason: committed.reason || "stale-execution",
+    error: committed.error || ""
+  };
 }
 
 async function getOffscreenBrowserJobWork(message = {}) {
@@ -5962,6 +4891,7 @@ async function getOffscreenBrowserJobWork(message = {}) {
     return takeoverInterruption;
   }
   const terminal = FuguangJobContract.isTerminalStatus(record.job?.status);
+  const funAsr = record.pipeline === "funasr" || record.job?.pipeline === "funasr";
   return {
     accepted: true,
     terminal,
@@ -5972,10 +4902,445 @@ async function getOffscreenBrowserJobWork(message = {}) {
       processing: hasOffscreenBrowserChunkOperation(
         record.job.id,
         record.runToken,
-        Number(chunk?.index || 0)
+        Number(chunk?.index || 0),
+        "asr"
       )
-    }))
+    })),
+    translations: (record.job.translation?.chunkStatuses || []).flatMap((status, index) => {
+      const stage = String(status?.stage || "");
+      const processing = hasOffscreenBrowserChunkOperation(record.job.id, record.runToken, index, "translation");
+      if (!['asr_done', 'translation'].includes(stage) && !processing) {
+        return [];
+      }
+      if (funAsr && hasOffscreenBrowserChunkOperation(record.job.id, record.runToken, index, "asr")) {
+        return [];
+      }
+      return [{ index, processing }];
+    })
   };
+}
+
+async function getOffscreenBrowserJobExecutionInput(message = {}) {
+  await browserJobRecoveryPromise;
+  const fence = await validateOffscreenExecutionFence(message);
+  if (!fence.valid) {
+    return { accepted: false, stale: true, reason: fence.reason };
+  }
+  if (String(message.workType || "") === "asr") {
+    return getOffscreenBrowserAsrExecutionInput(message, fence);
+  }
+  if (String(message.workType || "") !== "translation") {
+    return { accepted: false, stale: true, reason: "unsupported-work-type" };
+  }
+  const record = browserPreloadJobs.get(String(message.jobId || ""));
+  if (!record || String(record.runToken || "") !== String(message.runToken || "")) {
+    return { accepted: false, stale: true, reason: "stale-run" };
+  }
+  if (record.recoveryBlocked) {
+    return { accepted: false, interrupted: true, terminal: true, error: record.recoveryError || record.job?.error || "任务配置无法恢复。" };
+  }
+  if (isBrowserJobCancelled(record)) {
+    return { accepted: false, cancelled: true };
+  }
+  const index = Math.max(0, Number(message.chunkIndex) || 0);
+  const status = record.job.translation?.chunkStatuses?.[index] || {};
+  const stage = String(status.stage || "");
+  if (["completed", "completed_with_warnings", "failed"].includes(stage)) {
+    return { accepted: true, duplicate: true, chunkIndex: index };
+  }
+  if (!["asr_done", "translation"].includes(stage)) {
+    return { accepted: false, stale: true, reason: "translation-work-unavailable", chunkIndex: index };
+  }
+  if (stage === "translation" && status.translationExecutionMode !== "offscreen-durable-v1") {
+    return {
+      accepted: false,
+      interrupted: true,
+      terminal: true,
+      reason: "legacy-translation-operation-ambiguous",
+      error: "旧版翻译请求缺少 durable operation 标记，为避免重复计费，必须由用户明确重试。"
+    };
+  }
+  const sourceSegments = reusableBrowserSourceSegments(record, index);
+  if (!sourceSegments.length) {
+    return { accepted: false, stale: true, reason: "translation-source-unavailable", chunkIndex: index };
+  }
+  const translationConfig = record.modelConfig?.translation;
+  if (!translationConfig?.baseUrl || !translationConfig?.model || !translationConfig?.apiKey) {
+    return { accepted: false, interrupted: true, terminal: true, error: "翻译配置无法恢复，请重新选择翻译配置后重试。" };
+  }
+  if (stage === "asr_done") {
+    const operation = createOffscreenBrowserOperation(record, fence, { chunkIndex: index, workType: "translation-input" });
+    try {
+    const queuedIndex = record.browserTranslationQueue?.items?.findIndex(payload => Number(payload?.chunk?.index) === index) ?? -1;
+    if (queuedIndex >= 0) {
+      record.browserTranslationQueue.items.splice(queuedIndex, 1);
+    }
+    const attempt = Math.max(1, Number(status.attempts || 0) + 1);
+    record.offscreenExecution = true;
+    record.job.status = "running";
+    record.job.stage = "translation";
+    updateChunkStatus(record, index, {
+      stage: "translation",
+      status: "翻译",
+      attempts: attempt,
+      sourceCount: sourceSegments.length,
+      targetLanguage: record.modelConfig.targetLanguage,
+      translationExecutionMode: "offscreen-durable-v1",
+      error: "",
+      message: `第 ${attempt} 次尝试 · offscreen 翻译`
+    });
+      const checkpoint = await commitOffscreenBrowserRecord(record, operation);
+      if (!checkpoint.applied) {
+        return offscreenCommitFailureResponse(checkpoint);
+      }
+    } finally {
+      disposeOffscreenBrowserOperation(record, operation);
+    }
+  }
+  return {
+    accepted: true,
+    input: {
+      jobId: record.job.id,
+      runToken: record.runToken,
+      executionOwnerId: fence.executionOwnerId,
+      executionEpoch: fence.executionEpoch,
+      chunkIndex: index,
+      semanticRequestPath: browserTranslationSemanticRequestBase(record.job.id, record.runToken, index),
+      sourceSegments: cloneBrowserSegments(sourceSegments),
+      targetLanguage: record.modelConfig.targetLanguage,
+      metadata: browserTranslationExecutionMetadata(record.metadata),
+      batchWorkers: browserTranslationBatchWorkers(record),
+      splitWorkers: browserTranslationSplitWorkers(record),
+      maxConcurrency: browserTranslationProviderConcurrency(record),
+      translationConfig: browserTranslationExecutionConfig(translationConfig)
+    }
+  };
+}
+
+async function reportOffscreenBrowserJobWorkProgress(message = {}) {
+  await browserJobRecoveryPromise;
+  const fence = await validateOffscreenExecutionFence(message);
+  if (!fence.valid) {
+    return { accepted: false, stale: true, reason: fence.reason };
+  }
+  if (String(message.workType || "") !== "translation") {
+    return { accepted: false, stale: true, reason: "unsupported-work-type" };
+  }
+  const record = browserPreloadJobs.get(String(message.jobId || ""));
+  if (!record || String(record.runToken || "") !== String(message.runToken || "")) {
+    return { accepted: false, stale: true, reason: "stale-run" };
+  }
+  if (isBrowserJobCancelled(record)) {
+    return { accepted: false, cancelled: true };
+  }
+  const index = Math.max(0, Number(message.chunkIndex) || 0);
+  const status = record.job.translation?.chunkStatuses?.[index] || {};
+  if (String(status.stage || "") !== "translation") {
+    return { accepted: true, duplicate: true, chunkIndex: index };
+  }
+  const progress = message.progress && typeof message.progress === "object" ? message.progress : {};
+  const batchIndex = Math.max(0, Number(progress.batchIndex || 0) || 0);
+  const batchTotal = Math.max(0, Number(progress.batchTotal || 0) || 0);
+  const phase = ["started", "batch", "completed"].includes(String(progress.phase || ""))
+    ? String(progress.phase)
+    : "batch";
+  const progressMessage = batchIndex && batchTotal
+    ? `offscreen 翻译第 ${Math.min(batchIndex, batchTotal)}/${batchTotal} 批`
+    : (phase === "completed" ? "offscreen 翻译完成，正在保存" : "offscreen 翻译中");
+  const operation = createOffscreenBrowserOperation(record, fence, { chunkIndex: index, workType: "translation-progress" });
+  try {
+    updateChunkStatus(record, index, {
+      stage: "translation",
+      status: "翻译",
+      message: progressMessage
+    });
+    const committed = await commitOffscreenBrowserRecord(record, operation);
+    if (!committed.applied) {
+      return offscreenCommitFailureResponse(committed);
+    }
+  } finally {
+    disposeOffscreenBrowserOperation(record, operation);
+  }
+  return { accepted: true, chunkIndex: index };
+}
+
+async function commitOffscreenBrowserJobWorkResult(message = {}) {
+  await browserJobRecoveryPromise;
+  const fence = await validateOffscreenExecutionFence(message);
+  if (!fence.valid) {
+    return { accepted: false, stale: true, reason: fence.reason };
+  }
+  if (String(message.workType || "") === "asr") {
+    return commitOffscreenBrowserAsrWorkResult(message, fence);
+  }
+  if (String(message.workType || "") !== "translation") {
+    return { accepted: false, stale: true, reason: "unsupported-work-type" };
+  }
+  const record = browserPreloadJobs.get(String(message.jobId || ""));
+  if (!record || String(record.runToken || "") !== String(message.runToken || "")) {
+    return { accepted: false, stale: true, reason: "stale-run" };
+  }
+  if (isBrowserJobCancelled(record)) {
+    return { accepted: false, cancelled: true };
+  }
+  const index = Math.max(0, Number(message.chunkIndex) || 0);
+  const status = record.job.translation?.chunkStatuses?.[index] || {};
+  if (["completed", "completed_with_warnings", "failed"].includes(String(status.stage || ""))) {
+    return { accepted: true, duplicate: true, chunkIndex: index };
+  }
+  if (String(status.stage || "") !== "translation") {
+    return { accepted: false, stale: true, reason: "translation-commit-unavailable", chunkIndex: index };
+  }
+  const sourceSegments = reusableBrowserSourceSegments(record, index);
+  const result = message.result && typeof message.result === "object" ? message.result : {};
+  const failures = Array.isArray(result.failures) ? result.failures.map(failure => ({
+    source: failure?.source ? { ...failure.source } : null,
+    error: String(failure?.error || "翻译失败")
+  })).filter(failure => failure.source) : [];
+  const resultError = result.error && typeof result.error === "object"
+    ? String(result.error.message || result.error.code || "翻译失败。")
+    : String(result.error || "");
+  const resultErrorStatus = result.error && typeof result.error === "object"
+    ? Math.max(0, Number(result.error.status || 0) || 0)
+    : 0;
+  const resultErrorCode = result.error && typeof result.error === "object"
+    ? String(result.error.code || "")
+    : "";
+  const resultDeliveryAmbiguous = Boolean(result.error && typeof result.error === "object" && result.error.deliveryAmbiguous);
+  const operation = createOffscreenBrowserOperation(record, fence, { chunkIndex: index, workType: "translation-commit" });
+  try {
+    const previous = cloneBrowserSegments(record.translatedSegmentsByChunk?.get(index));
+    if (resultError) {
+      updateChunkStatus(record, index, {
+      stage: "failed",
+      status: "失败",
+      sourceCount: sourceSegments.length,
+      translatedCount: previous.length,
+      translationFailures: failures.length,
+      translationErrorStatus: resultErrorStatus,
+      translationErrorCode: resultErrorCode,
+      translationDeliveryAmbiguous: resultDeliveryAmbiguous,
+      error: previous.length
+        ? `重翻译失败，已保留已有译文：${resultError}`
+        : `重翻译失败，未生成译文，已保留原文供重试：${resultError}`,
+      message: "offscreen 翻译失败"
+      });
+    } else {
+      const translatedSegments = cloneBrowserSegments(result.segments);
+      record.translatedSegmentsByChunk.set(index, translatedSegments);
+      const asrFailures = chunkStatusAsrFailureCount(status);
+      const warningMessage = browserCompletedChunkWarningMessage(failures, asrFailures);
+      updateChunkStatus(record, index, {
+      stage: warningMessage ? "completed_with_warnings" : "completed",
+      status: warningMessage ? "部分完成" : "完成",
+      sourceCount: sourceSegments.length,
+      translatedCount: translatedSegments.length,
+      targetLanguage: record.modelConfig.targetLanguage,
+      translationFailures: failures.length,
+      translationErrorStatus: 0,
+      translationErrorCode: "",
+      translationDeliveryAmbiguous: false,
+      asrFailures,
+      asrErrors: Array.isArray(status.asrErrors) ? status.asrErrors : [],
+      error: warningMessage,
+      message: `原文 ${sourceSegments.length} · 译文 ${translatedSegments.length}`
+      });
+    }
+    refreshBrowserSubtitleProjection(record);
+    const committed = await commitOffscreenBrowserRecord(record, operation);
+    if (!committed.applied) {
+      return offscreenCommitFailureResponse(committed);
+    }
+  } finally {
+    disposeOffscreenBrowserOperation(record, operation);
+  }
+  return { accepted: true, chunkIndex: index, workType: "translation" };
+}
+
+function browserTranslationSemanticRequestBase(jobId, runToken, index) {
+  return ["translation", jobId, runToken, "chunk", Math.max(0, Number(index) || 0)]
+    .map(part => encodeURIComponent(String(part || "")))
+    .join("/");
+}
+
+function browserTranslationExecutionMetadata(metadata = {}) {
+  return {
+    title: String(metadata.title || ""),
+    pageUrl: String(metadata.pageUrl || ""),
+    sourceUrl: String(metadata.sourceUrl || ""),
+    duration: Number(metadata.duration || 0) || 0
+  };
+}
+
+function browserTranslationExecutionConfig(config = {}) {
+  return {
+    providerType: String(config.providerType || ""),
+    baseUrl: String(config.baseUrl || ""),
+    model: String(config.model || ""),
+    apiKey: String(config.apiKey || "")
+  };
+}
+
+function browserAsrSemanticRequestBase(jobId, runToken, index) {
+  return ["asr", jobId, runToken, "chunk", Math.max(0, Number(index) || 0)]
+    .map(part => encodeURIComponent(String(part || "")))
+    .join("/");
+}
+
+function browserAsrExecutionConfig(config = {}) {
+  const result = {};
+  for (const key of [
+    "providerType", "baseUrl", "model", "apiKey", "language", "sourceLanguage",
+    "timeoutMs", "vadFilter", "vad_filter", "vadFilterMode", "collectedSpeechAudio",
+    "collectSpeechAudio", "maxUploadBytes", "maxFileBytes", "maxUploadMb", "maxFileSizeMb"
+  ]) {
+    if (config[key] !== undefined) result[key] = config[key];
+  }
+  return result;
+}
+
+function browserFunAsrExecutionConfig(config = {}) {
+  const result = {};
+  for (const key of [
+    "providerType", "baseUrl", "model", "apiKey", "language", "sourceLanguage",
+    "timeoutMs", "speakerCount", "speaker_count", "specialWordFilter", "special_word_filter"
+  ]) {
+    if (config[key] !== undefined) result[key] = config[key];
+  }
+  return result;
+}
+
+async function getOffscreenBrowserAsrExecutionInput(message, fence) {
+  const record = browserPreloadJobs.get(String(message.jobId || ""));
+  if (!record || String(record.runToken || "") !== String(message.runToken || "")) {
+    return { accepted: false, stale: true, reason: "stale-run" };
+  }
+  const funAsr = record.pipeline === "funasr" || record.job?.pipeline === "funasr";
+  if (record.recoveryBlocked || isBrowserJobCancelled(record)) {
+    return record.recoveryBlocked
+      ? { accepted: false, interrupted: true, terminal: true, error: record.recoveryError || "任务配置无法恢复。" }
+      : { accepted: false, cancelled: true };
+  }
+  const index = Math.max(0, Number(message.chunkIndex) || 0);
+  const chunk = (record.audioChunks || []).find(item => Number(item?.index) === index);
+  if (!chunk) return { accepted: false, stale: true, reason: "asr-audio-unavailable", chunkIndex: index };
+  if (chunk.asrCompleted) return { accepted: true, duplicate: true, chunkIndex: index };
+  const config = record.modelConfig?.asr || {};
+  if (!config.baseUrl || !config.apiKey || (funAsr ? !config.model : (browserAsrProviderNeedsModel(config) && !config.model))) {
+    return { accepted: false, interrupted: true, terminal: true, error: "识别配置无法恢复，请重新选择识别配置后重试。" };
+  }
+  if (chunk.asrExecutionMode && chunk.asrExecutionMode !== "offscreen-durable-v1") {
+    return { accepted: false, interrupted: true, terminal: true, reason: "legacy-asr-operation-ambiguous" };
+  }
+  const operation = createOffscreenBrowserOperation(record, fence, { chunkIndex: index, workType: "asr-input" });
+  try {
+    chunk.asrExecutionMode = "offscreen-durable-v1";
+    record.offscreenExecution = true;
+    record.job.status = "running";
+    record.job.stage = "asr";
+    const group = getBrowserTranslationGroupForAudioChunk(record, chunk);
+    updateChunkStatus(record, group.index, {
+      stage: "asr_inflight", status: "识别", error: "",
+      attempts: Math.max(1, Number(record.job.translation?.chunkStatuses?.[group.index]?.attempts || 0) + 1),
+      message: `offscreen 识别 ${browserAsrChunkTimeRangeText(chunk)}`
+    });
+    const checkpoint = await commitOffscreenBrowserRecord(record, operation);
+    if (!checkpoint.applied) return offscreenCommitFailureResponse(checkpoint);
+  } finally {
+    disposeOffscreenBrowserOperation(record, operation);
+  }
+  const { url: webFfmpegUrl } = await getWebFfmpegConfig();
+  return { accepted: true, input: {
+    jobId: record.job.id, runToken: record.runToken,
+    executionOwnerId: fence.executionOwnerId, executionEpoch: fence.executionEpoch,
+    chunkIndex: index,
+    semanticRequestPath: funAsr
+      ? `funasr/${[record.job.id, record.runToken, "chunk", index]
+        .map(part => encodeURIComponent(String(part ?? ""))).join("/")}`
+      : browserAsrSemanticRequestBase(record.job.id, record.runToken, index),
+    chunk: JSON.parse(JSON.stringify(chunk)),
+    ...(funAsr
+      ? {
+        funAsrConfig: browserFunAsrExecutionConfig(config),
+        chunksTotal: browserFunAsrExpectedChunkCount(record),
+        duration: pickFinite(record.job.extract?.duration, record.metadata?.duration),
+        labelSpeakers: browserFunAsrShouldLabelSpeakers(record),
+        deadlineAt: Date.now() + Math.max(60_000, Number(config.timeoutMs || 2 * 60 * 60 * 1000) || 2 * 60 * 60 * 1000)
+      }
+      : { asrConfig: browserAsrExecutionConfig(config) }),
+    webFfmpegUrl
+  }};
+}
+
+async function commitOffscreenBrowserAsrWorkResult(message, fence) {
+  const record = browserPreloadJobs.get(String(message.jobId || ""));
+  if (!record || String(record.runToken || "") !== String(message.runToken || "")) {
+    return { accepted: false, stale: true, reason: "stale-run" };
+  }
+  if (isBrowserJobCancelled(record)) return { accepted: false, cancelled: true };
+  const index = Math.max(0, Number(message.chunkIndex) || 0);
+  const chunk = (record.audioChunks || []).find(item => Number(item?.index) === index);
+  if (!chunk) return { accepted: false, stale: true, reason: "asr-commit-unavailable" };
+  if (chunk.asrCompleted) return { accepted: true, duplicate: true, chunkIndex: index };
+  if (chunk.asrExecutionMode !== "offscreen-durable-v1") {
+    return { accepted: false, stale: true, reason: "asr-commit-unavailable" };
+  }
+  const result = message.result && typeof message.result === "object" ? message.result : {};
+  const sourceSegments = Array.isArray(result.segments) ? result.segments : [];
+  const errorText = result.error && typeof result.error === "object"
+    ? String(result.error.message || result.error.code || "识别失败。")
+    : String(result.error || "");
+  const warningText = result.warning && typeof result.warning === "object"
+    ? String(result.warning.message || result.warning.code || "")
+    : String(result.warning || "");
+  const error = errorText ? new Error(errorText) : (warningText ? new Error(warningText) : null);
+  const resumeRemoteTask = Boolean(
+    (record.pipeline === "funasr" || record.job?.pipeline === "funasr") &&
+    result.resumeRemoteTask &&
+    String(result.remoteTaskId || "")
+  );
+  const operation = createOffscreenBrowserOperation(record, fence, { chunkIndex: index, workType: "asr-commit" });
+  try {
+    if (result.diagnostics) recordBrowserAsrChunkDiagnostics(record, chunk, result.diagnostics);
+    chunk.asrErrorStatus = Math.max(0, Number(result.error?.status || 0) || 0);
+    chunk.asrErrorCode = String(result.error?.code || "");
+    chunk.asrDeliveryAmbiguous = Boolean(result.error?.deliveryAmbiguous);
+    chunk.asrStage = String(result.error?.asrStage || "");
+    if (resumeRemoteTask) {
+      chunk.asrCompleted = false;
+      chunk.asrError = errorText;
+      const group = getBrowserTranslationGroupForAudioChunk(record, chunk);
+      updateChunkStatus(record, group.index, {
+        stage: "asr_inflight",
+        status: "识别中断",
+        error: `Fun-ASR 远端任务已提交，重试将继续当前任务：${errorText}`,
+        message: "等待继续轮询远端任务"
+      });
+      record.job.status = "interrupted";
+      record.job.stage = "interrupted";
+      record.job.error = `Fun-ASR 远端任务已提交，重试将继续当前任务：${errorText}`;
+      record.job.updatedAt = Date.now();
+      refreshBrowserSubtitleProjection(record);
+      const committed = await commitOffscreenBrowserRecord(record, operation);
+      if (!committed.applied) return offscreenCommitFailureResponse(committed);
+      return {
+        accepted: false,
+        interrupted: true,
+        terminal: true,
+        resumableRemoteTask: true,
+        chunkIndex: index,
+        workType: "asr"
+      };
+    }
+    markBrowserAudioChunkAsrResult(chunk, sourceSegments, error);
+    completeBrowserAsrChunkForGroup(record, chunk, sourceSegments, error);
+    refreshBrowserSubtitleProjection(record);
+    const committed = await commitOffscreenBrowserRecord(record, operation);
+    if (!committed.applied) return offscreenCommitFailureResponse(committed);
+  } finally {
+    disposeOffscreenBrowserOperation(record, operation);
+  }
+  return { accepted: true, chunkIndex: index, workType: "asr" };
 }
 
 async function validateOffscreenExecutionFence(message = {}, options = {}) {
@@ -6005,8 +5370,8 @@ async function validateOffscreenExecutionFence(message = {}, options = {}) {
   return { valid: true, durable, executionOwnerId, executionEpoch };
 }
 
-function offscreenBrowserChunkOperationKey(jobId, runToken, executionEpoch, chunkIndex) {
-  return `${String(jobId || "")}:${String(runToken || "")}:${Math.max(0, Number(executionEpoch) || 0)}:${Math.max(0, Number(chunkIndex) || 0)}`;
+function offscreenBrowserChunkOperationKey(jobId, runToken, executionEpoch, chunkIndex, workType = "asr") {
+  return `${String(jobId || "")}:${String(runToken || "")}:${Math.max(0, Number(executionEpoch) || 0)}:${String(workType || "asr")}:${Math.max(0, Number(chunkIndex) || 0)}`;
 }
 
 function offscreenBrowserFinalizationOperationKey(jobId, runToken, executionEpoch) {
@@ -6063,6 +5428,7 @@ function createOffscreenBrowserOperation(record, fence, details = {}) {
     executionOwnerId: String(fence?.executionOwnerId || ""),
     executionEpoch: Number(fence?.executionEpoch || 0) || 0,
     chunkIndex: Number.isInteger(Number(details.chunkIndex)) ? Number(details.chunkIndex) : null,
+    workType: String(details.workType || "asr"),
     controller,
     stale: false,
     recordAbortListener: null
@@ -6101,14 +5467,16 @@ function markOffscreenBrowserOperationStale(operation, message = "任务执行�
   operation.controller?.abort?.(error);
 }
 
-function hasOffscreenBrowserChunkOperation(jobId, runToken, chunkIndex = null) {
+function hasOffscreenBrowserChunkOperation(jobId, runToken, chunkIndex = null, workType = null) {
   for (const operation of offscreenBrowserChunkOperations.values()) {
     if (String(operation?.jobId || "") !== String(jobId || "") ||
         String(operation?.runToken || "") !== String(runToken || "")) {
       continue;
     }
     if (chunkIndex == null || Number(operation.chunkIndex) === Number(chunkIndex)) {
-      return true;
+      if (workType == null || String(operation.workType || "asr") === String(workType)) {
+        return true;
+      }
     }
   }
   return false;
@@ -6153,6 +5521,9 @@ async function commitOffscreenBrowserRecord(record, operation) {
   record.lastCommittedJob = committedJob;
   publishBrowserPreloadJobUi(record, committedJob);
   await attachBrowserJobVttIfReady(record, committedJob).catch(() => {});
+  if (snapshot.chunks.some(chunk => chunk?.entryType === "translation-group" && chunk?.stage === "asr_done")) {
+    await wakeOffscreenBrowserJob(record, "work-queued");
+  }
   return result;
 }
 
@@ -6222,17 +5593,6 @@ async function interruptBrowserJobForStaleOffscreenOperation(record, fence) {
   return { accepted: false, interrupted: true, terminal: true, error: message, job: cleanRecord.job };
 }
 
-async function drainBrowserTranslationQueue(record, options = {}) {
-  ensureBrowserChunkPipelineState(record);
-  while (record.browserTranslationQueue.items.length) {
-    const payload = record.browserTranslationQueue.items.shift();
-    if (!payload || isBrowserRunInactive(record, record?.runToken, options.operation || null)) {
-      break;
-    }
-    await processBrowserTranslationChunk(record, payload.chunk, payload.sourceSegments, options);
-  }
-}
-
 async function finalizeOffscreenBrowserJob(message = {}) {
   await browserJobRecoveryPromise;
   let fence = await validateOffscreenExecutionFence(message);
@@ -6278,16 +5638,36 @@ async function finalizeOffscreenBrowserJob(message = {}) {
   const operation = createOffscreenBrowserOperation(record, fence);
   offscreenBrowserFinalizationOperations.set(operationKey, operation);
   try {
+  const missingRequiredAudio = browserMissingRequiredRecognitionAudioTargets(record);
+  if (missingRequiredAudio.length) {
+    const label = missingRequiredAudio.map(index => index + 1).join("、");
+    const error = `要继续识别的音频分段不完整（${label}），任务已中断；请重新抽取。`;
+    record.offscreenExecution = false;
+    record.job.status = "interrupted";
+    record.job.stage = "interrupted";
+    record.job.error = error;
+    record.job.translation.status = "interrupted";
+    const committed = await commitOffscreenBrowserRecord(record, operation);
+    if (!committed.applied) {
+      return offscreenCommitFailureResponse(committed);
+    }
+    return { accepted: false, interrupted: true, terminal: true, error, job: record.job };
+  }
   if ((record.audioChunks || []).some(chunk => !chunk.asrCompleted)) {
     return { accepted: true, inProgress: true };
   }
-  if (record.pipeline !== "funasr" && record.job?.pipeline !== "funasr") {
+  const funAsr = record.pipeline === "funasr" || record.job?.pipeline === "funasr";
+  if (!funAsr) {
     closeAllBrowserTranslationGroups(record);
-    await drainBrowserTranslationQueue(record, {
-      operation,
-      runToken: operation.runToken,
-      signal: operation.controller.signal
-    });
+  }
+  const hasPendingTranslation = Boolean(record.browserTranslationQueue?.items?.length) ||
+    (record.job.translation?.chunkStatuses || []).some(status => String(status?.stage || "") === "asr_done");
+  if (hasPendingTranslation) {
+    const prepared = await commitOffscreenBrowserRecord(record, operation);
+    if (!prepared.applied) {
+      return offscreenCommitFailureResponse(prepared);
+    }
+    return { accepted: true, inProgress: true, workPrepared: true };
   }
   if (!await isBrowserExecutionOperationActive(record, operation.runToken, operation)) {
     return { accepted: false, stale: true, reason: "stale-execution" };
@@ -6328,6 +5708,23 @@ async function finalizeOffscreenBrowserJob(message = {}) {
     }
     disposeOffscreenBrowserOperation(record, operation);
   }
+}
+
+function browserMissingRequiredRecognitionAudioTargets(record) {
+  const funAsr = record?.pipeline === "funasr" || record?.job?.pipeline === "funasr";
+  const missing = [];
+  for (const [fallbackIndex, status] of (record?.job?.translation?.chunkStatuses || []).entries()) {
+    if (status?.asrRequired !== true) continue;
+    const index = Number(status?.index ?? fallbackIndex);
+    if (!Number.isFinite(index)) continue;
+    const expected = browserExpectedAudioChunkIndexes(record, index, funAsr);
+    const current = new Set(browserAsrRerunAudioChunksForTarget(record, index, funAsr)
+      .map(chunk => Number(chunk?.index)));
+    if (!expected.length || expected.some(audioIndex => !current.has(audioIndex))) {
+      missing.push(index);
+    }
+  }
+  return [...new Set(missing)].sort((left, right) => left - right);
 }
 
 async function failOffscreenBrowserJob(message = {}) {
@@ -6406,6 +5803,18 @@ async function observeBrowserJobInOffscreen(record) {
   return sendOffscreenTaskRuntimeCommand(FuguangTaskRuntimeProtocol.MESSAGE.OBSERVE_JOB, {
     snapshot: createBrowserJobLedgerSnapshot(record)
   });
+}
+
+async function wakeOffscreenBrowserJob(record, reason = "work-available") {
+  if (!record?.offscreenExecution || !record?.job?.id || !record.runToken ||
+      typeof chrome.runtime?.connect !== "function") {
+    return { accepted: false, reason: "inactive-run" };
+  }
+  return sendOffscreenTaskRuntimeCommand(FuguangTaskRuntimeProtocol.MESSAGE.WAKE_JOB, {
+    jobId: record.job.id,
+    runToken: record.runToken,
+    reason: String(reason || "work-available")
+  }, 2000).catch(() => ({ accepted: false, reason: "wake-delivery-failed" }));
 }
 
 async function sendOffscreenTaskRuntimeCommand(type, payload = {}, timeoutMs = 5000) {
@@ -6597,9 +6006,49 @@ function browserPreloadJobForRead(record) {
     return null;
   }
   if ((record.offscreenMirrorSuppressionCount || record.staleOffscreenOperationDetected) && record.lastCommittedJob) {
-    return cloneBrowserJobState(record.lastCommittedJob);
+    return createLiveBrowserJobReadView(record);
   }
   return cloneBrowserJobState(record.job);
+}
+
+function createLiveBrowserJobReadView(record) {
+  const committed = cloneBrowserJobState(record.lastCommittedJob || record.job);
+  const live = record.job || {};
+  const liveTranslation = live.translation || {};
+  const durableTranslation = committed.translation || {};
+  const liveTranslationFields = [
+    "status",
+    "stage",
+    "chunksDone",
+    "done",
+    "chunksFailed",
+    "failed",
+    "chunksAsrPartialFailed",
+    "chunksAsr",
+    "asrRunning",
+    "chunksTranslating",
+    "translationRunning",
+    "chunkStatuses"
+  ];
+  committed.status = live.status;
+  committed.stage = live.stage;
+  committed.error = live.error;
+  committed.updatedAt = live.updatedAt;
+  committed.progress = cloneBrowserJobState(live.progress);
+  committed.extract = {
+    ...(committed.extract || {}),
+    status: live.extract?.status,
+    stage: live.extract?.stage,
+    progress: live.extract?.progress,
+    elapsedSeconds: live.extract?.elapsedSeconds
+  };
+  committed.translation = { ...durableTranslation };
+  for (const field of liveTranslationFields) {
+    if (Object.prototype.hasOwnProperty.call(liveTranslation, field)) {
+      committed.translation[field] = cloneBrowserJobState(liveTranslation[field]);
+    }
+  }
+  return committed;
 }
 
 function isBrowserRunInactive(record, runToken, operation = null) {
@@ -6722,29 +6171,6 @@ function normalizeBrowserAsrUploadChunkSeconds(value) {
   return Math.max(10, Math.min(BROWSER_ASR_MAX_UPLOAD_CHUNK_SECONDS, Math.floor(seconds)));
 }
 
-function browserAsrMaxUploadBytes(asrConfig = {}) {
-  const directBytes = Number(asrConfig?.maxUploadBytes || asrConfig?.maxFileBytes || 0);
-  if (Number.isFinite(directBytes) && directBytes > 0) {
-    return Math.floor(directBytes);
-  }
-  const mb = Number(asrConfig?.maxUploadMb || asrConfig?.maxFileSizeMb || 0);
-  if (Number.isFinite(mb) && mb > 0) {
-    return Math.floor(mb * 1024 * 1024);
-  }
-  return BROWSER_ASR_MAX_UPLOAD_BYTES;
-}
-
-function formatBytes(bytes) {
-  const value = Number(bytes) || 0;
-  if (value >= 1024 * 1024) {
-    return `${Math.round((value / 1024 / 1024) * 10) / 10} MB`;
-  }
-  if (value >= 1024) {
-    return `${Math.round((value / 1024) * 10) / 10} KB`;
-  }
-  return `${Math.round(value)} B`;
-}
-
 function browserTranslationSegmentSeconds(record) {
   const seconds = Number(record?.modelConfig?.chunkSeconds || DEFAULT_MODEL_SETTINGS.chunkMinutes * 60);
   return Number.isFinite(seconds) && seconds > 0 ? seconds : DEFAULT_MODEL_SETTINGS.chunkMinutes * 60;
@@ -6753,6 +6179,11 @@ function browserTranslationSegmentSeconds(record) {
 function browserTranslationBatchWorkers(record) {
   const configuredWorkers = Number(record?.modelConfig?.workers || DEFAULT_MODEL_SETTINGS.translationWorkers);
   return Math.max(1, Math.min(2, Number.isFinite(configuredWorkers) ? Math.floor(configuredWorkers) : 1));
+}
+
+function browserTranslationProviderConcurrency(record) {
+  const configuredWorkers = Number(record?.modelConfig?.workers || DEFAULT_MODEL_SETTINGS.translationWorkers);
+  return Math.max(1, Math.min(8, Number.isFinite(configuredWorkers) ? Math.floor(configuredWorkers) : 1));
 }
 
 function browserTranslationSplitWorkers(record) {
@@ -6809,66 +6240,189 @@ async function rerunAsrPreload(tabId, chunkIndexes = [], options = {}) {
 }
 
 async function rerunBrowserAsrFromAudio(record, chunkIndexes = []) {
+  const rerunTarget = captureBrowserAsrRerunAudioTarget(record, chunkIndexes);
+  await verifyBrowserRecordAudioCache(record, { persist: true });
   if (record?.job?.audioCacheRemoved) {
     throw new Error("当前任务的音频缓存已清除，不能重新 ASR。请重新抽取。");
   }
   if (!Array.isArray(record?.audioChunks) || !record.audioChunks.length) {
     throw new Error("没有可复用的音频缓存，不能重新 ASR。请重新抽取。");
   }
-  const indexes = collectBrowserAsrRerunIndexes(record, chunkIndexes);
+  const missingIndexes = missingBrowserAsrRerunAudioTargets(record, rerunTarget);
+  if (missingIndexes.length) {
+    const label = missingIndexes.map(index => index + 1).join("、");
+    throw new Error(rerunTarget.funAsr
+      ? `Fun-ASR 任务没有完整保留要重新识别的音频分段（${label}），请重新抽取。`
+      : `浏览器内任务没有完整保留要重新识别的音频分组（${label}），请重新抽取。`);
+  }
+  const indexes = rerunTarget.indexes;
   if (!indexes.length) {
     throw new Error("没有匹配到可重新 ASR 的音频分段。");
   }
-  const isFunAsr = record.pipeline === "funasr" || record.job?.pipeline === "funasr";
-  const runToken = await beginBrowserJobAttempt(record, "retrying");
+  await beginBrowserJobAttempt(record, "retrying", { asrIndexes: indexes });
   record.job.subtitleCleared = false;
-  resetBrowserRecognitionResults(record, indexes);
   publishBrowserSubtitle(record);
   publishBrowserPreloadJob(record);
-  if (isFunAsr) {
-    const chunksByIndex = new Map(record.audioChunks.map(chunk => [Number(chunk.index), chunk]));
-    const chunks = indexes.map(index => chunksByIndex.get(index)).filter(Boolean);
-    if (!chunks.length) {
-      throw new Error("Fun-ASR 任务没有保留可重新识别的音频分段，请重新抽取。");
+  return startQueuedBrowserWorkInOffscreen(record);
+}
+
+function captureBrowserAsrRerunAudioTarget(record, chunkIndexes = []) {
+  synchronizeBrowserExpectedAudioChunks(record);
+  const funAsr = record?.pipeline === "funasr" || record?.job?.pipeline === "funasr";
+  const requested = new Set(Array.isArray(chunkIndexes) ? chunkIndexes.map(Number).filter(Number.isFinite) : []);
+  const indexes = (requested.size ? [...requested] : collectBrowserAsrRerunIndexes(record))
+    .sort((left, right) => left - right);
+  const expectedAudioChunkIndexesByIndex = new Map(indexes.map(index => [
+    index,
+    browserExpectedAudioChunkIndexes(record, index, funAsr)
+  ]));
+  return { funAsr, indexes, expectedAudioChunkIndexesByIndex };
+}
+
+function synchronizeBrowserExpectedAudioChunks(record) {
+  const funAsr = record?.pipeline === "funasr" || record?.job?.pipeline === "funasr";
+  for (const chunk of record?.audioChunks || []) {
+    const groupIndex = funAsr
+      ? Number(chunk?.index)
+      : browserRecognitionGroupIndex(record, chunk);
+    rememberBrowserExpectedAudioChunk(record, groupIndex, Number(chunk?.index));
+  }
+}
+
+function missingBrowserAsrRerunAudioTargets(record, target) {
+  const missing = [];
+  for (const index of target?.indexes || []) {
+    const expected = target.expectedAudioChunkIndexesByIndex?.get(index) || [];
+    const current = new Set(browserAsrRerunAudioChunksForTarget(record, index, target.funAsr)
+      .map(chunk => Number(chunk?.index)));
+    if (!expected.length || expected.some(audioIndex => !current.has(audioIndex))) {
+      missing.push(index);
     }
-    const labelSpeakers = dashScopeFunAsrShouldDiarize({
-      chunksTotal: record.audioChunks.length,
-      duration: pickFinite(record.job.extract?.duration, record.metadata?.duration)
-    });
-    await runPool(chunks, browserFunAsrConcurrency(record), async chunk => {
-      await processBrowserFunAsrChunk(record, chunk, { labelSpeakers });
-    });
-  } else {
-    await runPool(indexes, Math.max(record.modelConfig.asrWorkers || 1, 1), async index => {
-      await retryBrowserAsrGroup(record, index);
-    });
   }
-  if (isBrowserRunInactive(record, runToken)) {
-    return { preload: record.job.status, job: record.job };
+  return missing;
+}
+
+function browserAsrRerunAudioChunksForTarget(record, index, funAsr) {
+  const target = Number(index);
+  return (record?.audioChunks || []).filter(chunk => (
+    funAsr
+      ? Number(chunk?.index) === target
+      : browserRecognitionGroupIndex(record, chunk) === target
+  ));
+}
+
+function browserExpectedAudioChunkIndexes(record, groupIndex, funAsr) {
+  const expected = new Set();
+  const status = record?.job?.translation?.chunkStatuses?.[Number(groupIndex)] || {};
+  for (const index of Array.isArray(status.expectedAudioChunkIndexes) ? status.expectedAudioChunkIndexes : []) {
+    const normalized = Number(index);
+    if (Number.isFinite(normalized)) expected.add(normalized);
   }
-  publishBrowserSubtitle(record);
-  finalizeBrowserCompletionState(record);
-  return { preload: record.job.status, job: record.job, message: "已提交重新 ASR。" };
+  if (!funAsr) {
+    const group = record?.browserTranslationGroups?.get?.(Number(groupIndex));
+    for (const index of group?.chunkIndexes || []) {
+      const normalized = Number(index);
+      if (Number.isFinite(normalized)) expected.add(normalized);
+    }
+  }
+  for (const chunk of browserAsrRerunAudioChunksForTarget(record, groupIndex, funAsr)) {
+    const normalized = Number(chunk?.index);
+    if (Number.isFinite(normalized)) expected.add(normalized);
+  }
+  return [...expected].sort((left, right) => left - right);
 }
 
 function collectBrowserAsrRerunIndexes(record, chunkIndexes = []) {
   const requested = new Set(Array.isArray(chunkIndexes) ? chunkIndexes.map(Number).filter(Number.isFinite) : []);
   const isFunAsr = record?.pipeline === "funasr" || record?.job?.pipeline === "funasr";
-  const indexes = (record?.audioChunks || [])
-    .map(chunk => isFunAsr ? Number(chunk.index) : browserTranslationGroupIndex(record, chunk))
-    .filter(Number.isFinite)
+  const audioIndexes = (record?.audioChunks || [])
+    .map(chunk => isFunAsr ? Number(chunk.index) : browserRecognitionGroupIndex(record, chunk))
+    .filter(Number.isFinite);
+  const durableIndexes = (record?.job?.translation?.chunkStatuses || [])
+    .flatMap((status, index) => (
+      Array.isArray(status?.expectedAudioChunkIndexes) && status.expectedAudioChunkIndexes.length
+        ? [Number(status?.index ?? index)]
+        : []
+    ))
+    .filter(Number.isFinite);
+  const sourceIndexes = [...(record?.sourceSegmentsByChunk?.keys?.() || [])].map(Number).filter(Number.isFinite);
+  const indexes = [...audioIndexes, ...durableIndexes, ...sourceIndexes]
     .filter(index => !requested.size || requested.has(index));
   return [...new Set(indexes)].sort((left, right) => left - right);
 }
 
-function resetBrowserRecognitionResults(record, indexes) {
+function prepareBrowserRecognitionAttemptSnapshot(record, indexes) {
+  const targetIndexes = new Set(indexes.map(Number));
+  const previousTranslation = cloneBrowserJobState(record.job.translation);
+  const chunkSnapshots = (record.audioChunks || [])
+    .filter(chunk => targetIndexes.has(
+      record.pipeline === "funasr" || record.job?.pipeline === "funasr"
+        ? Number(chunk.index)
+        : browserRecognitionGroupIndex(record, chunk)
+    ))
+    .map(chunk => ({ chunk, snapshot: { ...chunk } }));
+  const groupSnapshots = [...(record.browserTranslationGroups?.entries?.() || [])]
+    .filter(([index]) => targetIndexes.has(Number(index)))
+    .map(([, group]) => ({
+      group,
+      completed: group.completed,
+      failed: group.failed,
+      empty: group.empty,
+      sourceSegments: group.sourceSegments,
+      errors: group.errors,
+      translationQueued: group.translationQueued
+    }));
+  resetBrowserRecognitionResults(record, indexes, { publish: false });
+  let restored = false;
+  return () => {
+    if (restored) return;
+    restored = true;
+    record.job.translation = previousTranslation;
+    for (const { chunk, snapshot } of chunkSnapshots) {
+      for (const key of Object.keys(chunk)) delete chunk[key];
+      Object.assign(chunk, snapshot);
+    }
+    for (const snapshot of groupSnapshots) {
+      Object.assign(snapshot.group, {
+        completed: snapshot.completed,
+        failed: snapshot.failed,
+        empty: snapshot.empty,
+        sourceSegments: snapshot.sourceSegments,
+        errors: snapshot.errors,
+        translationQueued: snapshot.translationQueued
+      });
+    }
+  };
+}
+
+function resetBrowserRecognitionResults(record, indexes, options = {}) {
+  const targetIndexes = new Set(indexes.map(Number));
+  for (const chunk of record.audioChunks || []) {
+    const groupIndex = record.pipeline === "funasr" || record.job?.pipeline === "funasr"
+      ? Number(chunk.index)
+      : browserRecognitionGroupIndex(record, chunk);
+    if (!targetIndexes.has(groupIndex)) continue;
+    chunk.asrCompleted = false;
+    chunk.asrFailed = false;
+    chunk.asrError = "";
+    chunk.asrErrorStatus = 0;
+    chunk.asrErrorCode = "";
+    chunk.asrDeliveryAmbiguous = false;
+    chunk.asrStage = "";
+    chunk.asrExecutionMode = "";
+    chunk.sourceSegments = [];
+  }
   for (const index of indexes) {
-    record.sourceSegmentsByChunk?.delete(index);
-    record.translatedSegmentsByChunk?.delete(index);
+    const group = record.browserTranslationGroups?.get?.(Number(index));
+    if (group) {
+      group.completed = 0; group.failed = 0; group.empty = 0;
+      group.sourceSegments = []; group.errors = []; group.translationQueued = false;
+    }
     updateChunkStatus(record, index, {
       stage: "queued",
       status: "排队",
       attempts: 0,
+      asrRequired: true,
       sourceCount: 0,
       translatedCount: 0,
       asrFailures: 0,
@@ -6876,7 +6430,7 @@ function resetBrowserRecognitionResults(record, indexes) {
       translationFailures: 0,
       error: "",
       message: "等待重新 ASR"
-    });
+    }, options);
   }
 }
 
@@ -6909,6 +6463,10 @@ async function retranslateCachedTranscript(tabId, transcript, metadata = {}, opt
     throw new Error("本地字幕缓存没有可复用的 ASR 原文，不能只重翻译。");
   }
   const modelConfig = await getModelConfig();
+  const previousTranslatedSegments = normalizeBrowserSourceSegmentsForTranslation(
+    Array.isArray(transcript?.translated) ? transcript.translated : [],
+    0
+  );
   if (options.targetLanguage) {
     modelConfig.targetLanguage = normalizeTargetLanguage(options.targetLanguage, modelConfig.targetLanguage);
   }
@@ -6973,7 +6531,9 @@ async function retranslateCachedTranscript(tabId, transcript, metadata = {}, opt
     cancelled: false,
     abortController: new AbortController(),
     sourceSegmentsByChunk: new Map([[0, sourceSegments]]),
-    translatedSegmentsByChunk: new Map(),
+    translatedSegmentsByChunk: previousTranslatedSegments.length
+      ? new Map([[0, previousTranslatedSegments]])
+      : new Map(),
     browserAsrDiagnosticsByChunk: new Map(),
     audioChunks: [],
     pipeline: "cached-transcript"
@@ -6991,7 +6551,7 @@ function transcriptSourceSegmentsForTranslation(transcript) {
 async function refreshBrowserTranslationModelConfig(record, options = {}) {
   const current = await getModelConfig();
   const previousExecutionSpec = record.modelConfig?.executionSpec || {};
-  const replacingUnavailableConfig = Boolean(record.recoveryBlocked);
+  const replacingUnavailableConfig = Boolean(record.recoveryBlocked || record.presentationOnly);
   const targetLanguage = options.targetLanguage
     ? normalizeTargetLanguage(options.targetLanguage, current.targetLanguage)
     : current.targetLanguage;
@@ -7044,104 +6604,82 @@ async function retryBrowserFailedPreload(record, chunkIndexes = []) {
   if (!retryIndexes.length) {
     throw new Error("当前任务没有可继续处理的识别分段。");
   }
+  const retryTarget = captureBrowserAsrRerunAudioTarget(record, retryIndexes);
+  await verifyBrowserRecordAudioCache(record, { persist: true });
   const sourceRetryIndexes = retryIndexes.filter(index => {
     const status = statuses[index] || {};
-    return reusableBrowserSourceSegments(record, index).length && chunkStatusAsrFailureCount(status) <= 0;
+    return browserRetrySourceHasCompletedRecognition(record, index, status);
   });
   const asrRetryIndexes = retryIndexes.filter(index => !sourceRetryIndexes.includes(index));
-  const asrRetryHasAudio = asrRetryIndexes.every(index => browserAudioChunksForTranslationGroup(record, index).length);
-  if (asrRetryIndexes.length && !asrRetryHasAudio) {
+  const missingIndexes = missingBrowserAsrRerunAudioTargets(record, {
+    ...retryTarget,
+    indexes: asrRetryIndexes
+  });
+  if (missingIndexes.length) {
     throw new Error("浏览器内任务没有保留可继续识别的音频分段，请重新开始任务。");
   }
-  const runToken = await beginBrowserJobAttempt(record, "retrying");
-  publishBrowserPreloadJob(record);
+  await beginBrowserJobAttempt(record, "retrying", { asrIndexes: asrRetryIndexes });
   if (sourceRetryIndexes.length) {
-    await runPool(sourceRetryIndexes, Math.max(record.modelConfig.workers || 1, 1), async index => {
-      await translateBrowserChunkFromSource(record, index, reusableBrowserSourceSegments(record, index), "重翻译，不重新识别", {
-        replaceExisting: true
-      });
-    });
+    queueBrowserTranslationIndexesForOffscreen(record, sourceRetryIndexes);
   }
-  await runPool(asrRetryIndexes, Math.max(record.modelConfig.asrWorkers, 1), async index => {
-    await retryBrowserAsrGroup(record, index);
-  });
-  if (isBrowserRunInactive(record, runToken)) {
-    return { preload: record.job.status, job: record.job };
-  }
-  publishBrowserSubtitle(record);
-  const completion = finalizeBrowserCompletionState(record);
-  if (browserCompletionAllowsAudioRelease(completion)) {
-    await releaseBrowserAudioChunks(record);
-  }
-  return { preload: record.job.status, job: record.job };
+  publishBrowserPreloadJob(record);
+  return startQueuedBrowserWorkInOffscreen(record);
 }
 
 async function retryBrowserFunAsrFailedPreload(record, chunkIndexes = []) {
-  const { translationIndexes, asrIndexes } = browserFunAsrRetryPlan(record, chunkIndexes);
-  if (!translationIndexes.length && !asrIndexes.length) {
+  const initialPlan = browserFunAsrRetryPlan(record, chunkIndexes);
+  if (!initialPlan.translationIndexes.length && !initialPlan.asrIndexes.length) {
     throw new Error("当前 Fun-ASR 任务没有可继续处理的识别分段。");
   }
-  const chunksByIndex = new Map((record.audioChunks || []).map(chunk => [Number(chunk.index), chunk]));
-  const chunks = asrIndexes.map(index => chunksByIndex.get(index)).filter(Boolean);
-  if (asrIndexes.length && !chunks.length) {
-    throw new Error("Fun-ASR 任务没有保留可继续识别的音频分段，请重新开始任务。");
+  // A default retry plan may list only explicitly failed chunks and omit a
+  // different chunk whose already-submitted remote task is still pending. Scan
+  // the whole run before ever rotating runToken, otherwise that remote task
+  // would become unreachable and the next attempt could submit it again.
+  const hasResumableRemoteTask = (record.audioChunks || []).some(chunk => (
+    !chunk.asrCompleted &&
+    chunk.asrExecutionMode === "offscreen-durable-v1" &&
+    chunk.asrStage === "funasr_remote_pending"
+  ));
+  if (hasResumableRemoteTask) {
+    record.job.status = "queued";
+    record.job.stage = "asr";
+    record.job.error = "";
+    publishBrowserPreloadJob(record);
+    return startQueuedBrowserWorkInOffscreen(record, { resumeExisting: true });
   }
-  const runToken = await beginBrowserJobAttempt(record, asrIndexes.length ? "retrying" : "retry_translation");
-  publishBrowserPreloadJob(record);
-  if (translationIndexes.length) {
-    await runPool(translationIndexes, Math.max(record.modelConfig.workers || 1, 1), async index => {
-      await translateBrowserChunkFromSource(record, index, reusableBrowserSourceSegments(record, index), "只重翻译，不重新识别", {
-        replaceExisting: true
-      });
-    });
-  }
-  const labelSpeakers = dashScopeFunAsrShouldDiarize({
-    chunksTotal: record.audioChunks.length,
-    duration: pickFinite(record.job.extract?.duration, record.metadata?.duration)
+  const retryTarget = captureBrowserAsrRerunAudioTarget(record, [
+    ...initialPlan.translationIndexes,
+    ...initialPlan.asrIndexes
+  ]);
+  await verifyBrowserRecordAudioCache(record, { persist: true });
+  const { translationIndexes, asrIndexes } = browserFunAsrRetryPlan(record, chunkIndexes);
+  const missingIndexes = missingBrowserAsrRerunAudioTargets(record, {
+    ...retryTarget,
+    indexes: asrIndexes
   });
-  if (chunks.length) {
-    await runPool(chunks, browserFunAsrConcurrency(record), async chunk => {
-      await processBrowserFunAsrChunk(record, chunk, { labelSpeakers });
-    });
+  if (missingIndexes.length) {
+    throw new Error(`Fun-ASR 任务没有保留可继续识别的音频分段（${missingIndexes.map(index => index + 1).join("、")}），请重新开始任务。`);
   }
-  if (isBrowserRunInactive(record, runToken)) {
-    return { preload: record.job.status, job: record.job };
+  await beginBrowserJobAttempt(record, asrIndexes.length ? "retrying" : "retry_translation", { asrIndexes });
+  if (translationIndexes.length) {
+    queueBrowserTranslationIndexesForOffscreen(record, translationIndexes);
   }
-  publishBrowserSubtitle(record);
-  finalizeBrowserCompletionState(record);
-  return { preload: record.job.status, job: record.job };
+  publishBrowserPreloadJob(record);
+  return startQueuedBrowserWorkInOffscreen(record);
 }
 
 function browserFunAsrRetryPlan(record, chunkIndexes = []) {
   const requested = new Set(Array.isArray(chunkIndexes) ? chunkIndexes.map(Number).filter(Number.isFinite) : []);
   const statuses = record.job.translation?.chunkStatuses || [];
   const requestedMatches = index => !requested.size || requested.has(Number(index));
-  const failedStatuses = statuses
-    .filter(status => status?.stage === "failed" && requestedMatches(status.index));
-  let indexes = failedStatuses
-    .map(status => Number(status.index))
-    .filter(Number.isFinite);
-  if (!indexes.length) {
-    const sourceIndexes = [...(record.sourceSegmentsByChunk?.keys?.() || [])]
-      .map(Number)
-      .filter(index => Number.isFinite(index) && requestedMatches(index))
-      .filter(index => {
-        const status = statuses[index] || {};
-        const translated = record.translatedSegmentsByChunk?.get?.(index);
-        return status.stage !== "completed" || browserTranslationFailures(translated).length > 0 || !Array.isArray(translated);
-      });
-    indexes = sourceIndexes.length
-      ? sourceIndexes
-      : (record.audioChunks || [])
-          .map(chunk => Number(chunk.index))
-          .filter(index => Number.isFinite(index) && requestedMatches(index));
-  }
+  const indexes = browserRetryCandidateIndexes(record, requested);
   const uniqueIndexes = [...new Set(indexes)].sort((left, right) => left - right);
   const translationIndexes = [];
   const asrIndexes = [];
   for (const index of uniqueIndexes) {
     const status = statuses[index] || {};
-    if (reusableBrowserSourceSegments(record, index).length && chunkStatusAsrFailureCount(status) <= 0) {
+    const chunk = (record.audioChunks || []).find(item => Number(item?.index) === Number(index));
+    if (browserRetrySourceHasCompletedRecognition(record, index, status, chunk)) {
       translationIndexes.push(index);
     } else {
       asrIndexes.push(index);
@@ -7151,35 +6689,39 @@ function browserFunAsrRetryPlan(record, chunkIndexes = []) {
 }
 
 function collectBrowserRetryIndexes(record, requested) {
-  const requestedIndexes = requested instanceof Set ? requested : new Set();
+  return browserRetryCandidateIndexes(record, requested instanceof Set ? requested : new Set());
+}
+
+function browserRetryCandidateIndexes(record, requestedIndexes = new Set()) {
   const statuses = record.job.translation?.chunkStatuses || [];
-  const failedIndexes = statuses
-    .filter(status => status?.stage === "failed" && (!requestedIndexes.size || requestedIndexes.has(Number(status.index))))
-    .map(status => Number(status.index))
-    .filter(Number.isFinite);
-  if (failedIndexes.length) {
-    return [...new Set(failedIndexes)].sort((left, right) => left - right);
-  }
+  const requestedMatches = index => !requestedIndexes.size || requestedIndexes.has(Number(index));
+  const statusIndexes = statuses.flatMap((status, fallbackIndex) => {
+    if (!status) return [];
+    const index = Number(status.index ?? fallbackIndex);
+    if (!Number.isFinite(index) || !requestedMatches(index)) return [];
+    const translated = record.translatedSegmentsByChunk?.get?.(index);
+    const translationComplete = status.stage === "completed" &&
+      Array.isArray(translated) && browserTranslationFailures(translated).length === 0;
+    return translationComplete ? [] : [index];
+  });
   const sourceIndexes = [...(record.sourceSegmentsByChunk?.keys?.() || [])]
     .map(Number)
-    .filter(Number.isFinite);
+    .filter(index => Number.isFinite(index) && requestedMatches(index));
   const audioIndexes = (record.audioChunks || [])
-    .map(chunk => browserTranslationGroupIndex(record, chunk))
-    .filter(Number.isFinite);
-  const indexes = [...new Set([...sourceIndexes, ...audioIndexes])]
-    .filter(index => !requestedIndexes.size || requestedIndexes.has(index))
+    .map(chunk => (record.pipeline === "funasr" || record.job?.pipeline === "funasr")
+      ? Number(chunk?.index)
+      : browserRecognitionGroupIndex(record, chunk))
+    .filter(index => Number.isFinite(index) && requestedMatches(index));
+  return [...new Set([...statusIndexes, ...sourceIndexes, ...audioIndexes])]
     .filter(index => {
       const status = statuses[index];
       if (!status) {
         return true;
       }
-      if (status.stage === "completed" && reusableBrowserSourceSegments(record, index).length && chunkStatusAsrFailureCount(status) <= 0) {
-        return false;
-      }
-      return status.stage !== "completed";
+      const translated = record.translatedSegmentsByChunk?.get?.(index);
+      return status.stage !== "completed" || !Array.isArray(translated) || browserTranslationFailures(translated).length > 0;
     })
     .sort((left, right) => left - right);
-  return indexes;
 }
 
 function browserAudioChunksForTranslationGroup(record, groupIndex) {
@@ -7197,6 +6739,25 @@ function browserAudioChunksForTranslationGroup(record, groupIndex) {
       return browserTranslationGroupIndex(record, chunk) === target;
     })
     .sort((left, right) => left.start - right.start || left.index - right.index);
+}
+
+function browserTranslationGroupAsrCompleted(record, groupIndex) {
+  const chunks = browserAudioChunksForTranslationGroup(record, groupIndex);
+  return chunks.length > 0 && chunks.every(chunk => chunk?.asrCompleted === true);
+}
+
+function browserRetrySourceHasCompletedRecognition(record, index, status = {}, funAsrChunk = null) {
+  if (!reusableBrowserSourceSegments(record, index).length ||
+      chunkStatusAsrFailureCount(status) > 0 || status?.asrRequired === true) {
+    return false;
+  }
+  if (Number(status?.sourceCount || 0) > 0) {
+    return true;
+  }
+  if (funAsrChunk) {
+    return funAsrChunk.asrCompleted === true;
+  }
+  return browserTranslationGroupAsrCompleted(record, index);
 }
 
 async function retryBrowserAsrGroup(record, groupIndex) {
@@ -7236,13 +6797,17 @@ async function retryBrowserAsrGroup(record, groupIndex) {
         runToken: record.runToken,
         onDiagnostics: diagnostics => recordBrowserAsrChunkDiagnostics(record, chunk, diagnostics)
       });
+      const recoveryWarning = browserAsrResultWarning(chunkSegments);
+      if (recoveryWarning) {
+        errors.push(recoveryWarning.message || String(recoveryWarning));
+      }
       if (chunkSegments.length) {
         sourceSegments.push(...chunkSegments);
       } else {
         empty += 1;
       }
     } catch (error) {
-      if (isBrowserRunInactive(record, runToken) || isBrowserAbortError(error)) {
+      if (isBrowserRunInactive(record, runToken) || isBrowserAbortError(error, record.abortController?.signal)) {
         return;
       }
       errors.push(error.message || String(error));
@@ -7294,7 +6859,6 @@ async function retryBrowserAsrGroup(record, groupIndex) {
 }
 
 async function retryBrowserTranslationOnly(record, chunkIndexes = [], options = {}) {
-  const runToken = record?.runToken;
   const statuses = record.job.translation?.chunkStatuses || [];
   const requested = new Set(Array.isArray(chunkIndexes) ? chunkIndexes.map(Number) : []);
   let indexes = [...record.sourceSegmentsByChunk.keys()]
@@ -7319,26 +6883,51 @@ async function retryBrowserTranslationOnly(record, chunkIndexes = [], options = 
   record.job.status = "running";
   record.job.stage = "retry_translation";
   record.job.subtitleCleared = false;
-  const fallbackTranslationsByIndex = new Map(
-    indexes.map(index => [index, cloneBrowserSegments(record.translatedSegmentsByChunk?.get(index))])
-  );
-  if (options.resetAttempts) {
-    resetBrowserTranslationResults(record, indexes);
-    publishBrowserSubtitle(record);
-  }
+  queueBrowserTranslationIndexesForOffscreen(record, indexes, options);
   publishBrowserPreloadJob(record);
-  await runPool(indexes, Math.max(record.modelConfig.workers || 1, 1), async index => {
-    await translateBrowserChunkFromSource(record, index, reusableBrowserSourceSegments(record, index), "只重翻译，不重新识别", {
-      replaceExisting: true,
-      fallbackSegments: fallbackTranslationsByIndex.get(index) || []
+  return startQueuedBrowserWorkInOffscreen(record);
+}
+
+function queueBrowserTranslationIndexesForOffscreen(record, indexes, options = {}) {
+  const statuses = record.job.translation?.chunkStatuses || [];
+  for (const index of indexes) {
+    const sourceSegments = reusableBrowserSourceSegments(record, index);
+    const current = statuses[index] || {};
+    updateChunkStatus(record, index, {
+      stage: "asr_done",
+      status: "排队",
+      attempts: options.resetAttempts ? 0 : Math.max(0, Number(current.attempts || 0)),
+      sourceCount: sourceSegments.length,
+      translatedCount: cloneBrowserSegments(record.translatedSegmentsByChunk?.get(index)).length,
+      translationFailures: 0,
+      error: "",
+      message: "等待 offscreen 重新翻译"
     });
-  });
-  if (isBrowserRunInactive(record, runToken)) {
-    return { preload: record.job.status, job: record.job };
   }
-  publishBrowserSubtitle(record);
-  finalizeBrowserCompletionState(record);
-  return { preload: record.job.status, job: record.job };
+}
+
+async function startQueuedBrowserWorkInOffscreen(record, options = {}) {
+  const started = await startBrowserJobInOffscreen(record, {
+    resumeExisting: Boolean(options.resumeExisting)
+  });
+  if (started.status === "unavailable") {
+    record.offscreenExecution = false;
+    record.job.status = "interrupted";
+    record.job.stage = "interrupted";
+    record.job.error = "offscreen 翻译执行器不可用，已保留原文和已有译文，请重试。";
+    record.job.updatedAt = Date.now();
+    publishBrowserPreloadJob(record);
+    await flushBrowserJobMirror(record.job.id).catch(() => null);
+    throw new Error(record.job.error);
+  }
+  return {
+    preload: record.job.status,
+    job: record.job,
+    accepted: true,
+    offscreen: true,
+    duplicate: Boolean(started.duplicate),
+    pending: true
+  };
 }
 
 function resetBrowserTranslationResults(record, indexes = []) {
@@ -7398,6 +6987,7 @@ async function translateBrowserChunkFromSource(record, index, sourceSegments, me
       {
         batchWorkers: browserTranslationBatchWorkers(record),
         splitWorkers: browserTranslationSplitWorkers(record),
+        maxConcurrency: browserTranslationProviderConcurrency(record),
         signal: record.abortController?.signal,
         onProgress(progress) {
           if (isBrowserRunInactive(record, runToken)) {
@@ -7414,7 +7004,7 @@ async function translateBrowserChunkFromSource(record, index, sourceSegments, me
       }
     );
   } catch (error) {
-    if (isBrowserRunInactive(record, runToken) || isBrowserAbortError(error)) {
+    if (isBrowserRunInactive(record, runToken) || isBrowserAbortError(error, record.abortController?.signal)) {
       return;
     }
     const previous = fallbackSegments.length
@@ -7471,6 +7061,7 @@ function countFailedChunks(job) {
 }
 
 async function cancelPreload(tabId, jobId) {
+  await browserJobRecoveryPromise;
   const state = getState(tabId);
   const targetJobId = jobId || state.preloadJob?.id;
   if (!targetJobId) {
@@ -7486,10 +7077,14 @@ async function cancelPreload(tabId, jobId) {
     scheduleBrowserJobMirror(browserRecord);
     browserJobStore.markCancelRequested(targetJobId, cancelRunToken, cancelRequestedAt).catch(() => {});
     if (typeof chrome.runtime?.connect === "function") {
+      const funAsrCancelConfig = browserRecord.pipeline === "funasr" || browserRecord.job?.pipeline === "funasr"
+        ? browserFunAsrExecutionConfig(browserRecord.modelConfig?.asr || {})
+        : null;
       sendOffscreenTaskRuntimeCommand(FuguangTaskRuntimeProtocol.MESSAGE.CANCEL_JOB, {
         jobId: targetJobId,
         runToken: cancelRunToken,
-        requestedAt: cancelRequestedAt
+        requestedAt: cancelRequestedAt,
+        ...(funAsrCancelConfig ? { funAsrCancelConfig } : {})
       }).catch(() => {});
     }
     browserRecord.cancelled = true;
@@ -7501,11 +7096,22 @@ async function cancelPreload(tabId, jobId) {
       jobId: targetJobId,
       runToken: cancelRunToken
     }).catch(() => {});
-    browserRecord.job.status = "cancelled";
-    browserRecord.job.stage = "cancelled";
-    browserRecord.job.error = "任务已停止。";
-    await releaseBrowserAudioChunks(browserRecord);
-    await detachPreloadVtt(tabId);
+    const preserveExisting = Boolean(browserRecord.preserveExistingOnCancel || browserRecord.job.preserveExistingOnCancel) && Boolean(
+      browserRecord.sourceSegmentsByChunk?.size || browserRecord.translatedSegmentsByChunk?.size || browserRecord.job?.translation?.vttText
+    );
+    browserRecord.job.status = preserveExisting ? "interrupted" : "cancelled";
+    browserRecord.job.stage = preserveExisting ? "interrupted" : "cancelled";
+    const remoteCancellation = browserRecord.pipeline === "funasr" || browserRecord.job?.pipeline === "funasr"
+      ? await browserFunAsrRemoteCancellationSummary(targetJobId, cancelRunToken)
+      : { status: "none", message: "" };
+    browserRecord.job.remoteCancellationStatus = remoteCancellation.status;
+    browserRecord.job.error = remoteCancellation.message || (preserveExisting
+      ? "已停止本次重试，保留现有字幕和音频缓存。"
+      : "任务已停止。");
+    if (!preserveExisting) {
+      await releaseBrowserAudioChunks(browserRecord);
+      await detachPreloadVtt(tabId);
+    }
     publishBrowserPreloadJob(browserRecord);
     return { job: browserRecord.job };
   }
@@ -7521,6 +7127,200 @@ async function cancelPreload(tabId, jobId) {
   return { job };
 }
 
+async function preventFunAsrSubmitWhileRemoteCancellationUnresolvedForTabPage(
+  tabId,
+  pageUrl,
+  currentJob,
+  modelConfig = {},
+  selectedCandidate = null
+) {
+  if (!FuguangBrowserFunAsrProvider.isDashScopeFunAsrConfig(modelConfig?.asr || {})) {
+    return;
+  }
+  const checkedRuns = new Set();
+  const check = async (job, config) => {
+    const key = `${String(job?.id || "")}:${String(job?.runToken || "")}`;
+    if (!job?.id || !job?.runToken || checkedRuns.has(key)) {
+      return;
+    }
+    checkedRuns.add(key);
+    await preventFunAsrSubmitWhileRemoteCancellationUnresolved(job, config);
+  };
+  const selectedLineageKey = browserMediaLineageKey(selectedCandidate, pageUrl);
+  const currentRecord = browserPreloadJobs.get(String(currentJob?.id || ""));
+  const currentLineageKey = String(
+    currentRecord?.presentationBinding?.lineageKey ||
+    browserMediaLineageKey(
+      currentRecord?.selectedCandidate || currentRecord?.candidate || {
+        url: currentJob?.sourceUrl || currentJob?.source || "",
+        kind: currentJob?.kind || "",
+        ext: currentJob?.ext || ""
+      },
+      currentRecord?.metadata?.pageUrl || currentJob?.metadata?.pageUrl || pageUrl
+    )
+  );
+  if (!selectedLineageKey || !currentLineageKey || selectedLineageKey === currentLineageKey) {
+    await check(currentJob, currentRecord?.modelConfig || modelConfig);
+  }
+
+  let ledgers;
+  try {
+    ledgers = await browserJobStore.listJobs();
+  } catch {
+    throw new Error("无法核对上一次 FunASR 远端任务状态；为避免重复提交，本次识别未启动。请稍后重试。");
+  }
+  const matching = (Array.isArray(ledgers) ? ledgers : [])
+    .filter(ledger =>
+      Number(ledger?.tabId) === Number(tabId) &&
+      String(ledger?.pipeline || "") === "funasr" &&
+      Boolean(ledger?.cancelRequested) &&
+      browserPageIdentitiesMatch(ledger?.pageIdentity || "", pageUrl) &&
+      selectedLineageKey &&
+      browserLedgerMediaLineageKey(ledger) === selectedLineageKey
+    )
+    .sort((left, right) => Number(right.updatedAt || 0) - Number(left.updatedAt || 0));
+  for (const ledger of matching) {
+    const modelResolution = await resolveRecoveredModelConfig(ledger);
+    await check({
+      id: ledger.id,
+      runToken: ledger.runToken,
+      pipeline: ledger.pipeline,
+      cancelRequested: ledger.cancelRequested
+    }, modelResolution.modelConfig || {});
+  }
+}
+
+function createBrowserPresentationBinding(tabId, candidate = {}, pageUrl = "") {
+  const state = getState(tabId);
+  const candidateFrameId = optionalBrowserFrameId(candidate.frameId);
+  const stateFrameId = optionalBrowserFrameId(state.mediaFrameId);
+  const frameId = candidateFrameId ?? stateFrameId;
+  const documentId = normalizeDocumentId(
+    candidate.documentId ||
+    (frameId !== null && stateFrameId === frameId ? state.mediaDocumentId : "") ||
+    (frameId !== null && optionalBrowserFrameId(state.context?.frameId) === frameId ? state.context?.documentId : "")
+  );
+  const lineageKey = browserMediaLineageKey(candidate, pageUrl);
+  if (frameId === null && !documentId && !lineageKey) {
+    return null;
+  }
+  return { frameId, documentId, lineageKey };
+}
+
+function optionalBrowserFrameId(value) {
+  if (value === null || value === undefined || value === "") {
+    return null;
+  }
+  const frameId = Number(value);
+  return Number.isInteger(frameId) && frameId >= 0 ? frameId : null;
+}
+
+function browserMediaLineageKey(candidate = {}, pageUrl = "") {
+  const url = String(candidate?.url || candidate?.identity || candidate?.sourceUrl || "");
+  if (!url || typeof FuguangBrowserMediaCandidates.getMediaLineageKey !== "function") {
+    return "";
+  }
+  return String(FuguangBrowserMediaCandidates.getMediaLineageKey({
+    ...candidate,
+    url,
+    pageUrl: normalizeBrowserPageIdentity(pageUrl || candidate?.pageUrl || candidate?.origin || "")
+  }) || "");
+}
+
+function browserLedgerMediaLineageKey(ledger = {}) {
+  const persisted = String(ledger?.source?.lineageKey || "");
+  if (persisted.startsWith("media:v2:")) {
+    return persisted;
+  }
+  const migrated = browserMediaLineageKey({
+    url: ledger?.source?.identity || "",
+    kind: ledger?.source?.kind || "",
+    ext: ledger?.source?.ext || ""
+  }, ledger?.pageIdentity || "");
+  return migrated || persisted;
+}
+
+async function preventFunAsrSubmitWhileRemoteCancellationUnresolved(job, modelConfig = {}) {
+  if (!job?.id || !job?.runToken || String(job.pipeline || "") !== "funasr" || !job.cancelRequested) {
+    return;
+  }
+  const summary = await browserFunAsrRemoteCancellationSummary(job.id, job.runToken, { failClosed: true });
+  if (summary.status !== "pending") {
+    return;
+  }
+  const funAsrConfig = browserFunAsrExecutionConfig(modelConfig?.asr || {});
+  if (funAsrConfig && typeof chrome.runtime?.connect === "function") {
+    sendOffscreenTaskRuntimeCommand(FuguangTaskRuntimeProtocol.MESSAGE.CANCEL_JOB, {
+      jobId: String(job.id),
+      runToken: String(job.runToken),
+      requestedAt: Date.now(),
+      funAsrCancelConfig: funAsrConfig
+    }).catch(() => {});
+  }
+  throw new Error(summary.message || "上一次 FunASR 远端任务的取消状态尚未确认；确认前不会提交新的识别任务。");
+}
+
+async function browserFunAsrRemoteCancellationSummary(jobId, runToken, { failClosed = false } = {}) {
+  let operations;
+  try {
+    operations = await browserJobStore.listOperations(String(jobId || ""), String(runToken || ""));
+  } catch {
+    return failClosed
+      ? { status: "pending", message: "无法核对上一次 FunASR 远端任务状态；为避免重复提交，本次识别未启动。请稍后重试。" }
+      : { status: "none", message: "" };
+  }
+  operations = Array.isArray(operations) ? operations : [];
+  const submissions = operations.filter(operation => operation?.provider === "dashscope_funasr" &&
+    operation?.operationType === "funasr-submit" && browserFunAsrSubmissionMayHaveRemoteWork(operation));
+  const cancellations = operations.filter(operation => operation?.provider === "dashscope_funasr" &&
+    operation?.operationType === "funasr-cancel");
+  if (!submissions.length && !cancellations.length) {
+    return { status: "none", message: "" };
+  }
+  if (cancellations.some(operation => operation.state === "submitted" || operation.state === "unknown" ||
+      operation.result?.status === "unknown")) {
+    return { status: "pending", message: "本地处理已停止；远端 FunASR 任务状态正在确认。确认前不会提交新的识别任务。" };
+  }
+  if (submissions.some(submission => !cancellations.some(cancellation =>
+    String(cancellation.result?.submitOperationId || "") === String(submission.operationId || "") &&
+    cancellation.state === "completed"))) {
+    return { status: "pending", message: "本地处理已停止；远端 FunASR 任务状态正在确认。确认前不会提交新的识别任务。" };
+  }
+  if (cancellations.some(operation => operation.result?.status === "not-applied")) {
+    return { status: "not-applied", message: "本地处理已停止；远端 FunASR 任务已经开始或结束，服务端未接受取消。" };
+  }
+  if (cancellations.length && cancellations.every(operation => operation.result?.status === "confirmed")) {
+    return { status: "confirmed", message: "本地处理已停止，远端 FunASR 排队任务也已取消。" };
+  }
+  return { status: "none", message: "" };
+}
+
+function browserFunAsrSubmissionMayHaveRemoteWork(operation = {}) {
+  const state = String(operation.state || "");
+  if (["submitted", "unknown"].includes(state)) {
+    return true;
+  }
+  if (!["accepted", "completed"].includes(state)) {
+    return false;
+  }
+  const status = Number(operation.status || 0);
+  return (status >= 200 && status < 300) || Boolean(String(operation.remoteTaskId || ""));
+}
+
+async function refreshBrowserFunAsrCancellationProjection(record) {
+  if (!record?.job?.id || String(record.pipeline || record.job.pipeline || "") !== "funasr" ||
+      !record.job.cancelRequested) {
+    return;
+  }
+  const summary = await browserFunAsrRemoteCancellationSummary(record.job.id, record.runToken || record.job.runToken);
+  if (summary.status === "none") {
+    delete record.job.remoteCancellationStatus;
+    return;
+  }
+  record.job.remoteCancellationStatus = summary.status;
+  record.job.error = summary.message;
+}
+
 function scheduleBrowserAudioCacheMaintenance() {
   try {
     chrome.alarms?.onAlarm?.addListener?.(alarm => {
@@ -7530,6 +7330,9 @@ function scheduleBrowserAudioCacheMaintenance() {
       }
       if (alarm?.name === OFFSCREEN_IDLE_CLOSE_ALARM) {
         closeOffscreenDocumentIfIdle().catch(() => {});
+      }
+      if (alarm?.name === MEDIA_HEADER_RULE_RECOVERY_ALARM) {
+        runMediaHeaderRuleRecovery({ force: true }).catch(() => {});
       }
       if (String(alarm?.name || "").startsWith(BROWSER_JOB_LEASE_RECOVERY_ALARM_PREFIX)) {
         const jobId = String(alarm.name).slice(BROWSER_JOB_LEASE_RECOVERY_ALARM_PREFIX.length);
@@ -7547,25 +7350,116 @@ function scheduleBrowserAudioCacheMaintenance() {
 }
 
 async function requestBrowserJobLedgerMaintenance(now = Date.now()) {
-  const cutoff = Number(now || Date.now()) - BROWSER_JOB_LEDGER_TTL_MS;
-  const terminalResult = await browserJobStore.compactTerminalJobs(cutoff);
-  const recoverableJobs = await browserJobStore.listRecoverableJobs();
-  let deletedInterruptedJobs = 0;
-  for (const job of recoverableJobs) {
-    if (job?.status !== "interrupted" || Number(job.createdAt || 0) >= cutoff) {
-      continue;
+  if (browserJobLedgerMaintenancePromise) {
+    return browserJobLedgerMaintenancePromise;
+  }
+  const maintenance = performBrowserJobLedgerMaintenance(now);
+  browserJobLedgerMaintenancePromise = maintenance;
+  try {
+    return await maintenance;
+  } finally {
+    if (browserJobLedgerMaintenancePromise === maintenance) {
+      browserJobLedgerMaintenancePromise = null;
     }
-    await browserJobStore.deleteJob(job.id);
-    deletedInterruptedJobs += 1;
+    scheduleOffscreenIdleCloseIfNeeded();
+  }
+}
+
+async function performBrowserJobLedgerMaintenance(now = Date.now()) {
+  await browserJobRecoveryPromise;
+  const cutoff = Number(now || Date.now()) - BROWSER_JOB_LEDGER_TTL_MS;
+  await browserJobStore.compactCompletedCleanupClaims(cutoff).catch(() => ({ deletedClaims: 0 }));
+  const jobs = await browserJobStore.listJobs();
+  const pendingCleanupClaims = await browserJobStore.listCleanupClaims({ state: "pending" }).catch(() => []);
+  const candidates = jobs.filter(job => {
+    const status = String(job?.status || "");
+    const updatedAt = Number(job?.updatedAt || job?.createdAt || 0);
+    return Boolean(job?.id && job?.runToken && updatedAt > 0 && updatedAt < cutoff &&
+      (FuguangJobContract.isTerminalStatus(status) || status === "interrupted"));
+  });
+  if (!candidates.length && !pendingCleanupClaims.length) {
+    return { deletedTerminalJobs: 0, deletedInterruptedJobs: 0, failedJobs: 0, skippedJobs: 0 };
+  }
+  await ensureOffscreenDocument();
+  let deletedTerminalJobs = 0;
+  let deletedInterruptedJobs = 0;
+  let failedJobs = 0;
+  let skippedJobs = 0;
+  if (pendingCleanupClaims.length) {
+    try {
+      const response = await chrome.runtime.sendMessage({
+        type: "fuguang:paid-request:drain-pending-cleanup-results"
+      });
+      if (!response?.ok) {
+        throw new Error(response?.error?.message || "Offscreen pending paid-result cleanup failed.");
+      }
+      failedJobs += Math.max(0, Number(response.result?.failed || 0) || 0);
+    } catch (error) {
+      console.warn("Failed to retry pending paid-result cleanup.", error);
+      failedJobs += pendingCleanupClaims.length;
+    }
+  }
+  for (const candidate of candidates) {
+    try {
+      const result = await withBrowserJobLifecycleLock(candidate.id, async () => {
+        await flushBrowserJobMirror(candidate.id);
+        const current = await browserJobStore.getJob(candidate.id);
+        const expectedUpdatedAt = Number(candidate.updatedAt || candidate.createdAt || 0);
+        const currentUpdatedAt = Number(current?.updatedAt || current?.createdAt || 0);
+        if (!current || String(current.runToken || "") !== String(candidate.runToken || "") ||
+            currentUpdatedAt !== expectedUpdatedAt || currentUpdatedAt >= cutoff ||
+            (!FuguangJobContract.isTerminalStatus(current.status) && current.status !== "interrupted")) {
+          return { applied: false, reason: "changed-job" };
+        }
+        const response = await chrome.runtime.sendMessage({
+          type: "fuguang:paid-request:cleanup-expired-job-results",
+          cleanup: {
+            jobId: current.id,
+            runToken: current.runToken,
+            expectedUpdatedAt: currentUpdatedAt,
+            cutoff,
+            checkedAt: Number(now || Date.now())
+          }
+        });
+        if (!response?.ok) {
+          throw new Error(response?.error?.message || "Offscreen paid-result cleanup failed.");
+        }
+        if (response.result?.applied === false) {
+          return { applied: false, reason: response.result.reason || "rejected" };
+        }
+        const record = browserPreloadJobs.get(current.id);
+        if (record && String(record.runToken || record.job?.runToken || "") === String(current.runToken || "")) {
+          browserPreloadJobs.delete(current.id);
+        }
+        const pending = browserJobMirrorPending.get(current.id);
+        if (String(pending?.snapshot?.job?.runToken || "") === String(current.runToken || "")) {
+          browserJobMirrorPending.delete(current.id);
+        }
+        return { applied: true, status: String(current.status || "") };
+      });
+      if (!result.applied) {
+        skippedJobs += 1;
+      } else if (result.status === "interrupted") {
+        deletedInterruptedJobs += 1;
+      } else {
+        deletedTerminalJobs += 1;
+      }
+    } catch (error) {
+      console.warn("Failed to clean expired browser job ledger.", error);
+      failedJobs += 1;
+    }
   }
   return {
-    deletedTerminalJobs: Number(terminalResult?.deletedJobs || 0),
-    deletedInterruptedJobs
+    deletedTerminalJobs,
+    deletedInterruptedJobs,
+    failedJobs,
+    skippedJobs
   };
 }
 
 function scheduleOffscreenIdleCloseIfNeeded() {
   if ([...browserPreloadJobs.values()].some(record => browserJobNeedsOffscreen(record?.job))) {
+    clearOffscreenIdleCloseAlarm();
     return;
   }
   try {
@@ -7578,28 +7472,72 @@ function scheduleOffscreenIdleCloseIfNeeded() {
   }
 }
 
+function clearOffscreenIdleCloseAlarm() {
+  try {
+    const cleared = chrome.alarms?.clear?.(OFFSCREEN_IDLE_CLOSE_ALARM);
+    cleared?.catch?.(() => {});
+  } catch {
+    // Alarm cleanup is best-effort; close-time activity checks remain authoritative.
+  }
+}
+
 function browserJobNeedsOffscreen(job) {
   return ["queued", "running"].includes(String(job?.status || ""));
 }
 
 async function closeOffscreenDocumentIfIdle() {
-  if ([...browserPreloadJobs.values()].some(record => browserJobNeedsOffscreen(record?.job)) || offscreenTaskRuntimeCommands.size) {
-    return { closed: false, reason: "active" };
+  if (offscreenDocumentClosePromise) {
+    return offscreenDocumentClosePromise;
   }
-  if (typeof chrome.offscreen?.closeDocument !== "function") {
-    return { closed: false, reason: "unsupported" };
+  const closeAttempt = (async () => {
+    await browserJobRecoveryPromise;
+    if (await offscreenRuntimeHasActiveWork()) {
+      return { closed: false, reason: "active" };
+    }
+    if (typeof chrome.offscreen?.closeDocument !== "function") {
+      return { closed: false, reason: "unsupported" };
+    }
+    const url = chrome.runtime.getURL("src/offscreen/offscreen.html");
+    const contexts = await chrome.runtime.getContexts({
+      contextTypes: ["OFFSCREEN_DOCUMENT"],
+      documentUrls: [url]
+    }).catch(() => []);
+    if (!contexts.length) {
+      return { closed: false, reason: "missing" };
+    }
+    // Activity can begin while getContexts() is in flight. Recheck immediately
+    // before the destructive close so a stale alarm cannot kill new work.
+    if (await offscreenRuntimeHasActiveWork()) {
+      return { closed: false, reason: "active" };
+    }
+    await chrome.offscreen.closeDocument();
+    offscreenTaskRuntimePort = null;
+    return { closed: true };
+  })();
+  offscreenDocumentClosePromise = closeAttempt.finally(() => {
+    offscreenDocumentClosePromise = null;
+  });
+  return offscreenDocumentClosePromise;
+}
+
+async function offscreenRuntimeHasActiveWork() {
+  if ([...browserPreloadJobs.values()].some(record => browserJobNeedsOffscreen(record?.job)) ||
+      offscreenTaskRuntimeCommands.size || browserJobLedgerMaintenancePromise || offscreenDocumentCreationPromise) {
+    return true;
   }
-  const url = chrome.runtime.getURL("src/offscreen/offscreen.html");
-  const contexts = await chrome.runtime.getContexts({
-    contextTypes: ["OFFSCREEN_DOCUMENT"],
-    documentUrls: [url]
-  }).catch(() => []);
-  if (!contexts.length) {
-    return { closed: false, reason: "missing" };
+  let durableJobs;
+  try {
+    durableJobs = await browserJobStore.listRecoverableJobs();
+  } catch {
+    // A failed durable read means activity is unknown, not absent. Keeping the
+    // document alive is the only non-destructive choice until the next alarm.
+    return true;
   }
-  await chrome.offscreen.closeDocument();
-  offscreenTaskRuntimePort = null;
-  return { closed: true };
+  return durableJobs.some(job =>
+    browserJobNeedsOffscreen(job) &&
+    String(job.executionRunToken || "") === String(job.runToken || "") &&
+    Boolean(job.executionStartedAt)
+  );
 }
 
 function requestBrowserAudioCacheMaintenance(options = {}) {
@@ -7617,13 +7555,27 @@ function requestBrowserAudioCacheMaintenance(options = {}) {
 }
 
 async function pruneBrowserAudioCache(options = {}) {
+  await browserJobRecoveryPromise;
   const maxAgeMs = Number(options.maxAgeMs ?? WEB_FFMPEG_AUDIO_CACHE_MAX_AGE_MS);
   const maxBytes = Number(options.maxBytes ?? WEB_FFMPEG_AUDIO_CACHE_MAX_BYTES);
   const cache = await caches.open(WEB_FFMPEG_AUDIO_CACHE);
-  const protectedJobIds = [...browserPreloadJobs.values()]
+  let durableJobs;
+  let ledgerAudioChunks;
+  try {
+    durableJobs = await browserJobStore.listJobs();
+    ledgerAudioChunks = await browserJobStore.listAudioChunks();
+  } catch {
+    return { removed: 0, removedBytes: 0, failed: 0, scanned: 0, reason: "ledger-unavailable" };
+  }
+  const protectedJobIds = new Set(durableJobs
+    .filter(job => job?.id && !FuguangJobContract.isTerminalStatus(job.status))
+    .map(job => String(job.id)));
+  for (const jobId of [...browserPreloadJobs.values()]
     .filter(record => record && !record.cancelled && browserJobIsRunning(record.job))
     .map(record => record.job?.id)
-    .filter(Boolean);
+    .filter(Boolean)) {
+    protectedJobIds.add(String(jobId));
+  }
   const keys = await cache.keys().catch(() => []);
   const entries = [];
   const now = Date.now();
@@ -7632,44 +7584,203 @@ async function pruneBrowserAudioCache(options = {}) {
     if (!isBrowserAudioCacheUrl(url)) {
       continue;
     }
-    if (protectedJobIds.some(jobId => isBrowserAudioCacheUrlForJob(url, jobId))) {
-      continue;
-    }
     const response = await cache.match(url).catch(() => null);
     const info = await browserAudioCacheEntryInfo(url, response);
-    entries.push({ key, url, ...info });
+    entries.push({
+      key,
+      url,
+      protected: [...protectedJobIds].some(jobId => isBrowserAudioCacheUrlForJob(url, jobId)),
+      ...info
+    });
   }
+  const logicalGroups = browserAudioCacheLogicalGroups(entries, ledgerAudioChunks, protectedJobIds);
   const toDelete = new Set();
   if (Number.isFinite(maxAgeMs) && maxAgeMs > 0) {
-    for (const entry of entries) {
-      if (entry.cachedAt && now - entry.cachedAt > maxAgeMs) {
-        toDelete.add(entry);
+    for (const group of logicalGroups) {
+      if (!group.protected && group.entries.length && group.entries.every(entry => entry.cachedAt && now - entry.cachedAt > maxAgeMs)) {
+        toDelete.add(group);
       }
     }
   }
-  const keptByAge = entries.filter(entry => !toDelete.has(entry));
-  let totalBytes = keptByAge.reduce((sum, entry) => sum + Math.max(0, Number(entry.bytes || 0) || 0), 0);
+  let totalBytes = entries.reduce((sum, entry) => sum + Math.max(0, Number(entry.bytes || 0) || 0), 0);
+  for (const group of toDelete) {
+    totalBytes -= browserAudioCacheGroupBytes(group);
+  }
   if (Number.isFinite(maxBytes) && maxBytes > 0 && totalBytes > maxBytes) {
-    const oldestFirst = [...keptByAge].sort((left, right) => (
-      (left.cachedAt || 0) - (right.cachedAt || 0) || String(left.url).localeCompare(String(right.url))
+    const oldestFirst = logicalGroups.filter(group => !group.protected && !toDelete.has(group)).sort((left, right) => (
+      browserAudioCacheGroupTime(left) - browserAudioCacheGroupTime(right) ||
+      String(left.entries[0]?.url || "").localeCompare(String(right.entries[0]?.url || ""))
     ));
-    for (const entry of oldestFirst) {
+    for (const group of oldestFirst) {
       if (totalBytes <= maxBytes) {
         break;
       }
-      toDelete.add(entry);
-      totalBytes -= Math.max(0, Number(entry.bytes || 0) || 0);
+      toDelete.add(group);
+      totalBytes -= browserAudioCacheGroupBytes(group);
     }
   }
-  let removed = 0;
-  let removedBytes = 0;
-  for (const entry of toDelete) {
-    if (await cache.delete(entry.url)) {
-      removed += 1;
-      removedBytes += Math.max(0, Number(entry.bytes || 0) || 0);
+  const selectedEntries = [...toDelete].flatMap(group => group.entries);
+  const deletion = await deleteBrowserAudioCacheUrls(cache, selectedEntries.map(entry => entry.url));
+  const unavailableRefs = [...deletion.deleted, ...deletion.alreadyMissing];
+  if (unavailableRefs.length) {
+    await reconcileBrowserAudioCacheDeletion(unavailableRefs, ledgerAudioChunks);
+  }
+  const bytesByUrl = new Map(entries.map(entry => [entry.url, Math.max(0, Number(entry.bytes || 0) || 0)]));
+  return {
+    removed: deletion.deleted.length,
+    removedBytes: deletion.deleted.reduce((sum, url) => sum + (bytesByUrl.get(url) || 0), 0),
+    failed: deletion.failed.length,
+    scanned: entries.length
+  };
+}
+
+function browserAudioCacheLogicalGroups(entries = [], ledgerAudioChunks = [], protectedJobIds = new Set()) {
+  const entryByUrl = new Map(entries.map(entry => [String(entry.url || ""), entry]));
+  const groupByUrl = new Map();
+  const groups = new Set();
+  const attach = refs => {
+    const urls = [...new Set(refs.map(ref => String(ref || "")).filter(ref => entryByUrl.has(ref)))];
+    if (!urls.length) {
+      return;
+    }
+    const existing = [...new Set(urls.map(url => groupByUrl.get(url)).filter(Boolean))];
+    const group = existing.shift() || { entries: [], jobIds: new Set(), protected: false };
+    groups.add(group);
+    for (const merged of existing) {
+      for (const entry of merged.entries) {
+        if (!group.entries.includes(entry)) {
+          group.entries.push(entry);
+        }
+        groupByUrl.set(entry.url, group);
+      }
+      for (const jobId of merged.jobIds) {
+        group.jobIds.add(jobId);
+      }
+      groups.delete(merged);
+    }
+    for (const url of urls) {
+      const entry = entryByUrl.get(url);
+      if (!group.entries.includes(entry)) {
+        group.entries.push(entry);
+      }
+      groupByUrl.set(url, group);
+    }
+  };
+  for (const chunk of ledgerAudioChunks) {
+    attach(browserAudioCacheRefsFromLedgerChunk(chunk));
+  }
+  for (const entry of entries) {
+    attach([entry.url]);
+  }
+  for (const chunk of ledgerAudioChunks) {
+    const refs = browserAudioCacheRefsFromLedgerChunk(chunk);
+    const group = refs.map(ref => groupByUrl.get(ref)).find(Boolean);
+    if (group && chunk?.jobId) {
+      group.jobIds.add(String(chunk.jobId));
     }
   }
-  return { removed, removedBytes, scanned: entries.length };
+  for (const group of groups) {
+    group.protected = group.entries.some(entry => entry.protected) || [...group.jobIds].some(jobId => protectedJobIds.has(jobId));
+    group.entries.sort((left, right) => String(left.url).localeCompare(String(right.url)));
+  }
+  return [...groups];
+}
+
+function browserAudioCacheRefsFromLedgerChunk(chunk = {}) {
+  const refs = new Set();
+  if (chunk.audioCacheRef) {
+    refs.add(String(chunk.audioCacheRef));
+  }
+  for (const ref of Array.isArray(chunk.audioCacheRefs) ? chunk.audioCacheRefs : []) {
+    if (ref) {
+      refs.add(String(ref));
+    }
+  }
+  for (const part of Array.isArray(chunk.audioParts) ? chunk.audioParts : []) {
+    if (part?.cacheRef) {
+      refs.add(String(part.cacheRef));
+    }
+  }
+  return [...refs];
+}
+
+function browserAudioCacheGroupBytes(group) {
+  return (group?.entries || []).reduce((sum, entry) => sum + Math.max(0, Number(entry.bytes || 0) || 0), 0);
+}
+
+function browserAudioCacheGroupTime(group) {
+  return Math.max(0, ...(group?.entries || []).map(entry => Number(entry.cachedAt || 0) || 0));
+}
+
+async function deleteBrowserAudioCacheUrls(cache, refs = []) {
+  const result = { deleted: [], alreadyMissing: [], failed: [] };
+  for (const ref of [...new Set(refs.map(value => String(value || "")).filter(Boolean))]) {
+    try {
+      const before = await cache.match(ref);
+      if (!before) {
+        result.alreadyMissing.push(ref);
+        continue;
+      }
+      if (await cache.delete(ref)) {
+        result.deleted.push(ref);
+        continue;
+      }
+      if (!await cache.match(ref)) {
+        result.alreadyMissing.push(ref);
+      } else {
+        result.failed.push(ref);
+      }
+    } catch {
+      result.failed.push(ref);
+    }
+  }
+  return result;
+}
+
+async function reconcileBrowserAudioCacheDeletion(refs = [], ledgerAudioChunks = null) {
+  const targetRefs = new Set(refs.map(ref => String(ref || "")).filter(Boolean));
+  if (!targetRefs.size) {
+    return [];
+  }
+  const chunks = ledgerAudioChunks || await browserJobStore.listAudioChunks().catch(() => []);
+  const affectedJobIds = new Set();
+  for (const chunk of chunks) {
+    if (browserAudioCacheRefsFromLedgerChunk(chunk).some(ref => targetRefs.has(ref)) && chunk?.jobId) {
+      affectedJobIds.add(String(chunk.jobId));
+    }
+  }
+  const results = [];
+  for (const jobId of affectedJobIds) {
+    const jobRefs = [...targetRefs].filter(ref => chunks.some(chunk => (
+      String(chunk?.jobId || "") === jobId && browserAudioCacheRefsFromLedgerChunk(chunk).includes(ref)
+    )));
+    let result = null;
+    let lastError = null;
+    for (let attempt = 0; attempt < 2; attempt += 1) {
+      try {
+        result = await browserJobStore.reconcileAudioCacheRefs(jobId, jobRefs, { verifiedAt: Date.now() });
+        if (result?.applied !== false) {
+          break;
+        }
+      } catch (error) {
+        lastError = error;
+      }
+    }
+    if (!result || result.applied === false) {
+      if (lastError) {
+        console.warn("Failed to reconcile browser audio cache ledger.", lastError);
+      }
+      continue;
+    }
+    const record = browserPreloadJobs.get(jobId);
+    if (record) {
+      removeBrowserRecordAudioChunksByRefs(record, new Set(jobRefs));
+      applyBrowserAudioCacheAvailability(record, result);
+      publishBrowserPreloadJob(record);
+    }
+    results.push(result);
+  }
+  return results;
 }
 
 function browserJobIsRunning(job) {
@@ -7738,38 +7849,54 @@ async function clearPreloadAudioCache(tabId, jobId) {
   }
   const browserRecord = browserPreloadJobs.get(targetJobId);
   if (browserRecord) {
-    const removed = await clearBrowserAudioCacheForJob(targetJobId, [
+    await flushBrowserJobMirror(targetJobId).catch(() => null);
+    const deletion = await clearBrowserAudioCacheForJobDetailed(targetJobId, [
       ...(browserRecord.audioChunks || []),
       ...(browserRecord.browserInternalAudioChunks || []),
       ...(browserRecord.browserPendingLogicalChunk?.parts || [])
     ]);
-    browserRecord.audioChunks = [];
-    browserRecord.browserInternalAudioChunks = [];
-    browserRecord.browserPendingLogicalChunk = null;
-    browserRecord.job.audioCacheRemoved = true;
-    browserRecord.job.audioCacheRemovedCount = removed;
+    const unavailableRefs = [...deletion.deleted, ...deletion.alreadyMissing];
+    const reconciled = await reconcileBrowserAudioCacheDeletion(unavailableRefs);
+    removeBrowserRecordAudioChunksByRefs(browserRecord, new Set(unavailableRefs));
+    if (reconciled.length) {
+      applyBrowserAudioCacheAvailability(browserRecord, reconciled.find(result => result?.job?.id === targetJobId) || reconciled[0]);
+    } else {
+      await verifyBrowserRecordAudioCache(browserRecord, { persist: true });
+    }
     publishBrowserPreloadJob(browserRecord);
+    await flushBrowserJobMirror(targetJobId).catch(() => null);
+    const removed = deletion.deleted.length;
     return {
       job: browserRecord.job,
       removed: removed > 0,
-      message: removed > 0
+      message: deletion.failed.length
+        ? `浏览器内任务的音频切片缓存已清除 ${removed} 项，另有 ${deletion.failed.length} 项暂时无法清除。`
+        : removed > 0
         ? `浏览器内任务的音频切片缓存已清除（${removed} 项）。`
         : "当前任务没有可清理的浏览器音频缓存。"
     };
   }
   if (String(targetJobId).startsWith("browser-")) {
-    const removed = await clearBrowserAudioCacheForJob(targetJobId, []);
+    const deletion = await clearBrowserAudioCacheForJobDetailed(targetJobId, []);
+    const unavailableRefs = [...deletion.deleted, ...deletion.alreadyMissing];
+    const reconciled = await reconcileBrowserAudioCacheDeletion(unavailableRefs);
+    const durableJob = reconciled.find(result => result?.job?.id === targetJobId)?.job || await browserJobStore.getJob(targetJobId).catch(() => null);
+    const removed = deletion.deleted.length;
     const job = {
       ...(state.preloadJob || {}),
+      ...(durableJob || {}),
       id: targetJobId,
-      audioCacheRemoved: true,
-      audioCacheRemovedCount: removed
+      audioCacheRemoved: durableJob ? Boolean(durableJob.audioCacheRemoved) : unavailableRefs.length > 0,
+      audioCacheRemovedCount: Number(durableJob?.audioCacheRemovedCount || removed) || 0,
+      audioCacheVerified: Boolean(durableJob?.audioCacheVerified || unavailableRefs.length)
     };
     setTabStatus(tabId, { preloadJob: job, error: "" });
     return {
       job,
       removed: removed > 0,
-      message: removed > 0
+      message: deletion.failed.length
+        ? `浏览器内任务的音频切片缓存已清除 ${removed} 项，另有 ${deletion.failed.length} 项暂时无法清除。`
+        : removed > 0
         ? `浏览器内任务的音频切片缓存已清除（${removed} 项）。`
         : "当前任务没有可清理的浏览器音频缓存。"
     };
@@ -7778,6 +7905,11 @@ async function clearPreloadAudioCache(tabId, jobId) {
 }
 
 async function clearBrowserAudioCacheForJob(jobId, chunks = []) {
+  const deletion = await clearBrowserAudioCacheForJobDetailed(jobId, chunks);
+  return deletion.deleted.length;
+}
+
+async function clearBrowserAudioCacheForJobDetailed(jobId, chunks = []) {
   const cache = await caches.open(WEB_FFMPEG_AUDIO_CACHE);
   const cacheUrls = collectBrowserAudioCacheUrls(chunks);
   const keys = await cache.keys().catch(() => []);
@@ -7787,30 +7919,97 @@ async function clearBrowserAudioCacheForJob(jobId, chunks = []) {
       cacheUrls.add(url);
     }
   }
-  let removed = 0;
-  for (const cacheUrl of cacheUrls) {
-    if (await cache.delete(cacheUrl)) {
-      removed += 1;
-    }
-  }
-  return removed;
+  return deleteBrowserAudioCacheUrls(cache, [...cacheUrls]);
 }
 
 async function releaseBrowserAudioChunks(record) {
-  const removed = await clearBrowserAudioCacheForJob(record?.job?.id || "", [
+  const jobId = record?.job?.id || "";
+  if (!jobId) {
+    return 0;
+  }
+  await flushBrowserJobMirror(jobId).catch(() => null);
+  const deletion = await clearBrowserAudioCacheForJobDetailed(jobId, [
     ...(record.audioChunks || []),
     ...(record.browserInternalAudioChunks || []),
     ...(record.browserPendingLogicalChunk?.parts || [])
   ]);
-  if (removed) {
-    record.audioChunks = [];
-    record.browserInternalAudioChunks = [];
-    record.browserPendingLogicalChunk = null;
-    record.job.audioCacheRemoved = true;
-    record.job.audioCacheRemovedCount = removed;
-    publishBrowserPreloadJob(record);
+  const unavailableRefs = [...deletion.deleted, ...deletion.alreadyMissing];
+  const reconciled = await reconcileBrowserAudioCacheDeletion(unavailableRefs);
+  removeBrowserRecordAudioChunksByRefs(record, new Set(unavailableRefs));
+  if (reconciled.length) {
+    applyBrowserAudioCacheAvailability(record, reconciled.find(result => result?.job?.id === jobId) || reconciled[0]);
+  } else {
+    await verifyBrowserRecordAudioCache(record, { persist: true });
   }
-  return removed;
+  publishBrowserPreloadJob(record);
+  await flushBrowserJobMirror(jobId).catch(() => null);
+  return deletion.deleted.length;
+}
+
+function removeBrowserRecordAudioChunksByRefs(record, refs = new Set()) {
+  const chunkUsesRef = chunk => {
+    const urls = collectBrowserAudioCacheUrls([chunk]);
+    return [...urls].some(url => refs.has(url));
+  };
+  record.audioChunks = (record.audioChunks || []).filter(chunk => !chunkUsesRef(chunk));
+  record.browserInternalAudioChunks = (record.browserInternalAudioChunks || []).filter(chunk => !chunkUsesRef(chunk));
+  if ((record.browserPendingLogicalChunk?.parts || []).some(part => chunkUsesRef(part))) {
+    record.browserPendingLogicalChunk = null;
+  }
+}
+
+function applyBrowserAudioCacheAvailability(record, result = {}) {
+  const reusableAudioChunks = Math.max(0, Number(result.reusableAudioChunks ?? record.audioChunks?.length ?? 0) || 0);
+  record.job.translation ||= {};
+  record.job.reusableAudioChunks = reusableAudioChunks;
+  record.job.translation.reusableAudioChunks = reusableAudioChunks;
+  record.job.audioCacheRemoved = reusableAudioChunks === 0;
+  record.job.audioCacheRemovedCount = Math.max(0, Number(result.job?.audioCacheRemovedCount ?? record.job.audioCacheRemovedCount ?? 0) || 0);
+  record.job.audioCacheVerified = true;
+  record.job.audioCacheVerifiedAt = Number(result.job?.audioCacheVerifiedAt || Date.now()) || Date.now();
+  record.job.audioCacheRemovedRefs = Array.isArray(result.job?.audioCacheRemovedRefs)
+    ? [...result.job.audioCacheRemovedRefs]
+    : (Array.isArray(record.job.audioCacheRemovedRefs) ? record.job.audioCacheRemovedRefs : []);
+}
+
+async function verifyBrowserRecordAudioCache(record, options = {}) {
+  if (!record?.job?.id) {
+    return { verified: false, reusableAudioChunks: 0, missingRefs: [] };
+  }
+  const cache = await caches.open(WEB_FFMPEG_AUDIO_CACHE);
+  const missingRefs = new Set();
+  let verificationFailed = false;
+  for (const chunk of record.audioChunks || []) {
+    const refs = [...collectBrowserAudioCacheUrls([chunk])];
+    for (const ref of refs) {
+      try {
+        if (!await cache.match(ref)) {
+          missingRefs.add(ref);
+        }
+      } catch {
+        verificationFailed = true;
+      }
+    }
+  }
+  if (verificationFailed) {
+    record.job.audioCacheVerified = false;
+    return { verified: false, reusableAudioChunks: record.audioChunks?.length || 0, missingRefs: [] };
+  }
+  let reconciled = [];
+  if (missingRefs.size && options.persist !== false) {
+    reconciled = await reconcileBrowserAudioCacheDeletion([...missingRefs]);
+  }
+  removeBrowserRecordAudioChunksByRefs(record, missingRefs);
+  const result = reconciled.find(item => item?.job?.id === record.job.id) || {
+    reusableAudioChunks: record.audioChunks?.length || 0,
+    job: record.job
+  };
+  applyBrowserAudioCacheAvailability(record, result);
+  return {
+    verified: true,
+    reusableAudioChunks: record.audioChunks?.length || 0,
+    missingRefs: [...missingRefs]
+  };
 }
 
 function collectBrowserAudioCacheUrls(chunks = []) {
@@ -7898,7 +8097,7 @@ async function clearPreloadSubtitleState(tabId, jobId) {
   suppressPreloadSubtitleAttachment(tabId, targetJobId);
   const browserRecord = targetJobId ? browserPreloadJobs.get(targetJobId) : null;
   if (browserRecord) {
-    clearBrowserSubtitleStateForJob(browserRecord);
+    await clearBrowserSubtitleStateForJob(browserRecord);
   } else if (targetJobId && state.preloadJob?.id === targetJobId) {
     state.preloadJob = clearPreloadJobSubtitlePayload(state.preloadJob);
   }
@@ -7906,13 +8105,19 @@ async function clearPreloadSubtitleState(tabId, jobId) {
   return { cleared: Boolean(targetJobId) };
 }
 
-function clearBrowserSubtitleStateForJob(record) {
+async function clearBrowserSubtitleStateForJob(record) {
   if (!record?.job?.translation) {
     return;
   }
   record.translatedSegmentsByChunk = new Map();
   record.job = clearPreloadJobSubtitlePayload(record.job, collectChunkSegments(record.sourceSegmentsByChunk || new Map()));
   publishBrowserPreloadJob(record);
+  const durable = await flushBrowserJobMirror(record.job.id);
+  if (!durable || String(durable.runToken || "") !== String(record.runToken || record.job.runToken || "") ||
+      durable.subtitleCleared !== true) {
+    throw new Error("字幕已在当前页面清除，但未能持久化清除状态；请重试。");
+  }
+  return durable;
 }
 
 function clearPreloadJobSubtitlePayload(job, sourceSegments = null) {
@@ -7985,11 +8190,26 @@ function withSubtitleSuppression(job, tabId) {
 }
 
 async function checkPreloadJob(jobId, tabId) {
+  await browserJobRecoveryPromise;
   if (!jobId) {
     throw new Error("没有可查询的预加载任务。");
   }
   let browserRecord = browserPreloadJobs.get(jobId);
+  if (!browserRecord) {
+    if (tabId) {
+      await refreshTabInfo(tabId);
+    }
+    browserRecord = await recoverBrowserPresentationJob(
+      jobId,
+      tabId,
+      tabId ? (getState(tabId).page?.url || getState(tabId).context?.href || "") : ""
+    );
+  }
   if (browserRecord) {
+    if (!browserRecord.presentationOnly) {
+      await verifyBrowserRecordAudioCache(browserRecord, { persist: true });
+    }
+    await refreshBrowserFunAsrCancellationProjection(browserRecord);
     let visibleJob = browserPreloadJobForRead(browserRecord);
     if (tabId) {
       await refreshTabInfo(tabId);
@@ -8001,7 +8221,6 @@ async function checkPreloadJob(jobId, tabId) {
       if (!browserPreloadRecordMatchesPageUrl(browserRecord, getState(tabId).page?.url || getState(tabId).context?.href || "")) {
         return { job: null, missing: true, pageMismatch: true };
       }
-      setTabStatus(tabId, { preload: visibleJob.status || "running", preloadJob: visibleJob || null });
       if (visibleJob.translation?.vttText) {
         await attachBrowserJobVttIfReady(browserRecord, visibleJob);
       }
@@ -8756,15 +8975,148 @@ async function seekMedia(tabId, time) {
   return { time };
 }
 
+async function sendBrowserJobVttToBoundMedia(record, message) {
+  const tabId = Number(record?.tabId);
+  const binding = record?.presentationBinding;
+  const frameId = optionalBrowserFrameId(binding?.frameId);
+  const documentId = normalizeDocumentId(binding?.documentId);
+  const lineageKey = String(binding?.lineageKey || "");
+  if (!Number.isInteger(tabId) || tabId < 0 || frameId === null ||
+      !documentId || !lineageKey) {
+    return sendMessageToMediaFrame(tabId, message);
+  }
+
+  let exactResponse = null;
+  if (await browserFrameMatchesDocument(tabId, frameId, documentId)) {
+    exactResponse = await sendMessageToSpecificMediaFrame(tabId, message, frameId, documentId);
+    if (exactResponse?.ok || exactResponse?.state || exactResponse?.preservedManual) {
+      return exactResponse;
+    }
+  }
+
+  const successor = await findTrustedBrowserMediaSuccessor(record, frameId, documentId);
+  if (successor) {
+    return sendMessageToSpecificMediaFrame(
+      tabId,
+      message,
+      successor.frameId,
+      successor.documentId
+    );
+  }
+  return exactResponse || {
+    ok: false,
+    mediaBindingRejected: true,
+    durableBindingRejected: true
+  };
+}
+
+async function findTrustedBrowserMediaSuccessor(record, originalFrameId, originalDocumentId) {
+  const tabId = Number(record?.tabId);
+  const expectedLineageKey = String(record?.presentationBinding?.lineageKey || "");
+  if (!Number.isInteger(tabId) || tabId < 0 || !expectedLineageKey) {
+    return null;
+  }
+  const state = getState(tabId);
+  const trustedFrameId = optionalBrowserFrameId(state.mediaFrameId);
+  if (trustedFrameId === null) {
+    return null;
+  }
+  const pageUrl = record.metadata?.pageUrl || record.job?.metadata?.pageUrl || "";
+  const candidates = [
+    state.lastPreloadCandidate,
+    ...(Array.isArray(state.candidates) ? state.candidates : []),
+    state.context?.currentSrc ? {
+      url: state.context.currentSrc,
+      kind: state.context.mediaTag === "audio" ? "audio" : "video",
+      frameId: state.context.frameId,
+      documentId: state.context.documentId,
+      pageUrl
+    } : null
+  ].filter(Boolean);
+  const verifiedSuccessors = new Map();
+  for (const candidate of candidates) {
+    if (optionalBrowserFrameId(candidate.frameId) !== trustedFrameId ||
+        browserMediaLineageKey(candidate, pageUrl) !== expectedLineageKey) {
+      continue;
+    }
+    const candidateDocumentId = normalizeDocumentId(
+      candidate.documentId ||
+      (trustedFrameId === optionalBrowserFrameId(state.context?.frameId) ? state.context?.documentId : "") ||
+      state.mediaDocumentId
+    );
+    if (!candidateDocumentId ||
+        (trustedFrameId === originalFrameId && candidateDocumentId === originalDocumentId) ||
+        !await browserFrameMatchesDocument(tabId, trustedFrameId, candidateDocumentId)) {
+      continue;
+    }
+    verifiedSuccessors.set(`${trustedFrameId}:${candidateDocumentId}`, {
+      frameId: trustedFrameId,
+      documentId: candidateDocumentId
+    });
+  }
+  return verifiedSuccessors.size === 1
+    ? [...verifiedSuccessors.values()][0]
+    : null;
+}
+
+async function browserFrameMatchesDocument(tabId, frameId, documentId) {
+  if (typeof chrome.webNavigation?.getFrame !== "function") {
+    return false;
+  }
+  const frame = await chrome.webNavigation.getFrame({ tabId, frameId }).catch(() => null);
+  return Boolean(frame && normalizeDocumentId(frame.documentId) === normalizeDocumentId(documentId));
+}
+
+async function sendMessageToSpecificMediaFrame(tabId, message, frameId, documentId = "") {
+  const target = { frameId };
+  const normalizedDocumentId = normalizeDocumentId(documentId);
+  if (normalizedDocumentId) {
+    target.documentId = normalizedDocumentId;
+  }
+  const response = await chrome.tabs.sendMessage(tabId, message, target).catch(() => null);
+  if (response?.ok || response?.state) {
+    const state = getState(tabId);
+    state.mediaFrameId = frameId;
+    state.mediaDocumentId = normalizedDocumentId || state.mediaDocumentId || "";
+    if (message?.type === MESSAGE.ATTACH_VTT && response?.ok) {
+      state.subtitleFrameId = frameId;
+    }
+  }
+  return response;
+}
+
 async function sendMessageToMediaFrame(tabId, message) {
+  const state = getState(tabId);
   const frameIds = await getCandidateMediaFrameIds(tabId);
   let lastResponse = null;
   for (const frameId of frameIds) {
     const response = await chrome.tabs.sendMessage(tabId, message, { frameId }).catch(() => null);
     if (response?.ok || response?.state) {
-      getState(tabId).mediaFrameId = frameId;
+      state.mediaFrameId = frameId;
       if (message?.type === MESSAGE.ATTACH_VTT && response?.ok) {
-        getState(tabId).subtitleFrameId = frameId;
+        state.subtitleFrameId = frameId;
+      }
+      return response;
+    }
+    if (message?.type === MESSAGE.ATTACH_VTT && response?.mediaBindingRejected) {
+      const subtitleFrameId = Number(state.subtitleFrameId);
+      const trustedMediaFrameId = Number(state.mediaFrameId);
+      const hasTrustedSuccessor = Number.isInteger(subtitleFrameId)
+        && subtitleFrameId === frameId
+        && Number.isInteger(trustedMediaFrameId)
+        && trustedMediaFrameId >= 0
+        && trustedMediaFrameId !== frameId;
+      if (hasTrustedSuccessor) {
+        const successorResponse = await chrome.tabs.sendMessage(tabId, message, {
+          frameId: trustedMediaFrameId
+        }).catch(() => null);
+        if (successorResponse?.ok || successorResponse?.state) {
+          state.mediaFrameId = trustedMediaFrameId;
+          if (successorResponse?.ok) {
+            state.subtitleFrameId = trustedMediaFrameId;
+          }
+        }
+        return successorResponse || response;
       }
       return response;
     }
@@ -8775,7 +9127,7 @@ async function sendMessageToMediaFrame(tabId, message) {
   const response = await chrome.tabs.sendMessage(tabId, message).catch(() => null);
   if (response?.ok || response?.state) {
     if (message?.type === MESSAGE.ATTACH_VTT && response?.ok) {
-      getState(tabId).subtitleFrameId = null;
+      state.subtitleFrameId = null;
     }
     return response;
   }
@@ -8865,7 +9217,123 @@ function enableSidePanelAction() {
   chrome.sidePanel.setPanelBehavior({ openPanelOnActionClick: true }).catch(() => {});
 }
 
+async function reconcileMediaHeaderRulesAtStartup() {
+  const offscreenUrl = chrome.runtime.getURL("src/offscreen/offscreen.html");
+  let contexts;
+  try {
+    contexts = await chrome.runtime.getContexts({
+      contextTypes: ["OFFSCREEN_DOCUMENT"],
+      documentUrls: [offscreenUrl]
+    });
+  } catch {
+    return reconcileMediaHeaderLeases({
+      offscreenPresent: true,
+      queryAuthoritative: false,
+      activeLeases: []
+    });
+  }
+  const offscreenPresent = Array.isArray(contexts) && contexts.length > 0;
+  if (!offscreenPresent) {
+    return reconcileMediaHeaderLeases({
+      offscreenPresent: false,
+      queryAuthoritative: true,
+      activeLeases: []
+    });
+  }
+  try {
+    const response = await chrome.runtime.sendMessage({
+      type: MESSAGE.OFFSCREEN_GET_ACTIVE_MEDIA_HEADER_LEASES
+    });
+    const queryAuthoritative = Boolean(response?.ok && Array.isArray(response.leases));
+    return reconcileMediaHeaderLeases({
+      offscreenPresent: true,
+      queryAuthoritative,
+      activeLeases: queryAuthoritative ? response.leases : []
+    });
+  } catch {
+    return reconcileMediaHeaderLeases({
+      offscreenPresent: true,
+      queryAuthoritative: false,
+      activeLeases: []
+    });
+  }
+}
+
+function mediaHeaderRuleRecoveryNeedsRetry(result = {}) {
+  return Boolean(
+    result?.deferred ||
+    result?.metadataPending ||
+    (Array.isArray(result?.failedRuleIds) && result.failedRuleIds.length > 0)
+  );
+}
+
+function scheduleMediaHeaderRuleRecoveryRetry() {
+  const exponent = Math.max(0, mediaHeaderRuleRecoveryRetryAttempt - 1);
+  const delayInMinutes = Math.min(
+    MEDIA_HEADER_RULE_RECOVERY_MAX_MINUTES,
+    MEDIA_HEADER_RULE_RECOVERY_BASE_MINUTES * (2 ** exponent)
+  );
+  try {
+    const created = chrome.alarms?.create?.(MEDIA_HEADER_RULE_RECOVERY_ALARM, { delayInMinutes });
+    return created?.catch?.(() => {}) || Promise.resolve();
+  } catch {
+    return Promise.resolve();
+  }
+}
+
+function clearMediaHeaderRuleRecoveryRetry() {
+  try {
+    const cleared = chrome.alarms?.clear?.(MEDIA_HEADER_RULE_RECOVERY_ALARM);
+    return cleared?.catch?.(() => false) || Promise.resolve(false);
+  } catch {
+    return Promise.resolve(false);
+  }
+}
+
+function runMediaHeaderRuleRecovery(options = {}) {
+  const force = options?.force === true;
+  if (mediaHeaderRuleRecoveryPromise) {
+    return mediaHeaderRuleRecoveryPromise;
+  }
+  if (!force && mediaHeaderRuleRecoveryLastResult &&
+      !mediaHeaderRuleRecoveryNeedsRetry(mediaHeaderRuleRecoveryLastResult)) {
+    return Promise.resolve(mediaHeaderRuleRecoveryLastResult);
+  }
+
+  let recovery;
+  recovery = Promise.resolve()
+    .then(() => reconcileMediaHeaderRulesAtStartup())
+    .catch(() => ({
+      deferred: true,
+      failedRuleIds: [],
+      metadataPending: false,
+      reason: "reconcile-error"
+    }))
+    .then(async result => {
+      mediaHeaderRuleRecoveryLastResult = result || {};
+      if (mediaHeaderRuleRecoveryNeedsRetry(mediaHeaderRuleRecoveryLastResult)) {
+        mediaHeaderRuleRecoveryRetryAttempt += 1;
+        await scheduleMediaHeaderRuleRecoveryRetry();
+      } else {
+        mediaHeaderRuleRecoveryRetryAttempt = 0;
+        await clearMediaHeaderRuleRecoveryRetry();
+      }
+      return mediaHeaderRuleRecoveryLastResult;
+    })
+    .finally(() => {
+      if (mediaHeaderRuleRecoveryPromise === recovery) {
+        mediaHeaderRuleRecoveryPromise = null;
+      }
+    });
+  mediaHeaderRuleRecoveryPromise = recovery;
+  return recovery;
+}
+
 async function ensureOffscreenDocument() {
+  clearOffscreenIdleCloseAlarm();
+  if (offscreenDocumentClosePromise) {
+    await offscreenDocumentClosePromise.catch(() => null);
+  }
   if (offscreenDocumentCreationPromise) {
     return offscreenDocumentCreationPromise;
   }
@@ -9143,6 +9611,7 @@ function updateTabContext(tabId, context, frameId = 0, documentId = "") {
   const state = getState(tabId);
   const current = state.context || {};
   const incomingFrameId = normalizeFrameId(frameId);
+  const incomingDocumentId = normalizeDocumentId(documentId);
   const isMainFrame = incomingFrameId === 0;
   const incomingArea = (context.elementWidth || context.videoWidth || 0) * (context.elementHeight || context.videoHeight || 0);
   const currentArea = (current.elementWidth || current.videoWidth || 0) * (current.elementHeight || current.videoHeight || 0);
@@ -9150,6 +9619,7 @@ function updateTabContext(tabId, context, frameId = 0, documentId = "") {
   const shouldUpdateTime = context.hasMedia && (shouldReplaceMedia || state.mediaFrameId === incomingFrameId || current.frameId === incomingFrameId);
   if (shouldReplaceMedia) {
     state.mediaFrameId = incomingFrameId;
+    state.mediaDocumentId = incomingDocumentId;
   }
   state.context = {
     ...current,
@@ -9169,6 +9639,7 @@ function updateTabContext(tabId, context, frameId = 0, documentId = "") {
     currentSrc: shouldReplaceMedia ? context.currentSrc || current.currentSrc || "" : current.currentSrc || context.currentSrc || "",
     readyState: context.readyState || current.readyState || 0,
     frameId: shouldReplaceMedia ? incomingFrameId : current.frameId ?? incomingFrameId,
+    documentId: shouldReplaceMedia ? incomingDocumentId : current.documentId || incomingDocumentId,
     seenAt: Date.now()
   };
 }
@@ -9197,17 +9668,16 @@ function addPageMediaCandidate(tabId, media, frameId = 0, documentId = "") {
     return;
   }
   const mediaFrameId = normalizeFrameId(frameId);
+  const mediaDocumentId = normalizeDocumentId(documentId);
   if (media.source === "media-element") {
-    getState(tabId).mediaFrameId = mediaFrameId;
+    const state = getState(tabId);
+    state.mediaFrameId = mediaFrameId;
+    state.mediaDocumentId = mediaDocumentId;
   }
   const classification = classifyUrl(media.url) || { kind: media.kind || "media", ext: "" };
-  const reportedSource = String(media.source || "page");
-  const source = ["request", "request-headers", "response"].includes(reportedSource)
-    ? "page"
-    : reportedSource;
   addCandidate(tabId, {
     url: media.url,
-    source,
+    source: media.source || "page",
     kind: media.kind || classification.kind,
     ext: media.ext || classification.ext,
     title: media.title || "",
@@ -9225,7 +9695,7 @@ function addPageMediaCandidate(tabId, media, frameId = 0, documentId = "") {
     segmentType: media.segmentType,
     trackHandler: media.trackHandler,
     frameId: mediaFrameId,
-    documentId: String(documentId || ""),
+    documentId: mediaDocumentId,
     seenAt: Date.now()
   });
 }
@@ -9235,45 +9705,8 @@ function normalizeFrameId(value) {
   return Number.isInteger(frameId) && frameId >= 0 ? frameId : 0;
 }
 
-async function isCurrentDocumentMessage(sender = {}) {
-  const tabId = Number(sender.tab?.id);
-  const frameId = normalizeFrameId(sender.frameId);
-  const documentId = String(sender.documentId || "");
-  if (!Number.isInteger(tabId) || tabId < 0 || !documentId) {
-    return false;
-  }
-  const knownDocumentId = activeDocumentIdsByTab.get(tabId)?.get(frameId);
-  if (knownDocumentId) {
-    return knownDocumentId === documentId;
-  }
-  if (typeof chrome.webNavigation?.getFrame !== "function") {
-    return false;
-  }
-  const frame = await chrome.webNavigation.getFrame({ tabId, frameId }).catch(() => null);
-  if (!frame?.documentId || String(frame.documentId) !== documentId) {
-    return false;
-  }
-  noteActiveDocument(tabId, frameId, documentId, { authoritative: true });
-  return true;
-}
-
-function noteActiveDocument(tabId, frameId = 0, documentId = "", options = {}) {
-  const numericTabId = Number(tabId);
-  if (!options.authoritative || !Number.isInteger(numericTabId) || numericTabId < 0) {
-    return;
-  }
-  const normalizedFrameId = normalizeFrameId(frameId);
-  let documents = activeDocumentIdsByTab.get(numericTabId) || new Map();
-  if (normalizedFrameId === 0 && documentId && documents.get(0) && documents.get(0) !== String(documentId)) {
-    documents = new Map();
-  }
-  if (documentId) {
-    documents.set(normalizedFrameId, String(documentId));
-  }
-  activeDocumentIdsByTab.set(numericTabId, documents);
-  if (tabState.has(numericTabId)) {
-    getState(numericTabId).documentIdsByFrame = documents;
-  }
+function normalizeDocumentId(value) {
+  return String(value || "").trim().slice(0, 500);
 }
 
 function addCandidate(tabId, candidate) {
@@ -9376,8 +9809,9 @@ function getState(tabId) {
       vttTextDeferredProjectionRevision: 0,
       vttTextAttachmentSignature: "",
       subtitleFrameId: null,
-      lastPreloadCandidate: null,
-      documentIdsByFrame: activeDocumentIdsByTab.get(tabId) || new Map()
+      mediaFrameId: null,
+      mediaDocumentId: "",
+      lastPreloadCandidate: null
     });
   }
   return tabState.get(tabId);

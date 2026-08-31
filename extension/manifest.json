@@ -4,7 +4,7 @@
   "name": "__MSG_appName__",
   "short_name": "__MSG_appShortName__",
   "description": "__MSG_appDescription__",
-  "version": "0.1.5",
+  "version": "0.1.6",
   "action": {
     "default_title": "__MSG_actionTitle__"
   },
@@ -29,6 +29,7 @@
     "sidePanel",
     "scripting",
     "storage",
+    "unlimitedStorage",
     "webNavigation",
     "webRequest"
   ],

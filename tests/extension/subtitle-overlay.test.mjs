@@ -277,6 +277,7 @@ function createHarness({ settings = {}, videos = [new FakeMedia()], legacyOverla
   const intervals = new Map();
   const timeouts = new Map();
   let nextTimer = 1;
+  let now = 1000;
   let messageListener = null;
   const messageListeners = [];
   let storageListener = null;
@@ -361,7 +362,7 @@ function createHarness({ settings = {}, videos = [new FakeMedia()], legacyOverla
     Event: FakeEvent,
     VTTCue: FakeVTTCue,
     TextTrackCue: FakeVTTCue,
-    performance: { now: () => 1000 },
+    performance: { now: () => now },
     Map,
     Set,
     JSON,
@@ -399,6 +400,9 @@ function createHarness({ settings = {}, videos = [new FakeMedia()], legacyOverla
     },
     emitStorage: changes => storageListener(changes, "sync"),
     runIntervals: () => [...intervals.values()].forEach(timer => timer.fn()),
+    advanceTime: milliseconds => {
+      now += Number(milliseconds) || 0;
+    },
     cleanupCalled: () => cleanupCalled,
     overlayText: () => document.getElementById(OVERLAY_ID)
       ?.querySelector("[data-fuguang-caption-text]")
@@ -616,6 +620,71 @@ later cue
   const video = new FakeMedia({ currentTime: 1, paused: true });
   const harness = createHarness({ videos: [video] });
   await harness.ready();
+  assert.equal((await harness.send({
+    type: "FUGUANG_ATTACH_VTT",
+    vtt: SAMPLE_VTT,
+    signature: "projection-signature",
+    origin: "job-projection",
+    jobId: "job-stable-attach",
+    attachmentRevision: 10,
+    preloadGeneration: 10
+  })).ok, true);
+  const listenerBefore = [...video.listeners.get("timeupdate")][0];
+  const intervalBefore = [...harness.intervals.values()][0].fn;
+  const writesBefore = harness.overlayTextWrites();
+
+  assert.equal((await harness.send({
+    type: "FUGUANG_ATTACH_VTT",
+    vtt: SAMPLE_VTT,
+    signature: "automatic-signature",
+    origin: "job-automatic",
+    jobId: "job-stable-attach",
+    attachmentRevision: 11,
+    preloadGeneration: 11
+  })).ok, true);
+
+  assert.equal([...video.listeners.get("timeupdate")][0], listenerBefore, "same cue content must keep existing listeners");
+  assert.equal([...harness.intervals.values()][0].fn, intervalBefore, "same cue content must keep the existing timer");
+  assert.equal(harness.overlayTextWrites(), writesBefore, "metadata-only refresh must not repaint the same cue");
+  const state = await harness.send({ type: "FUGUANG_GET_VIDEO_STATE" });
+  assert.equal(state.state.subtitleSignature, "automatic-signature");
+  assert.equal(state.state.subtitleRevision, 11);
+  assert.equal(state.state.subtitleGeneration, 11);
+}
+
+{
+  const video = new FakeMedia({ currentTime: 1, paused: true });
+  const videos = [video];
+  const harness = createHarness({ videos });
+  await harness.ready();
+  assert.equal((await harness.send({
+    type: "FUGUANG_ATTACH_VTT",
+    vtt: SAMPLE_VTT,
+    signature: "visible-before-player-replacement"
+  })).ok, true);
+  videos.splice(0, videos.length);
+  video.isConnected = false;
+
+  const replacement = await harness.send({
+    type: "FUGUANG_ATTACH_VTT",
+    vtt: OVERLAPPING_VTT,
+    signature: "replacement-without-player"
+  });
+  assert.equal(replacement.ok, true);
+  assert.equal(harness.overlayText(), "first cue", "a temporary missing player must not clear visible subtitles");
+  assert.equal(harness.intervals.size, 1, "the new subtitle controller must keep retrying until a player returns");
+  const newVideo = new FakeMedia({ currentTime: 77, paused: true });
+  videos.push(newVideo);
+  harness.runIntervals();
+  assert.equal(harness.overlayText(), "current cue", "the player replacement must use the newest VTT instead of the old cues");
+  const state = await harness.send({ type: "FUGUANG_GET_VIDEO_STATE" });
+  assert.equal(state.state.subtitleSignature, "replacement-without-player");
+}
+
+{
+  const video = new FakeMedia({ currentTime: 1, paused: true });
+  const harness = createHarness({ videos: [video] });
+  await harness.ready();
   assert.equal((await harness.send({ type: "FUGUANG_ATTACH_VTT", vtt: SAMPLE_VTT, signature: "sample-signature" })).ok, true);
   assert.equal(harness.overlayText(), "first cue");
   assert.equal(harness.intervals.size, 1);
@@ -737,8 +806,102 @@ later cue
   video.isConnected = false;
   harness.runIntervals();
 
-  assert.equal(harness.overlayHidden(), true);
+  assert.equal(harness.overlayHidden(), false);
+  assert.equal(harness.overlayText(), "first cue", "the replacement grace period must preserve the last visible cue");
+  assert.equal(harness.intervals.size, 1);
+  harness.advanceTime(2999);
+  harness.runIntervals();
+  assert.equal(harness.overlayText(), "first cue", "the full three-second grace period must remain continuous");
+  harness.advanceTime(1);
+  harness.runIntervals();
+  assert.equal(harness.overlayHidden(), true, "a permanently removed player must eventually clear its stale subtitle");
   assert.equal(harness.overlayText(), "");
+  assert.equal(harness.intervals.size, 1, "the expired controller must remain dormant so the same player can recover later");
+}
+
+{
+  const oldVideo = new FakeMedia({ currentTime: 1, paused: false });
+  oldVideo.currentSrc = "https://media.example.test/expired-job.mp4";
+  oldVideo.src = oldVideo.currentSrc;
+  const videos = [oldVideo];
+  const harness = createHarness({ videos });
+  await harness.ready();
+  assert.equal((await harness.send({
+    type: "FUGUANG_ATTACH_VTT",
+    vtt: SAMPLE_VTT,
+    signature: "expired-job-before-removal",
+    origin: "job-automatic",
+    jobId: "job-expired-media-binding",
+    attachmentRevision: 1,
+    preloadGeneration: 1
+  })).ok, true);
+
+  videos.splice(0, videos.length);
+  oldVideo.isConnected = false;
+  harness.runIntervals();
+  harness.advanceTime(3000);
+  harness.runIntervals();
+  assert.equal(harness.overlayHidden(), true);
+  assert.equal(harness.intervals.size, 1);
+
+  const refreshWithoutMedia = await harness.send({
+    type: "FUGUANG_ATTACH_VTT",
+    vtt: OVERLAPPING_VTT,
+    signature: "expired-job-streaming-refresh",
+    origin: "job-automatic",
+    jobId: "job-expired-media-binding",
+    attachmentRevision: 2,
+    preloadGeneration: 2
+  });
+  assert.equal(refreshWithoutMedia.ok, false, "a streaming refresh must not re-arm an expired media grace period");
+  assert.equal(
+    refreshWithoutMedia.mediaBindingRejected,
+    true,
+    "an expired owner-frame binding must tell the Service Worker not to project this job into unrelated frames"
+  );
+
+  const unrelated = new FakeMedia({ currentTime: 4, paused: false });
+  unrelated.currentSrc = "https://media.example.test/unrelated-after-expiry.mp4";
+  unrelated.src = unrelated.currentSrc;
+  unrelated.ownerDocument = harness.context.document;
+  videos.push(unrelated);
+  const refreshWithUnrelatedMedia = await harness.send({
+    type: "FUGUANG_ATTACH_VTT",
+    vtt: OVERLAPPING_VTT,
+    signature: "expired-job-unrelated-refresh",
+    origin: "job-automatic",
+    jobId: "job-expired-media-binding",
+    attachmentRevision: 3,
+    preloadGeneration: 3
+  });
+  assert.equal(refreshWithUnrelatedMedia.ok, false);
+  assert.equal(refreshWithUnrelatedMedia.mediaBindingRejected, true);
+  assert.equal(harness.overlayText(), "");
+  assert.equal(harness.intervals.size, 1);
+
+  videos.splice(0, videos.length);
+  unrelated.isConnected = false;
+  const returnedMedia = new FakeMedia({ currentTime: 77, paused: false });
+  returnedMedia.currentSrc = "https://media.example.test/expired-job.mp4";
+  returnedMedia.src = returnedMedia.currentSrc;
+  returnedMedia.ownerDocument = harness.context.document;
+  videos.push(returnedMedia);
+  const explicitRetryOnReturnedMedia = await harness.send({
+    type: "FUGUANG_ATTACH_VTT",
+    vtt: OVERLAPPING_VTT,
+    signature: "expired-job-explicit-retry",
+    origin: "job-automatic",
+    jobId: "job-expired-media-binding",
+    attachmentRevision: 4,
+    preloadGeneration: 4
+  });
+  assert.equal(
+    explicitRetryOnReturnedMedia.ok,
+    true,
+    "a higher-revision retry may reattach after the correct media returns"
+  );
+  assert.equal(harness.overlayText(), "current cue");
+  assert.equal(harness.intervals.size, 1);
 }
 
 {
@@ -751,6 +914,8 @@ later cue
   assert.equal(harness.overlayText(), "first cue");
 
   oldVideo.isConnected = false;
+  harness.runIntervals();
+  harness.advanceTime(2500);
   const newVideo = new FakeMedia({ width: 1200, height: 680, currentTime: 4, paused: false });
   newVideo.currentSrc = "https://media.example.test/old-video.mp4";
   newVideo.src = newVideo.currentSrc;
@@ -765,27 +930,287 @@ later cue
 }
 
 {
+  const video = new FakeMedia({ currentTime: 1, paused: false });
+  const videos = [video];
+  const harness = createHarness({ videos });
+  await harness.ready();
+  assert.equal((await harness.send({
+    type: "FUGUANG_ATTACH_VTT",
+    vtt: SAMPLE_VTT,
+    signature: "streaming-before-player-removal",
+    origin: "job-automatic",
+    jobId: "job-player-removal",
+    attachmentRevision: 1,
+    preloadGeneration: 1
+  })).ok, true);
+  assert.equal(harness.overlayText(), "first cue");
+
+  videos.splice(0, videos.length);
+  video.isConnected = false;
+  harness.runIntervals();
+  harness.advanceTime(2500);
+  assert.equal((await harness.send({
+    type: "FUGUANG_ATTACH_VTT",
+    vtt: OVERLAPPING_VTT,
+    signature: "streaming-after-player-removal",
+    origin: "job-automatic",
+    jobId: "job-player-removal",
+    attachmentRevision: 2,
+    preloadGeneration: 2
+  })).ok, true);
+  assert.equal(harness.overlayText(), "first cue", "a VTT refresh may preserve the visible cue inside the original grace period");
+
+  harness.advanceTime(500);
+  harness.runIntervals();
+  assert.equal(harness.overlayHidden(), true, "streaming VTT refreshes must not restart the media replacement grace period");
+  assert.equal(harness.overlayText(), "");
+  assert.equal(harness.intervals.size, 1, "the expired same-job binding must remain dormant after the original grace period");
+}
+
+{
+  const firstVideo = new FakeMedia({ width: 1200, height: 680, currentTime: 1, paused: false });
+  firstVideo.currentSrc = "https://media.example.test/first.mp4";
+  firstVideo.src = firstVideo.currentSrc;
+  const secondVideo = new FakeMedia({ width: 320, height: 180, currentTime: 77, paused: true });
+  secondVideo.currentSrc = "https://media.example.test/second.mp4";
+  secondVideo.src = secondVideo.currentSrc;
+  const harness = createHarness({ videos: [firstVideo, secondVideo] });
+  await harness.ready();
+  assert.equal((await harness.send({
+    type: "FUGUANG_ATTACH_VTT",
+    vtt: SAMPLE_VTT,
+    signature: "stream-before-primary-media-change",
+    origin: "job-automatic",
+    jobId: "job-primary-media-change",
+    attachmentRevision: 1,
+    preloadGeneration: 1
+  })).ok, true);
+  assert.equal(harness.overlayText(), "first cue");
+
+  firstVideo.paused = true;
+  secondVideo.paused = false;
+  secondVideo.clientWidth = 1920;
+  secondVideo.clientHeight = 1080;
+  const refreshed = await harness.send({
+    type: "FUGUANG_ATTACH_VTT",
+    vtt: OVERLAPPING_VTT,
+    signature: "stream-after-primary-media-change",
+    origin: "job-automatic",
+    jobId: "job-primary-media-change",
+    attachmentRevision: 2,
+    preloadGeneration: 2
+  });
+  assert.equal(refreshed.ok, false, "a streaming VTT refresh must not jump from the original media to a different primary source");
+  const stateResponse = await harness.send({ type: "FUGUANG_GET_VIDEO_STATE" });
+  assert.equal(stateResponse.state.currentSrc, "https://media.example.test/second.mp4");
+  assert.equal(stateResponse.state.subtitleSignature, "");
+}
+
+{
+  const stream = {};
+  const oldVideo = new FakeMedia({ currentTime: 1, paused: false });
+  oldVideo.currentSrc = "blob:https://media.example.test/stale-old";
+  oldVideo.src = oldVideo.currentSrc;
+  oldVideo.srcObject = stream;
+  const harness = createHarness({ videos: [oldVideo] });
+  await harness.ready();
+  assert.equal((await harness.send({ type: "FUGUANG_ATTACH_VTT", vtt: SAMPLE_VTT })).ok, true);
+  assert.equal(harness.overlayText(), "first cue");
+
+  oldVideo.isConnected = false;
+  harness.runIntervals();
+  harness.advanceTime(1000);
+  const newVideo = new FakeMedia({ currentTime: 4, paused: false });
+  newVideo.currentSrc = "blob:https://media.example.test/stale-new";
+  newVideo.src = newVideo.currentSrc;
+  newVideo.srcObject = stream;
+  newVideo.ownerDocument = harness.context.document;
+  harness.videos.push(newVideo);
+  harness.runIntervals();
+
+  assert.equal(harness.overlayText(), "second cue", "a replacement using the same srcObject must remain compatible");
+  assert.equal(harness.intervals.size, 1);
+}
+
+{
+  const video = new FakeMedia({ currentTime: 1, paused: false });
+  const harness = createHarness({ videos: [video] });
+  await harness.ready();
+  assert.equal((await harness.send({ type: "FUGUANG_ATTACH_VTT", vtt: SAMPLE_VTT })).ok, true);
+  video.isConnected = false;
+  harness.runIntervals();
+  harness.advanceTime(5000);
+  video.currentTime = 4;
+  video.isConnected = true;
+  harness.runIntervals();
+  assert.equal(harness.overlayText(), "second cue", "the same DOM must revive its subtitle after returning late");
+  assert.equal(harness.intervals.size, 1);
+}
+
+{
+  const oldVideo = new FakeMedia({ currentTime: 1, paused: false });
+  oldVideo.currentSrc = "";
+  oldVideo.src = "";
+  const videos = [oldVideo];
+  const harness = createHarness({ videos });
+  await harness.ready();
+  assert.equal((await harness.send({ type: "FUGUANG_ATTACH_VTT", vtt: SAMPLE_VTT })).ok, true);
+  oldVideo.isConnected = false;
+  videos.splice(0, videos.length);
+  harness.runIntervals();
+  const unknownReplacement = new FakeMedia({ currentTime: 4, paused: false });
+  unknownReplacement.currentSrc = "";
+  unknownReplacement.src = "";
+  unknownReplacement.ownerDocument = harness.context.document;
+  videos.push(unknownReplacement);
+  harness.advanceTime(5000);
+  harness.runIntervals();
+  assert.equal(harness.overlayText(), "", "an unknown replacement identity cannot keep the old subtitle beyond the grace period");
+  assert.equal(harness.intervals.size, 1);
+}
+
+{
+  const firstVideo = new FakeMedia({ width: 1200, height: 680, currentTime: 1, paused: false });
+  firstVideo.currentSrc = "https://media.example.test/manual-first.mp4";
+  firstVideo.src = firstVideo.currentSrc;
+  const secondVideo = new FakeMedia({ width: 320, height: 180, currentTime: 77, paused: true });
+  secondVideo.currentSrc = "https://media.example.test/manual-second.mp4";
+  secondVideo.src = secondVideo.currentSrc;
+  const harness = createHarness({ videos: [firstVideo, secondVideo] });
+  await harness.ready();
+  assert.equal((await harness.send({ type: "FUGUANG_ATTACH_VTT", vtt: SAMPLE_VTT })).ok, true);
+  firstVideo.paused = true;
+  secondVideo.paused = false;
+  secondVideo.clientWidth = 1920;
+  secondVideo.clientHeight = 1080;
+  assert.equal((await harness.send({ type: "FUGUANG_ATTACH_VTT", vtt: OVERLAPPING_VTT })).ok, true);
+  const stateResponse = await harness.send({ type: "FUGUANG_GET_VIDEO_STATE" });
+  assert.equal(stateResponse.state.currentSrc, "https://media.example.test/manual-second.mp4");
+  assert.equal(stateResponse.state.subtitleSignature, "");
+  assert.equal(harness.overlayText(), "current cue");
+}
+
+{
+  const video = new FakeMedia({ currentTime: 77, paused: false });
+  video.currentSrc = "https://media.example.test/quality-old.mp4";
+  video.src = video.currentSrc;
+  const harness = createHarness({ videos: [video] });
+  await harness.ready();
+  assert.equal((await harness.send({
+    type: "FUGUANG_ATTACH_VTT",
+    vtt: SAMPLE_VTT,
+    origin: "job-automatic",
+    jobId: "job-quality-stream-refresh",
+    attachmentRevision: 1,
+    preloadGeneration: 1
+  })).ok, true);
+  video.currentSrc = "https://media.example.test/quality-new.mp4";
+  video.src = video.currentSrc;
+  assert.equal((await harness.send({
+    type: "FUGUANG_ATTACH_VTT",
+    vtt: OVERLAPPING_VTT,
+    origin: "job-automatic",
+    jobId: "job-quality-stream-refresh",
+    attachmentRevision: 2,
+    preloadGeneration: 2
+  })).ok, true, "same-DOM quality switching and streaming refresh must remain compatible");
+  assert.equal(harness.overlayText(), "current cue");
+}
+
+{
+  const firstVideo = new FakeMedia({ width: 1200, height: 680, currentTime: 1, paused: false });
+  firstVideo.currentSrc = "https://media.example.test/same-cue-first.mp4";
+  firstVideo.src = firstVideo.currentSrc;
+  const secondVideo = new FakeMedia({ width: 320, height: 180, currentTime: 1, paused: true });
+  secondVideo.currentSrc = "https://media.example.test/same-cue-second.mp4";
+  secondVideo.src = secondVideo.currentSrc;
+  const harness = createHarness({ videos: [firstVideo, secondVideo] });
+  await harness.ready();
+  assert.equal((await harness.send({
+    type: "FUGUANG_ATTACH_VTT",
+    vtt: SAMPLE_VTT,
+    origin: "job-automatic",
+    jobId: "job-same-cue-media-change",
+    attachmentRevision: 1,
+    preloadGeneration: 1
+  })).ok, true);
+  firstVideo.paused = true;
+  secondVideo.paused = false;
+  secondVideo.clientWidth = 1920;
+  secondVideo.clientHeight = 1080;
+  const sameCueRefresh = await harness.send({
+    type: "FUGUANG_ATTACH_VTT",
+    vtt: SAMPLE_VTT,
+    origin: "job-automatic",
+    jobId: "job-same-cue-media-change",
+    attachmentRevision: 2,
+    preloadGeneration: 2
+  });
+  assert.equal(sameCueRefresh.ok, false, "same-cue metadata refresh must report a detach from an unrelated primary media");
+  assert.equal(harness.overlayText(), "");
+}
+
+{
   const oldVideo = new FakeMedia({ width: 1200, height: 680, currentTime: 1, paused: false });
   oldVideo.currentSrc = "https://media.example.test/old-video.mp4";
   oldVideo.src = oldVideo.currentSrc;
+  const playerHost = new FakeElement("div");
+  playerHost.appendChild(oldVideo);
   const harness = createHarness({ videos: [oldVideo] });
   await harness.ready();
   assert.equal((await harness.send({ type: "FUGUANG_ATTACH_VTT", vtt: SAMPLE_VTT, signature: "old-video-signature" })).ok, true);
   assert.equal(harness.overlayText(), "first cue");
 
   oldVideo.isConnected = false;
+  harness.runIntervals();
   const newVideo = new FakeMedia({ width: 1200, height: 680, currentTime: 4, paused: false });
-  newVideo.currentSrc = "https://media.example.test/new-video.mp4";
+  newVideo.currentSrc = "https://media.example.test/old-video.mp4";
   newVideo.src = newVideo.currentSrc;
   newVideo.ownerDocument = harness.context.document;
+  playerHost.appendChild(newVideo);
   harness.videos.push(newVideo);
   harness.runIntervals();
 
-  assert.equal(harness.overlayHidden(), true);
-  assert.equal(harness.overlayText(), "");
+  assert.equal(harness.overlayHidden(), false, "a replacement DOM with the same media identity must inherit VTT inside the bounded grace period");
+  assert.equal(harness.overlayText(), "second cue");
+  assert.equal(harness.intervals.size, 1);
   const stateResponse = await harness.send({ type: "FUGUANG_GET_VIDEO_STATE" });
   assert.equal(stateResponse.ok, true);
-  assert.equal(stateResponse.state.subtitleSignature, "");
+  assert.equal(stateResponse.state.currentSrc, "https://media.example.test/old-video.mp4");
+  assert.equal(stateResponse.state.subtitleSignature, "old-video-signature");
+}
+
+{
+  const programVideo = new FakeMedia({ width: 1200, height: 680, currentTime: 1, paused: false });
+  programVideo.currentSrc = "https://media.example.test/program.mp4";
+  programVideo.src = programVideo.currentSrc;
+  const programHost = new FakeElement("div");
+  programHost.appendChild(programVideo);
+  const harness = createHarness({ videos: [programVideo] });
+  await harness.ready();
+  assert.equal((await harness.send({
+    type: "FUGUANG_ATTACH_VTT",
+    vtt: SAMPLE_VTT,
+    signature: "program-signature",
+    origin: "job-automatic",
+    jobId: "job-program"
+  })).ok, true);
+  assert.equal(harness.overlayText(), "first cue");
+
+  programVideo.isConnected = false;
+  harness.runIntervals();
+  const adVideo = new FakeMedia({ width: 1200, height: 680, currentTime: 1, paused: false });
+  adVideo.currentSrc = "https://ads.example.test/ad.mp4";
+  adVideo.src = adVideo.currentSrc;
+  programHost.appendChild(adVideo);
+  adVideo.ownerDocument = harness.context.document;
+  harness.videos.push(adVideo);
+  harness.runIntervals();
+
+  assert.equal(harness.overlayHidden(), true, "an ad replacement in the same player host must not inherit program subtitles");
+  const stateResponse = await harness.send({ type: "FUGUANG_GET_VIDEO_STATE" });
+  assert.equal(stateResponse.ok, true);
+  assert.equal(stateResponse.state.subtitleJobId, "");
 }
 
 {
@@ -802,11 +1227,11 @@ later cue
   video.currentTime = 4;
   harness.runIntervals();
 
-  assert.equal(harness.overlayHidden(), true);
-  assert.equal(harness.overlayText(), "");
+  assert.equal(harness.overlayHidden(), false);
+  assert.equal(harness.overlayText(), "second cue", "quality/source switching on the same player must retain subtitles");
   const stateResponse = await harness.send({ type: "FUGUANG_GET_VIDEO_STATE" });
   assert.equal(stateResponse.ok, true);
-  assert.equal(stateResponse.state.subtitleSignature, "");
+  assert.equal(stateResponse.state.subtitleSignature, "old-video-signature");
 }
 
 {

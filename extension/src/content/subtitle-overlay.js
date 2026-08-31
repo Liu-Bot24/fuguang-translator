@@ -34,6 +34,7 @@
   const MIN_POSITION_RATIO = 0.04;
   const MAX_POSITION_RATIO = 0.96;
   const SEEK_REFRESH_DELAYS = [120, 450, 1200];
+  const MEDIA_REPLACEMENT_GRACE_MS = 3000;
   let captionPosition = { ...DEFAULT_POSITION };
   let captionSettings = { ...SETTINGS_DEFAULTS };
   let isDragging = false;
@@ -41,6 +42,7 @@
   let dragOffsetY = 0;
   let savePositionTimer = 0;
   let activeVttController = null;
+  let expiredJobMediaBinding = null;
   let latestPreloadGeneration = 0;
   let lastPrimaryMedia = null;
   const pendingCaptionTimers = new Set();
@@ -119,15 +121,14 @@
       if (preloadGeneration) {
         latestPreloadGeneration = Math.max(latestPreloadGeneration, preloadGeneration);
       }
-      sendResponse({
-        ok: attachVtt(
-          message.vtt,
-          message.label || "流声字幕",
-          message.signature || "",
-          preloadGeneration,
-          { origin, jobId, attachmentRevision }
-        )
-      });
+      const attachResult = attachVtt(
+        message.vtt,
+        message.label || "流声字幕",
+        message.signature || "",
+        preloadGeneration,
+        { origin, jobId, attachmentRevision }
+      );
+      sendResponse(attachVttResponse(attachResult));
       return false;
     }
     if (message?.type === MESSAGE.GET_VIDEO_STATE) {
@@ -742,35 +743,69 @@
   }
 
   function attachVtt(vtt, label, signature = "", preloadGeneration = 0, metadata = {}) {
-    if (!vtt || !captionSettings.subtitleOverlayEnabled) {
+    if (!captionSettings.subtitleOverlayEnabled) {
       detachActiveVttController();
       clearCaption();
+      return false;
+    }
+    if (!vtt) {
+      if (!activeVttController) {
+        clearCaption();
+      }
       return false;
     }
     const cues = parseVtt(vtt);
     if (!cues.length) {
-      detachActiveVttController();
-      clearCaption();
+      if (!activeVttController) {
+        clearCaption();
+      }
       return false;
     }
-    detachActiveVttController();
+    const incomingOrigin = normalizeSubtitleAttachmentOrigin(metadata?.origin, preloadGeneration);
+    const incomingJobId = String(metadata?.jobId || "");
+    const cueContentKey = subtitleCueContentKey(cues);
+    const currentController = activeVttController;
+    if (
+      currentController?.cueContentKey === cueContentKey &&
+      incomingJobId &&
+      currentController.jobId === incomingJobId &&
+      subtitleAttachmentIsJobOwned(incomingOrigin) &&
+      subtitleAttachmentIsJobOwned(currentController.origin)
+    ) {
+      updateVttControllerMetadata(currentController, label, signature, preloadGeneration, metadata);
+      currentController.updateCaption?.();
+      if (currentController.mediaBindingRejected) {
+        return attachVttMediaBindingResult(currentController);
+      }
+      return activeVttController === currentController
+        ? true
+        : attachVttMediaBindingResult(currentController);
+    }
+    const mediaHandoff = controllerMediaHandoff(activeVttController, incomingOrigin, incomingJobId);
     const events = ["timeupdate", "seeked", "seeking", "play", "pause", "loadedmetadata", "durationchange", "ratechange", "resize"];
     const controller = {
       cues,
+      cueContentKey,
       events,
       media: null,
+      preferredMedia: mediaHandoff.preferredMedia,
       interval: 0,
       updateCaption: null,
       lastCue: null,
       pendingSeekCue: null,
       pendingSeekUntil: 0,
-      label: String(label || "流声字幕"),
-      signature: String(signature || ""),
-      preloadGeneration: normalizePreloadGeneration(preloadGeneration),
-      origin: normalizeSubtitleAttachmentOrigin(metadata.origin, preloadGeneration),
-      jobId: String(metadata.jobId || ""),
-      attachmentRevision: normalizeSubtitleAttachmentRevision(metadata.attachmentRevision),
-      mediaSignature: "",
+      label: "",
+      signature: "",
+      preloadGeneration: 0,
+      origin: "user-override",
+      jobId: "",
+      attachmentRevision: 0,
+      mediaSignature: mediaHandoff.mediaSignature,
+      mediaSourceObject: mediaHandoff.mediaSourceObject,
+      mediaUnavailableSince: mediaHandoff.mediaUnavailableSince,
+      mediaBindingExpected: mediaHandoff.mediaBindingExpected,
+      expiredMediaBinding: mediaHandoff.expiredMediaBinding,
+      mediaBindingRejected: false,
       nativeTrack: null,
       nativeTrackMedia: null,
       nativeCues: []
@@ -778,19 +813,18 @@
     const updateCaption = () => {
       const media = bindControllerToMedia(controller);
       if (!media) {
-        controller.lastCue = null;
-        disableNativeSubtitleTrack(controller);
-        clearCaption();
+        // Players often replace their media element briefly while buffering or switching quality.
+        // Keep the last visible cue during the bounded replacement grace period.
         return;
       }
       if (syncNativeFullscreenSubtitles(controller, media)) {
-        controller.lastCue = findCueAt(cues, media.currentTime) || null;
+        controller.lastCue = findCueAt(controller.cues, media.currentTime) || null;
         clearCaption({ force: true });
         return;
       }
       disableNativeSubtitleTrack(controller);
       const hasPendingSeekCue = controller.pendingSeekCue && performance.now() < controller.pendingSeekUntil;
-      const cue = findCueAt(cues, media.currentTime);
+      const cue = findCueAt(controller.cues, media.currentTime);
       if (cue) {
         controller.pendingSeekCue = null;
         renderControllerCue(controller, cue);
@@ -804,16 +838,145 @@
       }
     };
     controller.updateCaption = updateCaption;
+    updateVttControllerMetadata(controller, label, signature, preloadGeneration, metadata);
+    detachActiveVttController();
     activeVttController = controller;
     const media = bindControllerToMedia(controller);
-    if (!media) {
+    if (activeVttController !== controller) {
+      return attachVttMediaBindingResult(controller);
+    }
+    if (!media && !controller.mediaBindingExpected) {
       detachActiveVttController();
-      clearCaption();
-      return false;
+      clearCaption({ force: true });
+      return { ok: false, noTargetMedia: true };
     }
     controller.interval = window.setInterval(updateCaption, 500);
-    updateCaption();
-    return true;
+    if (media) {
+      updateCaption();
+    }
+    return controller.mediaBindingRejected
+      ? attachVttMediaBindingResult(controller)
+      : true;
+  }
+
+  function attachVttResponse(result) {
+    if (result && typeof result === "object") {
+      return result;
+    }
+    return { ok: Boolean(result) };
+  }
+
+  function attachVttMediaBindingResult(controller) {
+    return controller?.mediaBindingRejected
+      ? { ok: false, mediaBindingRejected: true }
+      : false;
+  }
+
+  function controllerMediaHandoff(controller, incomingOrigin, incomingJobId) {
+    const sameJobAttachmentOwner = Boolean(
+      controller &&
+      incomingJobId &&
+      controller.jobId === incomingJobId &&
+      subtitleAttachmentIsJobOwned(incomingOrigin) &&
+      subtitleAttachmentIsJobOwned(controller.origin)
+    );
+    const unavailableManualAttachmentOwner = Boolean(
+      controller &&
+      !incomingJobId &&
+      !controller.jobId &&
+      (
+        controller.mediaUnavailableSince != null ||
+        (controller.media && !mediaStillUsable(controller.media))
+      )
+    );
+    const sameAttachmentOwner = sameJobAttachmentOwner || unavailableManualAttachmentOwner;
+    if (!sameAttachmentOwner) {
+      if (
+        subtitleAttachmentIsJobOwned(incomingOrigin) &&
+        incomingJobId &&
+        expiredJobMediaBinding?.jobId === incomingJobId
+      ) {
+        return {
+          preferredMedia: expiredJobMediaBinding.preferredMedia,
+          mediaSignature: expiredJobMediaBinding.mediaSignature,
+          mediaSourceObject: expiredJobMediaBinding.mediaSourceObject,
+          mediaUnavailableSince: null,
+          mediaBindingExpected: true,
+          expiredMediaBinding: true
+        };
+      }
+      if (incomingJobId !== expiredJobMediaBinding?.jobId) {
+        expiredJobMediaBinding = null;
+      }
+      return emptyControllerMediaHandoff();
+    }
+    const mediaUnavailable = Boolean(
+      controller.mediaUnavailableSince != null ||
+      (controller.media && !mediaStillUsable(controller.media))
+    );
+    return {
+      preferredMedia: controller.media || controller.preferredMedia || null,
+      mediaSignature: String(controller.mediaSignature || ""),
+      mediaSourceObject: controller.mediaSourceObject || null,
+      mediaUnavailableSince: mediaUnavailable
+        ? controller.mediaUnavailableSince ?? performance.now()
+        : null,
+      mediaBindingExpected: Boolean(
+        controller.mediaBindingExpected ||
+        controller.media ||
+        controller.mediaSignature ||
+        controller.mediaSourceObject
+      ),
+      expiredMediaBinding: Boolean(controller.expiredMediaBinding)
+    };
+  }
+
+  function emptyControllerMediaHandoff() {
+    return {
+      preferredMedia: null,
+      mediaSignature: "",
+      mediaSourceObject: null,
+      mediaUnavailableSince: null,
+      mediaBindingExpected: false,
+      expiredMediaBinding: false
+    };
+  }
+
+  function rememberExpiredJobMediaBinding(controller) {
+    if (
+      !controller ||
+      !subtitleAttachmentIsJobOwned(controller.origin) ||
+      !controller.jobId ||
+      (!controller.mediaSignature && !controller.mediaSourceObject)
+    ) {
+      return;
+    }
+    expiredJobMediaBinding = {
+      jobId: controller.jobId,
+      preferredMedia: controller.media || controller.preferredMedia || null,
+      mediaSignature: String(controller.mediaSignature || ""),
+      mediaSourceObject: controller.mediaSourceObject || null,
+      mediaUnavailableSince: controller.mediaUnavailableSince ?? performance.now()
+    };
+  }
+
+  function clearExpiredJobMediaBinding(controller) {
+    if (controller?.jobId && expiredJobMediaBinding?.jobId === controller.jobId) {
+      expiredJobMediaBinding = null;
+    }
+  }
+
+  function subtitleCueContentKey(cues = []) {
+    return cues.map(cue => `${Number(cue.start)}\u0000${Number(cue.end)}\u0000${String(cue.text || "")}`).join("\u0001");
+  }
+
+  function updateVttControllerMetadata(controller, label, signature, preloadGeneration, metadata = {}) {
+    controller.label = String(label || "流声字幕");
+    controller.signature = String(signature || "");
+    controller.preloadGeneration = normalizePreloadGeneration(preloadGeneration);
+    controller.origin = normalizeSubtitleAttachmentOrigin(metadata.origin, preloadGeneration);
+    controller.jobId = String(metadata.jobId || "");
+    controller.attachmentRevision = normalizeSubtitleAttachmentRevision(metadata.attachmentRevision);
   }
 
   function findCueAt(cues, time) {
@@ -844,28 +1007,133 @@
   }
 
   function bindControllerToMedia(controller) {
-    const next = findPrimaryVideo(controller.media);
+    const preferredMedia = controller.media || controller.preferredMedia;
+    if (
+      controller.mediaBindingExpected &&
+      preferredMedia &&
+      !mediaStillUsable(preferredMedia) &&
+      !controller.expiredMediaBinding
+    ) {
+      noteControllerMediaUnavailable(controller);
+    }
+    const next = findPrimaryVideo(preferredMedia);
     if (!next) {
+      if (controller.expiredMediaBinding) {
+        rejectControllerMediaBinding(controller);
+        return null;
+      }
+      noteControllerMediaUnavailable(controller);
+      if (controllerMediaReplacementGraceExpired(controller)) {
+        expireControllerMediaBinding(controller);
+      }
       return null;
     }
     const nextSignature = mediaElementSignature(next);
-    if (controller.mediaSignature && nextSignature && controller.mediaSignature !== nextSignature) {
-      detachActiveVttController();
-      clearCaption();
-      return null;
+    const nextSourceObject = mediaElementSourceObject(next);
+    const exactPreferredMedia = next === controller.preferredMedia;
+    if (controller.expiredMediaBinding) {
+      const compatibility = exactPreferredMedia
+        ? true
+        : compareMediaBindings(controller, nextSignature, nextSourceObject);
+      if (compatibility !== true) {
+        rejectControllerMediaBinding(controller);
+        return null;
+      }
+      controller.expiredMediaBinding = false;
+      controller.mediaBindingRejected = false;
+      controller.mediaUnavailableSince = null;
+    }
+    if (controllerMediaReplacementGraceExpired(controller)) {
+      const compatibility = exactPreferredMedia
+        ? true
+        : compareMediaBindings(controller, nextSignature, nextSourceObject);
+      if (compatibility !== true) {
+        expireControllerMediaBinding(controller);
+        return null;
+      }
+      controller.mediaUnavailableSince = null;
     }
     if (next === controller.media) {
+      if (nextSignature || nextSourceObject) {
+        controller.mediaSignature = nextSignature;
+        controller.mediaSourceObject = nextSourceObject;
+      }
+      controller.mediaUnavailableSince = null;
+      controller.mediaBindingExpected = true;
+      controller.mediaBindingRejected = false;
       return controller.media;
+    }
+    if (controller.mediaBindingExpected && !exactPreferredMedia) {
+      const compatibility = compareMediaBindings(controller, nextSignature, nextSourceObject);
+      if (compatibility === false) {
+        expireControllerMediaBinding(controller);
+        return null;
+      }
+      if (compatibility == null) {
+        noteControllerMediaUnavailable(controller);
+        return null;
+      }
     }
     if (controller.media) {
       controller.events.forEach(event => controller.media.removeEventListener(event, controller.updateCaption));
     }
     controller.media = next;
-    if (nextSignature) {
-      controller.mediaSignature = nextSignature;
-    }
+    controller.preferredMedia = next;
+    controller.mediaSignature = nextSignature;
+    controller.mediaSourceObject = nextSourceObject;
+    controller.mediaUnavailableSince = null;
+    controller.mediaBindingExpected = true;
+    controller.mediaBindingRejected = false;
+    clearExpiredJobMediaBinding(controller);
     controller.events.forEach(event => next.addEventListener(event, controller.updateCaption));
     return next;
+  }
+
+  function noteControllerMediaUnavailable(controller) {
+    if (controller.mediaUnavailableSince == null) {
+      controller.mediaUnavailableSince = performance.now();
+    }
+  }
+
+  function controllerMediaReplacementGraceExpired(controller) {
+    return controller.mediaUnavailableSince != null &&
+      performance.now() - controller.mediaUnavailableSince >= MEDIA_REPLACEMENT_GRACE_MS;
+  }
+
+  function compareMediaBindings(controller, nextSignature, nextSourceObject) {
+    if (controller.mediaSourceObject && nextSourceObject) {
+      return controller.mediaSourceObject === nextSourceObject;
+    }
+    if (controller.mediaSignature && nextSignature) {
+      return controller.mediaSignature === nextSignature;
+    }
+    if (
+      (controller.mediaSignature && nextSourceObject) ||
+      (controller.mediaSourceObject && nextSignature)
+    ) {
+      return false;
+    }
+    return null;
+  }
+
+  function expireControllerMediaBinding(controller) {
+    if (activeVttController !== controller) {
+      return;
+    }
+    controller.mediaBindingRejected = true;
+    controller.expiredMediaBinding = true;
+    rememberExpiredJobMediaBinding(controller);
+    disableNativeSubtitleTrack(controller);
+    if (controller.media) {
+      controller.events.forEach(event => controller.media.removeEventListener(event, controller.updateCaption));
+      controller.media = null;
+    }
+    clearCaption({ force: true });
+  }
+
+  function rejectControllerMediaBinding(controller) {
+    controller.mediaBindingRejected = true;
+    expireControllerMediaBinding(controller);
   }
 
   function mediaElementSignature(media) {
@@ -874,6 +1142,10 @@
       return `src:${source}`;
     }
     return "";
+  }
+
+  function mediaElementSourceObject(media) {
+    return media?.srcObject && typeof media.srcObject === "object" ? media.srcObject : null;
   }
 
   function detachActiveVttController() {
@@ -1037,8 +1309,15 @@
   }
 
   function getVideoState() {
-    activeVttController?.updateCaption?.();
-    const media = activeVttController ? bindControllerToMedia(activeVttController) : findPrimaryVideo();
+    const controller = activeVttController;
+    controller?.updateCaption?.();
+    let media = controller ? bindControllerToMedia(controller) : findPrimaryVideo();
+    const subtitleBound = Boolean(
+      media && controller?.media === media && !controller.mediaBindingRejected
+    );
+    if (!media && controller?.mediaBindingRejected) {
+      media = findPrimaryVideo();
+    }
     if (!media) {
       return null;
     }
@@ -1048,13 +1327,13 @@
       duration: media.duration,
       paused: media.paused,
       playbackRate: media.playbackRate,
-      subtitleSignature: activeVttController?.signature || "",
-      subtitleGeneration: activeVttController?.preloadGeneration || 0,
-      subtitleOrigin: activeVttController?.origin || "",
-      subtitleJobId: activeVttController?.jobId || "",
-      subtitleRevision: activeVttController?.attachmentRevision || 0,
-      mediaSignature: activeVttController?.mediaSignature || mediaElementSignature(media),
-      subtitleCueCount: activeVttController?.cues?.length || 0
+      subtitleSignature: subtitleBound ? controller.signature : "",
+      subtitleGeneration: subtitleBound ? controller.preloadGeneration : 0,
+      subtitleOrigin: subtitleBound ? controller.origin : "",
+      subtitleJobId: subtitleBound ? controller.jobId : "",
+      subtitleRevision: subtitleBound ? controller.attachmentRevision : 0,
+      mediaSignature: subtitleBound ? (controller.mediaSignature || mediaElementSignature(media)) : mediaElementSignature(media),
+      subtitleCueCount: subtitleBound ? controller.cues?.length || 0 : 0
     };
   }
 

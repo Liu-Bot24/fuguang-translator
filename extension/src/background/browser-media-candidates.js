@@ -1,6 +1,5 @@
 import { FuguangMediaAssetModel } from "./media-asset-model.js";
 import { FuguangMediaSourceResolvers } from "./media-source-resolvers.js";
-import "../shared/media-network-policy.js";
 
 export const FuguangBrowserMediaCandidates = (() => {
   const INTERNAL_REQUEST_HEADER_NAMES = new Set(["authorization"]);
@@ -23,14 +22,16 @@ export const FuguangBrowserMediaCandidates = (() => {
   const ASR_AUDIO_ACCEPTABLE_LOW_BPS = 48_000;
   const ASR_AUDIO_ACCEPTABLE_HIGH_BPS = 320_000;
   const ASR_AUDIO_PLAUSIBLE_HIGH_BPS = 768_000;
+  const VOLATILE_MEDIA_QUERY_NAMES = new Set([
+    "access_token", "auth_token", "authorization", "exp", "expires", "expiry",
+    "hdnea", "hdnts", "key-pair-id", "keypairid", "nonce", "policy", "session",
+    "session_id", "sessionid", "sid", "sig", "signature", "token"
+  ]);
   
   
   function candidateFingerprint(candidate) {
     const urlKey = canonicalStreamUrl(candidate.url);
     const urlInfo = parseUrlInfo(candidate.url);
-    if (candidate.url && candidateRequiresResponseProof(candidate)) {
-      return `${candidate.kind}:${exactStreamUrl(candidate.url) || candidate.url}`;
-    }
     const bilibiliIdentity = getBilibiliMediaIdentity(urlInfo);
     if (bilibiliIdentity) {
       return `bilibili:${bilibiliIdentity}:${getBilibiliTrackIdentity(urlInfo, candidate)}`;
@@ -47,19 +48,9 @@ export const FuguangBrowserMediaCandidates = (() => {
   }
   
   function mergeCandidate(existing, incoming) {
-    if (privateCandidateVariantsDiffer(existing, incoming)) {
-      return mergeIsolatedPrivateCandidateVariant(existing, incoming);
-    }
     const merged = { ...existing };
-    const preserveExistingResponseProof = candidateRequiresResponseProof(existing) &&
-      hasSuccessfulResponseProof(existing) &&
-      String(incoming?.source || "") !== "response";
-    const replaceResponseAttestation = String(incoming?.source || "") === "response";
     for (const [key, value] of Object.entries(incoming)) {
       if (key === "requestHeaders" || key === "responseHeaders") {
-        continue;
-      }
-      if (preserveExistingResponseProof && isResponseProofField(key)) {
         continue;
       }
       if (shouldUseIncomingCandidateField(key, value, merged[key])) {
@@ -68,74 +59,15 @@ export const FuguangBrowserMediaCandidates = (() => {
     }
     return {
       ...merged,
-      requestHeaders: replaceResponseAttestation
-        ? sanitizeInternalRequestHeaders(incoming.requestHeaders)
-        : {
-            ...sanitizeInternalRequestHeaders(existing.requestHeaders),
-            ...(preserveExistingResponseProof ? {} : sanitizeInternalRequestHeaders(incoming.requestHeaders))
-          },
-      responseHeaders: replaceResponseAttestation
-        ? { ...(incoming.responseHeaders || {}) }
-        : {
-            ...(existing.responseHeaders || {}),
-            ...(preserveExistingResponseProof ? {} : (incoming.responseHeaders || {}))
-          },
+      requestHeaders: {
+        ...sanitizeInternalRequestHeaders(existing.requestHeaders),
+        ...sanitizeInternalRequestHeaders(incoming.requestHeaders)
+      },
+      responseHeaders: {
+        ...(existing.responseHeaders || {}),
+        ...(incoming.responseHeaders || {})
+      },
       firstSeenAt: existing.firstSeenAt || existing.seenAt,
-      seenAt: incoming.seenAt || Date.now()
-    };
-  }
-
-  function isResponseProofField(key) {
-    return [
-      "url",
-      "source",
-      "requestId",
-      "responseStatus",
-      "responseIp",
-      "initiator",
-      "requestType",
-      "frameId",
-      "documentId",
-      "parentFrameId",
-      "parentDocumentId"
-    ].includes(String(key || ""));
-  }
-
-  function privateCandidateVariantsDiffer(existing = {}, incoming = {}) {
-    const existingUrl = exactStreamUrl(existing.url);
-    const incomingUrl = exactStreamUrl(incoming.url);
-    return Boolean(
-      existingUrl &&
-      incomingUrl &&
-      existingUrl !== incomingUrl &&
-      (candidateRequiresResponseProof(existing) || candidateRequiresResponseProof(incoming))
-    );
-  }
-
-  function mergeIsolatedPrivateCandidateVariant(existing = {}, incoming = {}) {
-    const merged = { ...existing, ...incoming };
-    const provenanceFields = [
-      "requestId",
-      "responseStatus",
-      "responseIp",
-      "initiator",
-      "requestType",
-      "frameId",
-      "documentId",
-      "parentFrameId",
-      "parentDocumentId"
-    ];
-    for (const field of provenanceFields) {
-      if (!Object.prototype.hasOwnProperty.call(incoming, field)) {
-        delete merged[field];
-      }
-    }
-    return {
-      ...merged,
-      source: String(incoming.source || "page"),
-      requestHeaders: sanitizeInternalRequestHeaders(incoming.requestHeaders),
-      responseHeaders: { ...(incoming.responseHeaders || {}) },
-      firstSeenAt: incoming.firstSeenAt || incoming.seenAt,
       seenAt: incoming.seenAt || Date.now()
     };
   }
@@ -207,18 +139,9 @@ export const FuguangBrowserMediaCandidates = (() => {
       return Number(value) > 0;
     }
     if (key === "source") {
-      const incomingObserved = isBrowserObservedCandidateSource(value);
-      const existingObserved = isBrowserObservedCandidateSource(existingValue);
-      if (incomingObserved !== existingObserved) {
-        return incomingObserved;
-      }
       return candidateSourceRank(value) >= candidateSourceRank(existingValue);
     }
     return true;
-  }
-
-  function isBrowserObservedCandidateSource(source) {
-    return ["request", "request-headers", "response"].includes(String(source || ""));
   }
   
   function candidateSourceRank(source) {
@@ -320,110 +243,17 @@ export const FuguangBrowserMediaCandidates = (() => {
     const internalCandidate = getGroupedCandidatesForState(state)
       .find(item => candidatesReferToSamePreloadTarget(item, candidate));
     if (!internalCandidate) {
-      const unverified = removeUntrustedStartFields(stripCandidateRequestHeaders(candidate || {}));
-      const trust = mediaCandidateTrust(unverified, { observed: false });
-      return { ...unverified, ...trust };
+      return removeUntrustedStartFields(stripCandidateRequestHeaders(candidate || {}));
     }
     const safeInternalCandidate = stripCandidateRequestHeaders(internalCandidate);
-    const trust = mediaCandidateTrust(internalCandidate, {
-      observed: true,
-      currentDocumentIdsByFrame: state?.documentIdsByFrame instanceof Map
-        ? new Map(state.documentIdsByFrame)
-        : null,
-      currentDocumentIds: state?.documentIdsByFrame instanceof Map
-        ? new Set(state.documentIdsByFrame.values())
-        : null
-    });
     return {
       ...safeInternalCandidate,
-      ...trust,
       ...localMediaFileStartFields(candidate),
       requestHeaders: internalCandidate.requestHeaders || null,
       requestHeadersByOrigin: sanitizeRequestHeadersByOrigin(internalCandidate.requestHeadersByOrigin),
       responseHeaders: internalCandidate.responseHeaders || {},
       sourcePlanTrusted: Boolean(internalCandidate.sourcePlan)
     };
-  }
-
-  function mediaCandidateTrust(candidate = {}, options = {}) {
-    const source = String(candidate.source || "");
-    const observedSource = isBrowserObservedCandidateSource(source);
-    if (isFileUrl(candidate.url)) {
-      const authorized = Boolean(localMediaFileStartFields(candidate).localMediaFileKey);
-      return {
-        trustTier: authorized ? "authorized-local-file" : "untrusted-local-file",
-        executionAllowed: authorized,
-        trustReason: authorized ? "local-file-handle" : "local-file-requires-authorization"
-      };
-    }
-    if (candidateRequiresResponseProof(candidate)) {
-      const observed = Boolean(options.observed && isVerifiedPrivateNetworkMediaResponse(candidate, options));
-      return {
-        trustTier: observed ? "observed-private-network" : "untrusted-private-network",
-        executionAllowed: observed,
-        trustReason: observed ? "browser-observed-response" : "private-network-source-not-observed"
-      };
-    }
-    return {
-      trustTier: options.observed ? "observed-public" : "unverified-public",
-      executionAllowed: true,
-      trustReason: options.observed ? "browser-observed-candidate" : "public-url-with-sensitive-fields-removed"
-    };
-  }
-
-  function isPrivateNetworkMediaUrl(rawUrl = "") {
-    return globalThis.FuguangMediaNetworkPolicy.isPrivateNetworkMediaUrl(rawUrl);
-  }
-
-  function candidateRequiresResponseProof(candidate = {}) {
-    if (isPrivateNetworkMediaUrl(candidate.url)) {
-      return true;
-    }
-    if (globalThis.FuguangMediaNetworkPolicy.isPrivateNetworkAddress(candidate.responseIp)) {
-      return true;
-    }
-    try {
-      const url = new URL(String(candidate.url || ""));
-      if (url.protocol !== "http:") {
-        return false;
-      }
-      const hostname = url.hostname.replace(/^\[|\]$/g, "");
-      return !/^(?:\d{1,3}\.){3}\d{1,3}$/.test(hostname) && !hostname.includes(":");
-    } catch {
-      return false;
-    }
-  }
-
-  function isVerifiedPrivateNetworkMediaResponse(candidate = {}, options = {}) {
-    if (!hasSuccessfulResponseProof(candidate)) {
-      return false;
-    }
-    const documentId = String(candidate.documentId || "");
-    const currentDocumentIdsByFrame = options.currentDocumentIdsByFrame;
-    if (currentDocumentIdsByFrame instanceof Map) {
-      const frameId = Number(candidate.frameId);
-      const normalizedFrameId = Number.isInteger(frameId) && frameId >= 0 ? frameId : 0;
-      if (String(currentDocumentIdsByFrame.get(normalizedFrameId) || "") !== documentId) {
-        return false;
-      }
-      const parentFrameId = Number(candidate.parentFrameId);
-      const parentDocumentId = String(candidate.parentDocumentId || "");
-      if (Number.isInteger(parentFrameId) && parentFrameId >= 0) {
-        return Boolean(parentDocumentId) &&
-          String(currentDocumentIdsByFrame.get(parentFrameId) || "") === parentDocumentId;
-      }
-      return true;
-    }
-    const currentDocumentIds = options.currentDocumentIds;
-    return currentDocumentIds instanceof Set && currentDocumentIds.size > 0 && currentDocumentIds.has(documentId);
-  }
-
-  function hasSuccessfulResponseProof(candidate = {}) {
-    if (String(candidate.source || "") !== "response") {
-      return false;
-    }
-    const status = Number(candidate.responseStatus || 0) || 0;
-    return ((status >= 200 && status < 300) || status === 304) && Boolean(String(candidate.documentId || ""));
   }
 
   function localMediaFileStartFields(candidate = {}) {
@@ -466,11 +296,6 @@ export const FuguangBrowserMediaCandidates = (() => {
     }
     if (left.url === right.url) {
       return true;
-    }
-    if (candidateRequiresResponseProof(left) || candidateRequiresResponseProof(right)) {
-      const leftExact = exactStreamUrl(left.url);
-      const rightExact = exactStreamUrl(right.url);
-      return Boolean(leftExact && rightExact && leftExact === rightExact);
     }
     const leftCanonical = canonicalStreamUrl(left.url);
     const rightCanonical = canonicalStreamUrl(right.url);
@@ -1014,6 +839,21 @@ export const FuguangBrowserMediaCandidates = (() => {
       return `asr:${pageKey}:${durationKey}`;
     }
     return `${candidate.kind}:${canonicalStreamUrl(candidate.url)}`;
+  }
+
+  function getMediaLineageKey(candidate) {
+    const media = candidate || {};
+    const urlInfo = parseUrlInfo(media.url);
+    const bilibiliMediaKey = getBilibiliMediaIdentity(urlInfo);
+    if (bilibiliMediaKey) {
+      return `media:v2:bilibili:${bilibiliMediaKey}`;
+    }
+    const xTwitterMediaKey = getXTwitterAnyMediaIdentity(urlInfo);
+    if (xTwitterMediaKey) {
+      return `media:v2:x-twitter:${xTwitterMediaKey}`;
+    }
+    const urlKey = canonicalMediaLineageUrl(media.url);
+    return urlKey ? `media:v2:url:${urlKey}` : "";
   }
   
   function isAsrSameContentCandidate(candidate) {
@@ -1587,6 +1427,34 @@ export const FuguangBrowserMediaCandidates = (() => {
     }
   }
 
+  function canonicalMediaLineageUrl(rawUrl) {
+    try {
+      const url = new URL(rawUrl);
+      if (!["http:", "https:"].includes(url.protocol)) {
+        return url.href;
+      }
+      const hasAzureSignature = url.searchParams.has("sig");
+      const stableQuery = [...url.searchParams.entries()]
+        .filter(([name]) => !isVolatileMediaQueryName(name, hasAzureSignature))
+        .sort(([leftName, leftValue], [rightName, rightValue]) =>
+          leftName.localeCompare(rightName) || leftValue.localeCompare(rightValue)
+        );
+      const query = new URLSearchParams(stableQuery).toString();
+      return `${url.host}${canonicalPathname(url.pathname)}${query ? `?${query}` : ""}`;
+    } catch {
+      return String(rawUrl || "").split("#", 1)[0];
+    }
+  }
+
+  function isVolatileMediaQueryName(rawName, hasAzureSignature = false) {
+    const name = String(rawName || "").trim().toLowerCase();
+    if (VOLATILE_MEDIA_QUERY_NAMES.has(name) ||
+        name.startsWith("x-amz-") || name.startsWith("x-goog-") || name.startsWith("x-oss-")) {
+      return true;
+    }
+    return hasAzureSignature && ["se", "sp", "spr", "sr", "st", "sv"].includes(name);
+  }
+
   function exactStreamUrl(rawUrl) {
     try {
       const url = new URL(rawUrl);
@@ -1815,6 +1683,7 @@ export const FuguangBrowserMediaCandidates = (() => {
     firstUsefulTitle,
     getGroupedCandidatesForState,
     getHeader,
+    getMediaLineageKey,
     inferKindFromContentType,
     isGenericBinaryContentType,
     isIgnoredMediaUrl,
@@ -1823,8 +1692,6 @@ export const FuguangBrowserMediaCandidates = (() => {
     pickFinite,
     pruneCandidatesForRetention,
     resolvePreloadCandidateForStart,
-    mediaCandidateTrust,
-    isPrivateNetworkMediaUrl,
     sanitizeInternalRequestHeaders,
     sanitizeRequestHeadersByOrigin,
     stripCandidateRequestHeaders

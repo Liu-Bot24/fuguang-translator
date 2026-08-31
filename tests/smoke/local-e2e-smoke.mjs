@@ -156,7 +156,7 @@ async function runExtensionSmoke(origin) {
       });
       await new Promise(resolve => setTimeout(resolve, 50));
       const durableJob = await new Promise((resolve, reject) => {
-        const request = indexedDB.open("liusheng-job-runtime", 1);
+        const request = indexedDB.open("liusheng-job-runtime");
         request.onerror = () => reject(request.error || new Error("job ledger database failed to open"));
         request.onsuccess = () => {
           const db = request.result;

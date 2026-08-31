@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import test from "node:test";
 
 import { FuguangJobStore } from "../../extension/src/background/job-store.js";
+import { createDurableFunAsrCancellationHandler } from "../../extension/src/offscreen/browser-funasr-executor.js";
 import { createOffscreenTaskExecutor } from "../../extension/src/offscreen/task-runtime-executor.js";
 import { createTaskRuntimeHost, FuguangOffscreenTaskRuntime } from "../../extension/src/offscreen/task-runtime-host.js";
 import { FuguangTaskRuntimeProtocol } from "../../extension/src/shared/task-runtime-protocol.js";
@@ -47,7 +48,7 @@ function deferred() {
 
 async function waitFor(predicate, label, timeoutMs = 1000) {
   const deadline = Date.now() + timeoutMs;
-  while (!predicate()) {
+  while (!(await predicate())) {
     if (Date.now() >= deadline) {
       assert.fail(`Timed out waiting for ${label}.`);
     }
@@ -149,6 +150,187 @@ test("duplicate active start is acknowledged once and cancellation is runToken g
   const afterCompletion = await host.handleCommand({ ...start, commandId: "start-after-completion" });
   assert.equal(afterCompletion.duplicate, false, "a non-terminal job may resume after its previous owner releases the lease");
   await waitFor(() => executions === 2, "the released run to resume");
+});
+
+test("inactive cancellation forwards transient FunASR config but ordinary cancellation does not", async () => {
+  const received = [];
+  const store = FuguangJobStore.createMemory();
+  const host = createTaskRuntimeHost({
+    jobStore: store,
+    async cancelJob(input) { received.push(input); }
+  });
+  await store.putSnapshot({ job: snapshot({ pipeline: "funasr", status: "interrupted", stage: "interrupted" }).job, chunks: [] });
+  assert.equal((await store.markCancelRequested("job-a", "run-a", 100)).applied, true,
+    "the Service Worker may persist cancellation before the host receives CANCEL_JOB");
+  const config = { providerType: "dashscope_funasr", baseUrl: "https://dashscope.example/api/v1", apiKey: "transient", model: "fun-asr" };
+  const response = await host.handleCommand({
+    type: FuguangTaskRuntimeProtocol.MESSAGE.CANCEL_JOB,
+    commandId: "cancel-inactive-funasr",
+    jobId: "job-a", runToken: "run-a", funAsrCancelConfig: config
+  });
+  assert.equal(response.accepted, true);
+  await waitFor(() => received.length === 1, "the inactive FunASR cancellation hook");
+  assert.deepEqual(received[0].funAsrConfig, config);
+
+  const ordinaryStore = FuguangJobStore.createMemory();
+  const ordinaryReceived = [];
+  const ordinaryHost = createTaskRuntimeHost({
+    jobStore: ordinaryStore,
+    async cancelJob(input) { ordinaryReceived.push(input); }
+  });
+  await ordinaryStore.putSnapshot({ job: snapshot({ pipeline: "browser", status: "interrupted", stage: "interrupted" }).job, chunks: [] });
+  await ordinaryHost.handleCommand({
+    type: FuguangTaskRuntimeProtocol.MESSAGE.CANCEL_JOB,
+    commandId: "cancel-inactive-ordinary",
+    jobId: "job-a", runToken: "run-a"
+  });
+  await waitFor(() => ordinaryReceived.length === 1, "the ordinary cancellation hook");
+  assert.equal(ordinaryReceived[0].funAsrConfig, undefined);
+});
+
+test("CANCEL_JOB still cancels a released FunASR remote task once when the worker already persisted cancel intent", async () => {
+  const now = Date.now();
+  const store = FuguangJobStore.createMemory();
+  await store.putSnapshot({ job: snapshot({
+    pipeline: "funasr", status: "running", stage: "asr",
+    executionRunToken: "run-a", executionOwnerId: "owner-a", executionEpoch: 1,
+    executionLeaseExpiresAt: now + 60_000, updatedAt: now
+  }).job, chunks: [] });
+  const ownership = { executionOwnerId: "owner-a", executionEpoch: 1, checkedAt: now + 1 };
+  const submit = {
+    jobId: "job-a", runToken: "run-a", operationId: "submit-before-stop",
+    provider: "dashscope_funasr", operationType: "funasr-submit", inputHash: "sha256:submit-before-stop"
+  };
+  await store.prepareOperation(submit, ownership);
+  await store.updateOperation({
+    ...submit, state: "completed", remoteTaskId: "remote-before-stop", completedAt: now + 2
+  }, ownership);
+  await store.releaseRun("job-a", "run-a", "owner-a", now + 3, 1);
+  assert.equal((await store.markCancelRequested("job-a", "run-a", now + 4)).applied, true);
+
+  let remoteCancelCalls = 0;
+  const durableCancel = createDurableFunAsrCancellationHandler({
+    jobStore: store,
+    async cancelRemoteTask(taskId, _config, options) {
+      remoteCancelCalls += 1;
+      assert.equal(taskId, "remote-before-stop");
+      assert.equal(options.signal, undefined);
+      return { status: "confirmed", taskId, httpStatus: 200, remoteTaskStatus: "CANCELED" };
+    }
+  });
+  const host = createTaskRuntimeHost({ jobStore: store, cancelJob: durableCancel });
+  const funAsrCancelConfig = {
+    providerType: "dashscope_funasr", baseUrl: "https://dashscope.example/api/v1",
+    model: "fun-asr", apiKey: "transient-only"
+  };
+  for (const commandId of ["stop-after-worker", "duplicate-stop-after-worker"]) {
+    const response = await host.handleCommand({
+      type: FuguangTaskRuntimeProtocol.MESSAGE.CANCEL_JOB,
+      commandId, jobId: "job-a", runToken: "run-a", funAsrCancelConfig
+    });
+    assert.equal(response.accepted, true);
+  }
+  await waitFor(async () => remoteCancelCalls === 1 &&
+    (await store.listOperations("job-a", "run-a")).some(operation => operation.operationType === "funasr-cancel" && operation.state === "completed"),
+  "the durable remote cancellation result");
+  assert.equal(remoteCancelCalls, 1);
+  assert.equal(JSON.stringify(await store.listOperations("job-a", "run-a")).includes("transient-only"), false);
+});
+
+test("resume of an interrupted run waits for the active executor to release instead of losing the restart", async () => {
+  const store = FuguangJobStore.createMemory();
+  const started = deferred();
+  const finish = deferred();
+  let executions = 0;
+  const host = createTaskRuntimeHost({
+    jobStore: store,
+    heartbeatIntervalMs: 0,
+    async executeJob() {
+      executions += 1;
+      started.resolve();
+      if (executions === 1) await finish.promise;
+    }
+  });
+  const first = await host.handleCommand({
+    type: FuguangTaskRuntimeProtocol.MESSAGE.START_JOB,
+    commandId: "settling-first",
+    snapshot: snapshot()
+  });
+  await started.promise;
+  const current = await store.getJob("job-a");
+  const interrupted = await store.putSnapshotIfOwned({
+    job: { ...current, status: "interrupted", stage: "interrupted", updatedAt: 101 },
+    chunks: []
+  }, {
+    executionOwnerId: first.executionOwnerId,
+    executionEpoch: first.executionEpoch,
+    checkedAt: 101
+  });
+  assert.equal(interrupted.applied, true);
+  const settling = await host.handleCommand({
+    type: FuguangTaskRuntimeProtocol.MESSAGE.START_JOB,
+    commandId: "settling-resume",
+    resumeExisting: true,
+    snapshot: { job: { id: "job-a", runToken: "run-a" }, chunks: [] }
+  });
+  assert.equal(settling.retryable, true);
+  assert.equal(settling.reason, "active-run-settling");
+  finish.resolve();
+  await waitFor(() => host.activeRuns.size === 0, "the interrupted active run to release");
+  const resumed = await host.handleCommand({
+    type: FuguangTaskRuntimeProtocol.MESSAGE.START_JOB,
+    commandId: "settling-resume-after-release",
+    resumeExisting: true,
+    snapshot: { job: { id: "job-a", runToken: "run-a" }, chunks: [] }
+  });
+  assert.equal(resumed.accepted, true);
+  assert.equal(resumed.duplicate, false);
+  await waitFor(() => executions === 2, "the interrupted run to restart");
+});
+
+test("WAKE_JOB targets one active run without changing its lease or durable state", async () => {
+  const store = FuguangJobStore.createMemory();
+  const waiting = deferred();
+  const woke = deferred();
+  const finish = deferred();
+  const host = createTaskRuntimeHost({
+    jobStore: store,
+    heartbeatIntervalMs: 0,
+    async executeJob(_runtime, context) {
+      waiting.resolve();
+      woke.resolve(await context.waitForWake(30_000, context.signal));
+      await finish.promise;
+    }
+  });
+  const start = await host.handleCommand({
+    type: FuguangTaskRuntimeProtocol.MESSAGE.START_JOB,
+    commandId: "wake-start",
+    snapshot: snapshot()
+  });
+  assert.equal(start.accepted, true);
+  await waiting.promise;
+  const before = await store.getJob("job-a");
+  const stale = await host.handleCommand({
+    type: FuguangTaskRuntimeProtocol.MESSAGE.WAKE_JOB,
+    commandId: "wake-stale",
+    jobId: "job-a",
+    runToken: "run-b"
+  });
+  assert.equal(stale.accepted, false);
+  const response = await host.handleCommand({
+    type: FuguangTaskRuntimeProtocol.MESSAGE.WAKE_JOB,
+    commandId: "wake-active",
+    jobId: "job-a",
+    runToken: "run-a"
+  });
+  assert.equal(response.accepted, true);
+  assert.equal((await woke.promise).reason, "wake");
+  const after = await store.getJob("job-a");
+  for (const key of ["status", "stage", "executionOwnerId", "executionEpoch", "executionLeaseExpiresAt"]) {
+    assert.equal(after[key], before[key], `wake must not mutate ${key}`);
+  }
+  finish.resolve();
+  await waitFor(() => host.activeRuns.size === 0, "the awakened run to finish");
 });
 
 test("a rebuilt runtime takes over only after the previous execution lease expires", async () => {
@@ -431,6 +613,66 @@ test("production runtime has a real executor and empty hosts reject START_JOB", 
   });
   assert.equal(response.type, FuguangTaskRuntimeProtocol.MESSAGE.ERROR);
   assert.match(response.error, /executor is unavailable/i);
+});
+
+test("runtime host preserves interrupted recovery when the FAIL_JOB response is lost", async () => {
+  const store = FuguangJobStore.createMemory();
+  let processRequests = 0;
+  let failRequests = 0;
+  const executeJob = createOffscreenTaskExecutor({
+    retryBaseMs: 0,
+    pollIntervalMs: 0,
+    async sendMessage(message) {
+      if (message.type === FuguangTaskRuntimeProtocol.MESSAGE.GET_JOB_WORK) {
+        return { ok: true, extractionDone: true, chunks: [{ index: 0, asrCompleted: false }] };
+      }
+      if (message.type === FuguangTaskRuntimeProtocol.MESSAGE.PROCESS_JOB_CHUNK) {
+        processRequests += 1;
+        throw new Error("worker restarted");
+      }
+      if (message.type === FuguangTaskRuntimeProtocol.MESSAGE.FAIL_JOB) {
+        failRequests += 1;
+        const current = await store.getJob(message.jobId);
+        const durable = await store.getSnapshot(message.jobId, message.runToken);
+        const committed = await store.putSnapshotIfOwned({
+          job: {
+            ...current,
+            status: "interrupted",
+            stage: "interrupted",
+            error: "任务已中断，避免重复计费。",
+            updatedAt: Date.now()
+          },
+          chunks: durable?.chunks || []
+        }, {
+          executionOwnerId: message.executionOwnerId,
+          executionEpoch: message.executionEpoch,
+          checkedAt: Date.now()
+        });
+        assert.equal(committed.applied, true);
+        throw new Error("FAIL_JOB response lost after commit");
+      }
+      return { ok: true, accepted: true };
+    }
+  });
+  const host = createTaskRuntimeHost({
+    jobStore: store,
+    heartbeatIntervalMs: 0,
+    executeJob
+  });
+  const response = await host.handleCommand({
+    type: FuguangTaskRuntimeProtocol.MESSAGE.START_JOB,
+    commandId: "interrupted-paid-recovery",
+    snapshot: snapshot({ status: "running", stage: "asr", pipeline: "funasr" }),
+    runtime: { pipeline: "funasr" }
+  });
+  assert.equal(response.accepted, true);
+  await waitFor(() => host.activeRuns.size === 0, "the interrupted runtime to be released");
+  const stored = await store.getJob("job-a");
+  assert.equal(processRequests, 1);
+  assert.equal(failRequests, 1);
+  assert.equal(stored.status, "interrupted");
+  assert.equal(stored.stage, "interrupted");
+  assert.match(stored.error, /避免重复计费/);
 });
 
 test("runtime persists executor failure even when the worker callback is unavailable", async () => {
