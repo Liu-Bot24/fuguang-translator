@@ -2511,14 +2511,17 @@ async function renderSubtitles(jobId, job = null) {
     return;
   }
   const cues = result.cues;
+  const preserveExistingPresentation = renderedSubtitleJobId === jobId && subtitleCues.length > 0;
+  const scrollState = preserveExistingPresentation ? captureSubtitleScrollState() : null;
+  const previousActiveCueIndex = activeCueIndex;
   renderedSubtitleJobId = jobId || renderedSubtitleJobId;
   renderedSubtitleSignature = signature || "";
   renderedSubtitleRevision = subtitleAttachmentRevision(jobId, job);
   subtitleCueSource = result.source;
   currentTranscript = result.transcript || (result.source === "transcript" ? transcriptFromCues(cues) : null);
   subtitleCues = cues;
-  activeCueIndex = -1;
-  renderSubtitleCueList();
+  activeCueIndex = preserveExistingPresentation ? previousActiveCueIndex : -1;
+  renderSubtitleCueList({ preserveScroll: preserveExistingPresentation, scrollState });
   startSubtitleFollow();
   await attachCurrentSubtitlesToPage();
   if (result.source === "transcript") {

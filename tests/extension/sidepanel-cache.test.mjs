@@ -6013,6 +6013,101 @@ const sameCountUpdatedSubtitleState = await vm.runInContext(`
 assert.equal(sameCountUpdatedSubtitleState.cueText, "new text");
 assert.match(sameCountUpdatedSubtitleState.attachedVtt, /new text/);
 
+const partialSubtitleRefreshPreservesScrollState = await vm.runInContext(`
+  (async () => {
+    const originalSendMessage = chrome.runtime.sendMessage;
+    const originalReplaceChildren = elements.subtitleList.replaceChildren;
+    const originalScrollTo = window.scrollTo;
+    const originalScrollX = window.scrollX;
+    const originalScrollY = window.scrollY;
+    try {
+      activeTab = { id: 1, url: "https://example.test/watch/partial" };
+      currentJobId = "job-partial-scroll";
+      renderedSubtitleJobId = currentJobId;
+      renderedSubtitleSignature = "old-partial-signature";
+      subtitleCueSource = "vtt";
+      subtitleDisplayMode = "translated";
+      subtitleEditMode = false;
+      subtitleCues = [
+        { start: 0, end: 2, time: "00:00:00.000 --> 00:00:02.000", text: "first old" },
+        { start: 3, end: 5, time: "00:00:03.000 --> 00:00:05.000", text: "second old" }
+      ];
+      activeCueIndex = 1;
+      renderSubtitleCueList({ preserveScroll: true });
+      elements.subtitleList.scrollTop = 240;
+      elements.subtitleList.scrollLeft = 4;
+      window.scrollY = 620;
+      window.scrollX = 8;
+      window.scrollTo = (left, top) => {
+        window.scrollX = left;
+        window.scrollY = top;
+      };
+      elements.subtitleList.replaceChildren = function (...children) {
+        originalReplaceChildren.call(this, ...children);
+        this.scrollTop = 0;
+        this.scrollLeft = 0;
+        window.scrollX = 0;
+        window.scrollY = 0;
+      };
+      chrome.runtime.sendMessage = async message => {
+        if (message.type === "FUGUANG_GET_PRELOAD_TRANSCRIPT") {
+          return { ok: false };
+        }
+        if (message.type === "FUGUANG_GET_PRELOAD_VTT") {
+          return {
+            ok: true,
+            vtt: "WEBVTT\\n\\n00:00:00.000 --> 00:00:02.000\\nfirst new\\n\\n00:00:03.000 --> 00:00:05.000\\nsecond new\\n\\n00:00:06.000 --> 00:00:08.000\\nthird new\\n"
+          };
+        }
+        if (message.type === "FUGUANG_GET_VIDEO_STATE") {
+          return { ok: true, state: { currentTime: 3.5 } };
+        }
+        return { ok: true };
+      };
+
+      await renderSubtitles(currentJobId, {
+        translation: {
+          segmentCount: 3,
+          chunksDone: 2,
+          chunksFailed: 0,
+          vttPath: "browser-memory"
+        }
+      });
+      await new Promise(resolve => setTimeout(resolve, 0));
+      stopSubtitleFollow();
+
+      return {
+        activeCueIndex,
+        cueCount: subtitleCues.length,
+        secondCueText: subtitleCues[1]?.text,
+        listScrollTop: elements.subtitleList.scrollTop,
+        listScrollLeft: elements.subtitleList.scrollLeft,
+        pageScrollY: window.scrollY,
+        pageScrollX: window.scrollX,
+        firstCueScrolled: Boolean(elements.subtitleList.children[0]?.scrolledIntoView),
+        secondCueScrolled: Boolean(elements.subtitleList.children[1]?.scrolledIntoView)
+      };
+    } finally {
+      stopSubtitleFollow();
+      chrome.runtime.sendMessage = originalSendMessage;
+      elements.subtitleList.replaceChildren = originalReplaceChildren;
+      window.scrollTo = originalScrollTo;
+      window.scrollX = originalScrollX;
+      window.scrollY = originalScrollY;
+    }
+  })()
+`, context);
+
+assert.equal(partialSubtitleRefreshPreservesScrollState.activeCueIndex, 1);
+assert.equal(partialSubtitleRefreshPreservesScrollState.cueCount, 3);
+assert.equal(partialSubtitleRefreshPreservesScrollState.secondCueText, "second new");
+assert.equal(partialSubtitleRefreshPreservesScrollState.listScrollTop, 240);
+assert.equal(partialSubtitleRefreshPreservesScrollState.listScrollLeft, 4);
+assert.equal(partialSubtitleRefreshPreservesScrollState.pageScrollY, 620);
+assert.equal(partialSubtitleRefreshPreservesScrollState.pageScrollX, 8);
+assert.equal(partialSubtitleRefreshPreservesScrollState.firstCueScrolled, false);
+assert.equal(partialSubtitleRefreshPreservesScrollState.secondCueScrolled, false);
+
 const manualSubtitleEditSurvivesRefreshState = await vm.runInContext(`
   (async () => {
     const originalSendMessage = chrome.runtime.sendMessage;

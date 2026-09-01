@@ -91,7 +91,7 @@ const source = fs.readFileSync(new URL("../../extension/src/content/page-sniffer
     pageFetch,
     "re-activating the sniffer must not remove a page-installed fetch wrapper"
   );
-  assert.equal(harness.context.window.__fuguangPageSnifferRevision, "20260831-baseline-hooks");
+  assert.equal(harness.context.window.__fuguangPageSnifferRevision, "20260901-bilibili-route-identity");
   assert.doesNotThrow(() => vm.runInContext(`
     JSON.parse('{"value":1}', (_key, value) =>
       value && value.value === 1
@@ -106,6 +106,192 @@ const source = fs.readFileSync(new URL("../../extension/src/content/page-sniffer
     pageFetch,
     "cleanup must not overwrite a fetch wrapper installed after the sniffer"
   );
+}
+
+{
+  const staleAudioUrl = "https://upos-sz-mirror.example.test/41176599114-1-30232.m4s";
+  const currentAudioUrl = "https://upos-sz-mirror.example.test/37852677660-1-30232.m4s";
+  const requestedUrls = [];
+  const harness = createHarness({
+    locationHref: "https://www.bilibili.com/video/BV1zxovBrE2u",
+    html: `<html><body><script>window.__playinfo__={"baseUrl":"${staleAudioUrl}"}</script></body></html>`,
+    fetchResponses(url) {
+      requestedUrls.push(String(url));
+      if (String(url).includes("/x/web-interface/view?bvid=BV1zxovBrE2u")) {
+        return createFakeResponse(url, {
+          code: 0,
+          data: {
+            bvid: "BV1zxovBrE2u",
+            aid: 116471258745656,
+            cid: 37852677660,
+            duration: 87,
+            pages: [{ page: 1, cid: 37852677660 }]
+          }
+        }, { "content-type": "application/json" });
+      }
+      if (String(url).includes("/x/player/playurl?") && String(url).includes("bvid=BV1zxovBrE2u") && String(url).includes("cid=37852677660")) {
+        return createFakeResponse(url, {
+          code: 0,
+          data: {
+            dash: {
+              duration: 87,
+              audio: [{ baseUrl: currentAudioUrl, mimeType: "audio/mp4", id: 30232 }]
+            }
+          }
+        }, { "content-type": "application/json" });
+      }
+      return null;
+    },
+    mediaElements: [{
+      tagName: "VIDEO",
+      duration: 87,
+      currentTime: 12,
+      readyState: 4,
+      clientWidth: 1280,
+      clientHeight: 720,
+      videoWidth: 1920,
+      videoHeight: 1080
+    }],
+    windowOverrides: {
+      __INITIAL_STATE__: {
+        videoData: { bvid: "BV1RG8S6GEGr", aid: 1140001, cid: 41176599114 }
+      },
+      __playinfo__: {
+        data: {
+          dash: {
+            duration: 441,
+            audio: [{ baseUrl: staleAudioUrl, mimeType: "audio/mp4", id: 30232 }]
+          }
+        }
+      }
+    }
+  });
+  vm.runInContext(source, harness.context, { filename: "page-sniffer.js" });
+  await flushPromises();
+
+  const media = harness.messages.filter(message => message.type === "FUGUANG_PAGE_SNIFFER_MEDIA").map(message => message.media);
+  assert.equal(
+    media.some(item => item.url === staleAudioUrl),
+    false,
+    "Bilibili SPA navigation must not relabel the previous video's playinfo as the current BVID"
+  );
+  assert.ok(
+    media.some(item => item.url === currentAudioUrl && item.source === "bilibili-playurl"),
+    `Bilibili SPA navigation should resolve the current route's CID and emit its current playurl; requested=${requestedUrls.join(",")}`
+  );
+}
+
+{
+  const currentAudioUrl = "https://upos-sz-mirror.example.test/current-1-30232.m4s";
+  const harness = createHarness({
+    locationHref: "https://www.bilibili.com/video/BV1zxovBrE2u",
+    mediaElements: [{
+      tagName: "VIDEO",
+      duration: 87,
+      currentTime: 12,
+      readyState: 4,
+      clientWidth: 1280,
+      clientHeight: 720,
+      videoWidth: 1920,
+      videoHeight: 1080
+    }],
+    windowOverrides: {
+      __INITIAL_STATE__: {
+        videoData: { bvid: "BV1zxovBrE2u", aid: 1140002, cid: 4220002 }
+      },
+      __playinfo__: {
+        data: {
+          dash: {
+            duration: 87,
+            audio: [{ baseUrl: currentAudioUrl, mimeType: "audio/mp4", id: 30232 }]
+          }
+        }
+      }
+    }
+  });
+  vm.runInContext(source, harness.context, { filename: "page-sniffer.js" });
+
+  const media = harness.messages.filter(message => message.type === "FUGUANG_PAGE_SNIFFER_MEDIA").map(message => message.media);
+  assert.ok(
+    media.some(item => item.url === currentAudioUrl),
+    "matching Bilibili playinfo must remain available to the existing media-selection pipeline"
+  );
+}
+
+{
+  const staleAudioUrl = "https://upos-sz-mirror.example.test/old-duration-1-30232.m4s";
+  const harness = createHarness({
+    locationHref: "https://www.bilibili.com/video/BV1zxovBrE2u",
+    mediaElements: [{
+      tagName: "VIDEO",
+      duration: 87,
+      currentTime: 12,
+      readyState: 4,
+      clientWidth: 1280,
+      clientHeight: 720
+    }],
+    windowOverrides: {
+      __INITIAL_STATE__: {
+        videoData: { bvid: "BV1zxovBrE2u", aid: 1140002, cid: 4220002 }
+      },
+      __playinfo__: {
+        data: {
+          dash: {
+            duration: 441,
+            audio: [{ baseUrl: staleAudioUrl, mimeType: "audio/mp4", id: 30232 }]
+          }
+        }
+      }
+    }
+  });
+  vm.runInContext(source, harness.context, { filename: "page-sniffer.js" });
+
+  const media = harness.messages.filter(message => message.type === "FUGUANG_PAGE_SNIFFER_MEDIA").map(message => message.media);
+  assert.equal(
+    media.some(item => item.url === staleAudioUrl),
+    false,
+    "Bilibili playinfo with the current BVID but a clearly different live-player duration must be treated as transitional stale state"
+  );
+}
+
+{
+  const partTwoAudioUrl = "https://upos-sz-mirror.example.test/part-two-1-30232.m4s";
+  const requestedUrls = [];
+  const harness = createHarness({
+    locationHref: "https://www.bilibili.com/video/BV1MultiPart?p=2",
+    fetchResponses(url) {
+      requestedUrls.push(String(url));
+      if (String(url).includes("/x/player/playurl?") && String(url).includes("bvid=BV1MultiPart") && String(url).includes("cid=222")) {
+        return createFakeResponse(url, {
+          code: 0,
+          data: {
+            dash: {
+              duration: 120,
+              audio: [{ baseUrl: partTwoAudioUrl, mimeType: "audio/mp4", id: 30232 }]
+            }
+          }
+        }, { "content-type": "application/json" });
+      }
+      return null;
+    },
+    windowOverrides: {
+      __INITIAL_STATE__: {
+        videoData: {
+          bvid: "BV1MultiPart",
+          aid: 987,
+          cid: 111,
+          pages: [{ page: 1, cid: 111 }, { page: 2, cid: 222 }]
+        }
+      }
+    }
+  });
+  vm.runInContext(source, harness.context, { filename: "page-sniffer.js" });
+  await flushPromises();
+
+  const media = harness.messages.filter(message => message.type === "FUGUANG_PAGE_SNIFFER_MEDIA").map(message => message.media);
+  assert.ok(requestedUrls.some(url => url.includes("cid=222")), "Bilibili p=2 must request the second page CID");
+  assert.equal(requestedUrls.some(url => url.includes("cid=111")), false, "Bilibili p=2 must not fall back to the first page CID");
+  assert.ok(media.some(item => item.url === partTwoAudioUrl && item.source === "bilibili-playurl"));
 }
 
 {
@@ -245,7 +431,15 @@ const source = fs.readFileSync(new URL("../../extension/src/content/page-sniffer
   );
 }
 
-function createHarness({ html = "", fetchResponse = null, fetchResponses = null, scripts = [], locationHref = "https://x.com/AndrewYNg/status/2049886895530967534" } = {}) {
+function createHarness({
+  html = "",
+  fetchResponse = null,
+  fetchResponses = null,
+  scripts = [],
+  locationHref = "https://x.com/AndrewYNg/status/2049886895530967534",
+  mediaElements = [],
+  windowOverrides = {}
+} = {}) {
   const messages = [];
   let nextTimer = 1;
   const window = {
@@ -264,7 +458,8 @@ function createHarness({ html = "", fetchResponse = null, fetchResponses = null,
     },
     postMessage(message) {
       messages.push(message);
-    }
+    },
+    ...windowOverrides
   };
   function XMLHttpRequest() {}
   XMLHttpRequest.prototype.open = function open() {};
@@ -273,7 +468,7 @@ function createHarness({ html = "", fetchResponse = null, fetchResponses = null,
     title: "X test page",
     documentElement: { innerHTML: html, lang: "en" },
     querySelectorAll() {
-      return [];
+      return mediaElements;
     },
     querySelector() {
       return null;
@@ -294,13 +489,16 @@ function createHarness({ html = "", fetchResponse = null, fetchResponses = null,
       };
     }
   };
+  const locationUrl = new URL(locationHref);
   const context = vm.createContext({
     window,
     document,
     location: {
       href: locationHref,
-      hostname: new URL(locationHref).hostname,
-      protocol: new URL(locationHref).protocol
+      hostname: locationUrl.hostname,
+      protocol: locationUrl.protocol,
+      pathname: locationUrl.pathname,
+      search: locationUrl.search
     },
     XMLHttpRequest,
     URL,
@@ -310,6 +508,7 @@ function createHarness({ html = "", fetchResponse = null, fetchResponses = null,
     Number,
     String,
     Boolean,
+    encodeURIComponent,
     Promise,
     WeakSet,
     Set,
@@ -333,6 +532,8 @@ function createFakeResponse(url, body, headers = {}) {
   return {
     url,
     body,
+    ok: true,
+    status: 200,
     headers: {
       get(name) {
         return headers[String(name || "").toLowerCase()] || "";
@@ -343,6 +544,9 @@ function createFakeResponse(url, body, headers = {}) {
     },
     async text() {
       return textBody;
+    },
+    async json() {
+      return typeof body === "string" ? JSON.parse(body) : body;
     },
     async arrayBuffer() {
       const bytes = body instanceof Uint8Array ? body : new Uint8Array(body);

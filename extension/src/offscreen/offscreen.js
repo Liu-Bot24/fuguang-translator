@@ -336,56 +336,87 @@ async function extractAudioWithWebFfmpeg(message) {
   if (shouldUseLocalMediaChunkedExtraction(message)) {
     return extractLocalMediaAudioWithWebFfmpeg(message);
   }
-  reportWebFfmpegExtractionProgress(message, {
-    phase: "download",
-    percent: 5,
-    message: "正在下载媒体文件"
-  });
-  let response;
-  try {
-    const fetchOptions = isLocalFileMediaSourceUrl(sourceUrl)
-      ? { signal: message.abortSignal }
-      : buildMediaFetchOptions(message);
-    response = await fetch(sourceUrl, fetchOptions);
-  } catch (error) {
-    if (isLocalFileMediaSourceUrl(sourceUrl)) {
-      throw new Error(`本地媒体文件读取失败：${error.message || String(error)}。请确认文件仍可访问，并在扩展详情中允许访问文件网址。`);
+  for (let attempt = 0; attempt < 2; attempt += 1) {
+    reportWebFfmpegExtractionProgress(message, {
+      phase: "download",
+      percent: 5,
+      message: attempt ? "正在重新下载媒体文件" : "正在下载媒体文件"
+    });
+    let response;
+    try {
+      const fetchOptions = isLocalFileMediaSourceUrl(sourceUrl)
+        ? { signal: message.abortSignal }
+        : buildMediaFetchOptions(message);
+      response = await fetch(sourceUrl, fetchOptions);
+    } catch (error) {
+      if (isLocalFileMediaSourceUrl(sourceUrl)) {
+        throw new Error(`本地媒体文件读取失败：${error.message || String(error)}。请确认文件仍可访问，并在扩展详情中允许访问文件网址。`);
+      }
+      throw error;
     }
-    throw error;
-  }
-  if (!mediaFetchResponseLooksUsable(response, sourceUrl)) {
-    throw new Error(`媒体文件下载失败：HTTP ${response.status}`);
-  }
-  const buffer = await response.arrayBuffer();
-  reportWebFfmpegExtractionProgress(message, {
-    phase: "ffmpeg",
-    percent: 50,
-    message: "媒体文件已下载，正在提取音频"
-  });
-  const id = `extract-${Date.now()}-${Math.random().toString(16).slice(2)}`;
-  const result = await requestWebFfmpegForJob(message, {
-    app: WEB_FFMPEG_APP,
-    type: "extract-audio",
-    id,
-    file: {
-      name: message.fileName || "media.bin",
-      mime: message.mime || response.headers.get("content-type") || "",
-      buffer
-    },
-    options: {
-      format: "mp3",
-      chunkSeconds: message.asrChunkSeconds || message.chunkSeconds,
-      overlapSeconds: WEB_FFMPEG_ASR_CONTEXT_OVERLAP_SECONDS,
-      duration: message.duration
+    if (!mediaFetchResponseLooksUsable(response, sourceUrl)) {
+      throw new Error(`媒体文件下载失败：HTTP ${response.status}`);
     }
-  }, [buffer], progress => {
+    const buffer = await response.arrayBuffer();
     reportWebFfmpegExtractionProgress(message, {
       phase: "ffmpeg",
-      percent: 50 + (Number(progress.percent || 0) * 0.49),
-      message: "正在用 Web FFmpeg 提取音频"
+      percent: 50,
+      message: "媒体文件已下载，正在提取音频"
     });
-  });
-  return persistWebFfmpegAudioResult(result, message.cacheNamespace || id);
+    const id = `extract-${Date.now()}-${Math.random().toString(16).slice(2)}`;
+    try {
+      const result = await requestWebFfmpegForJob(message, {
+        app: WEB_FFMPEG_APP,
+        type: "extract-audio",
+        id,
+        file: {
+          name: message.fileName || "media.bin",
+          mime: message.mime || response.headers.get("content-type") || "",
+          buffer
+        },
+        options: {
+          format: "mp3",
+          chunkSeconds: message.asrChunkSeconds || message.chunkSeconds,
+          overlapSeconds: WEB_FFMPEG_ASR_CONTEXT_OVERLAP_SECONDS,
+          duration: message.duration
+        }
+      }, [buffer], progress => {
+        reportWebFfmpegExtractionProgress(message, {
+          phase: "ffmpeg",
+          percent: 50 + (Number(progress.percent || 0) * 0.49),
+          message: "正在用 Web FFmpeg 提取音频"
+        });
+      });
+      return persistWebFfmpegAudioResult(result, message.cacheNamespace || id);
+    } catch (error) {
+      if (!isRecoverableWebFfmpegRuntimeError(error, message.abortSignal)) {
+        throw error;
+      }
+      if (attempt >= 1) {
+        resetWebFfmpegFrame(error);
+        throw error;
+      }
+      reportWebFfmpegExtractionProgress(message, {
+        phase: "loading",
+        percent: 5,
+        message: "Web FFmpeg 运行异常，正在重新加载后重试"
+      });
+      await reloadWebFfmpegFrame(message.webFfmpegUrl, message.abortSignal);
+    }
+  }
+  throw new Error("Web FFmpeg 音频提取失败。");
+}
+
+function isRecoverableWebFfmpegRuntimeError(error, signal = null) {
+  if (signal?.aborted || error?.name === "AbortError") {
+    return false;
+  }
+  const message = String(error?.message || error || "");
+  if (/任务已停止|cancel(?:led|ed)|aborted/i.test(message)) {
+    return false;
+  }
+  return /memory access out of bounds|\bRuntimeError\b|WebAssembly|\bwasm\b/i.test(message) ||
+    (/FFmpeg 提取失败：FFmpeg 执行异常/.test(message) && /返回码 未知/.test(message));
 }
 
 function isFetchableMediaSourceUrl(rawUrl = "") {

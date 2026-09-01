@@ -1,5 +1,5 @@
 (() => {
-  const PAGE_SNIFFER_REVISION = "20260831-baseline-hooks";
+  const PAGE_SNIFFER_REVISION = "20260901-bilibili-route-identity";
   if (
     window.__fuguangPageSnifferRevision === PAGE_SNIFFER_REVISION &&
     typeof window.__fuguangPageSnifferRescan === "function"
@@ -451,8 +451,12 @@
   }
 
   async function probeBilibiliPlayurl() {
-    const ids = readBilibiliVideoIds();
+    const routeKey = readBilibiliRouteKey();
+    const ids = await resolveBilibiliVideoIds();
     if (!ids.bvid || !ids.cid) {
+      return;
+    }
+    if (routeKey && routeKey !== readBilibiliRouteKey()) {
       return;
     }
     const key = `${ids.bvid}:${ids.cid}`;
@@ -480,6 +484,9 @@
         return;
       }
       const json = await response.json();
+      if (routeKey && routeKey !== readBilibiliRouteKey()) {
+        return;
+      }
       postBilibiliPlayurlMedia(json?.data || json?.result || {});
       window.__fuguangLastBilibiliPlayurlProbe = { key, ok: true, at: Date.now() };
     } catch {
@@ -494,20 +501,99 @@
     const initial = window.__INITIAL_STATE__ || {};
     const videoData = initial.videoData || {};
     const pages = Array.isArray(videoData.pages) ? videoData.pages : Array.isArray(initial.pages) ? initial.pages : [];
-    const bvid = String(
-      videoData.bvid ||
-      initial.bvid ||
-      location.pathname.match(/\/video\/(BV[a-zA-Z0-9]+)/)?.[1] ||
-      ""
-    );
+    const routeBvid = readBilibiliRouteBvid();
+    const stateBvid = String(videoData.bvid || initial.bvid || "");
+    const bvid = routeBvid || stateBvid;
+    if (routeBvid && stateBvid && routeBvid.toLowerCase() !== stateBvid.toLowerCase()) {
+      return { bvid, aid: null, cid: null };
+    }
+    const part = readBilibiliPartNumber();
+    const currentPage = pages.find(page => parseInteger(page?.page) === part) || pages[part - 1] || null;
     const aid = parseInteger(videoData.aid || initial.aid || initial.aidInfo?.aid);
     const cid = parseInteger(
+      currentPage?.cid ||
       videoData.cid ||
       initial.cid ||
       initial.cidMap?.[bvid]?.cid ||
       pages.find(page => parseInteger(page?.cid))?.cid
     );
     return { bvid, aid, cid };
+  }
+
+  async function resolveBilibiliVideoIds() {
+    const ids = readBilibiliVideoIds();
+    if (!ids.bvid || ids.cid) {
+      return ids;
+    }
+    const routeKey = readBilibiliRouteKey();
+    try {
+      const response = await originalFetch.call(
+        window,
+        `https://api.bilibili.com/x/web-interface/view?bvid=${encodeURIComponent(ids.bvid)}`,
+        { credentials: "include" }
+      );
+      if (!response.ok || (routeKey && routeKey !== readBilibiliRouteKey())) {
+        return ids;
+      }
+      const json = await response.json();
+      const data = json?.data || {};
+      const responseBvid = String(data.bvid || "");
+      if (responseBvid && responseBvid.toLowerCase() !== ids.bvid.toLowerCase()) {
+        return ids;
+      }
+      const pages = Array.isArray(data.pages) ? data.pages : [];
+      const part = readBilibiliPartNumber();
+      const currentPage = pages.find(page => parseInteger(page?.page) === part) || pages[part - 1] || null;
+      return {
+        bvid: ids.bvid,
+        aid: parseInteger(data.aid) || ids.aid,
+        cid: parseInteger(currentPage?.cid || data.cid)
+      };
+    } catch {
+      return ids;
+    }
+  }
+
+  function readBilibiliRouteBvid() {
+    if (!/(^|\.)bilibili\.com$/i.test(location.hostname)) {
+      return "";
+    }
+    return String(location.pathname || "").match(/\/video\/(BV[a-zA-Z0-9]+)/i)?.[1] || "";
+  }
+
+  function readBilibiliPartNumber() {
+    try {
+      const part = parseInteger(new URL(location.href).searchParams.get("p"));
+      return part && part > 0 ? part : 1;
+    } catch {
+      return 1;
+    }
+  }
+
+  function readBilibiliRouteKey() {
+    const bvid = readBilibiliRouteBvid();
+    return bvid ? `${bvid.toLowerCase()}:p${readBilibiliPartNumber()}` : "";
+  }
+
+  function isStaleBilibiliKnownState(name, value) {
+    const routeBvid = readBilibiliRouteBvid();
+    if (!routeBvid || (name !== "__playinfo__" && name !== "__INITIAL_STATE__")) {
+      return false;
+    }
+    const initial = window.__INITIAL_STATE__ || {};
+    const stateBvid = String(initial.videoData?.bvid || initial.bvid || "");
+    if (stateBvid && routeBvid.toLowerCase() !== stateBvid.toLowerCase()) {
+      return true;
+    }
+    if (name !== "__playinfo__") {
+      return false;
+    }
+    const mediaDuration = Number(findPrimaryMedia()?.duration);
+    const playinfoDuration = Number(readKnownPlayerDuration(value));
+    if (!Number.isFinite(mediaDuration) || mediaDuration <= 0 || !Number.isFinite(playinfoDuration) || playinfoDuration <= 0) {
+      return false;
+    }
+    return Math.abs(mediaDuration - playinfoDuration) > Math.max(30, Math.min(mediaDuration, playinfoDuration) * 0.25);
   }
 
   function postBilibiliPlayurlMedia(data) {
@@ -553,7 +639,10 @@
       "ytInitialPlayerResponse"
     ].forEach(name => {
       try {
-        inspectObject(window[name], `global:${name}`);
+        const value = window[name];
+        if (!isStaleBilibiliKnownState(name, value)) {
+          inspectObject(value, `global:${name}`);
+        }
       } catch {
         // Ignore page globals that throw during access.
       }
@@ -562,6 +651,12 @@
 
   function scanDocumentMarkup() {
     try {
+      if (
+        isStaleBilibiliKnownState("__INITIAL_STATE__", window.__INITIAL_STATE__) ||
+        isStaleBilibiliKnownState("__playinfo__", window.__playinfo__)
+      ) {
+        return;
+      }
       const markup = document.documentElement?.innerHTML || "";
       if (!markup || markup.length > MAX_DOCUMENT_MARKUP_SCAN_CHARS) {
         return;

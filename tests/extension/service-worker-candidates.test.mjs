@@ -3996,6 +3996,55 @@ assert.equal(context.browserTranslationProviderConcurrency({ modelConfig: { work
 }
 
 {
+  const tabId = 1113;
+  seedPage(tabId, { url: "https://www.bilibili.com/video/BVOld", duration: 441 });
+  context.addPageMediaCandidate(tabId, {
+    url: "https://upos-sz-mirror.example.test/old-1-30232.m4s",
+    source: "bilibili-playurl",
+    kind: "audio",
+    ext: "m4s",
+    href: "https://www.bilibili.com/video/BVOld",
+    duration: 441
+  });
+  let releaseFrames;
+  const originalGetAllFrames = chrome.webNavigation.getAllFrames;
+  const originalSendMessage = chrome.tabs.sendMessage;
+  chrome.webNavigation.getAllFrames = () => new Promise(resolve => {
+    releaseFrames = resolve;
+  });
+  chrome.tabs.sendMessage = async () => ({ ok: true });
+
+  const pendingNavigation = webNavigationHistoryListeners[0]({
+    tabId,
+    frameId: 0,
+    url: "https://www.bilibili.com/video/BVCurrent"
+  });
+  await Promise.resolve();
+  assert.equal(
+    context.getState(tabId).candidates.some(candidate => candidate.url.includes("/old-1-30232.m4s")),
+    false,
+    "SPA navigation must make the previous page's candidates unavailable before subtitle detachment finishes"
+  );
+  context.addPageMediaCandidate(tabId, {
+    url: "https://upos-sz-mirror.example.test/current-1-30232.m4s",
+    source: "bilibili-playurl",
+    kind: "audio",
+    ext: "m4s",
+    href: "https://www.bilibili.com/video/BVCurrent",
+    duration: 87
+  });
+  releaseFrames([{ frameId: 0 }]);
+  await pendingNavigation;
+  assert.equal(
+    context.getState(tabId).candidates.some(candidate => candidate.url.includes("/current-1-30232.m4s")),
+    true,
+    "current-page candidates reported while old subtitles detach must survive navigation cleanup"
+  );
+  chrome.webNavigation.getAllFrames = originalGetAllFrames;
+  chrome.tabs.sendMessage = originalSendMessage;
+}
+
+{
   const tabId = 114;
   seedPage(tabId, { duration: 120 });
   const state = context.getState(tabId);

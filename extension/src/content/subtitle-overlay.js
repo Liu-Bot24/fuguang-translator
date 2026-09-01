@@ -1070,16 +1070,9 @@
       controller.mediaUnavailableSince = null;
     }
     if (next === controller.media) {
-      const compatibility = compareMediaBindings(controller, nextSignature, nextSourceObject);
-      if (
-        subtitleAttachmentIsJobOwned(controller.origin) &&
-        controller.mediaBindingExpected &&
-        compatibility === false &&
-        !controllerMediaRebindAuthorized(controller)
-      ) {
-        expireControllerMediaBinding(controller);
-        return null;
-      }
+      // MSE players can replace their blob URL or srcObject while retaining the
+      // same media element. The element identity is the stable playback binding;
+      // update its source snapshot without expiring the attached subtitles.
       if (nextSignature || nextSourceObject) {
         controller.mediaSignature = nextSignature;
         controller.mediaSourceObject = nextSourceObject;

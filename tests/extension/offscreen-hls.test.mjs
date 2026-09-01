@@ -1436,6 +1436,144 @@ audio-stream-inf.m3u8
   const originalFetch = context.fetch;
   const originalEnsureWebFfmpegFrame = context.ensureWebFfmpegFrame;
   const originalWarmWebFfmpegFrame = context.warmWebFfmpegFrame;
+  const originalRequestWebFfmpeg = context.requestWebFfmpeg;
+  const originalReloadWebFfmpegFrame = context.reloadWebFfmpegFrame;
+  const originalCaches = context.caches;
+  const originalResponse = context.Response;
+  const cache = new Map();
+  let fetchCalls = 0;
+  let ffmpegCalls = 0;
+  let reloadCalls = 0;
+  context.Response = class {
+    constructor(body) {
+      this.body = body;
+    }
+
+    async arrayBuffer() {
+      return this.body;
+    }
+  };
+  context.caches = {
+    open: async () => ({
+      put: async (url, response) => cache.set(url, response),
+      match: async url => cache.get(url) || null,
+      delete: async url => cache.delete(url)
+    })
+  };
+  context.ensureWebFfmpegFrame = async () => {};
+  context.warmWebFfmpegFrame = () => {};
+  context.fetch = async () => {
+    fetchCalls += 1;
+    return {
+      ok: true,
+      headers: { get: () => "application/octet-stream" },
+      arrayBuffer: async () => vm.runInContext(`new Uint8Array([${fetchCalls}, 2, 3]).buffer`, context)
+    };
+  };
+  context.requestWebFfmpeg = async () => {
+    ffmpegCalls += 1;
+    if (ffmpegCalls === 1) {
+      throw new Error("FFmpeg 提取失败：FFmpeg 执行异常。返回码 未知；异常：memory access out of bounds");
+    }
+    return {
+      chunks: [{
+        index: 0,
+        start: 0,
+        end: 10,
+        duration: 10,
+        coreStart: 0,
+        coreEnd: 10,
+        coreDuration: 10,
+        file: {
+          name: "bilibili-retry-000.mp3",
+          mime: "audio/mpeg",
+          buffer: vm.runInContext("new Uint8Array([8, 9]).buffer", context)
+        },
+        bytes: 2
+      }],
+      bytes: 2,
+      duration: 10,
+      sourceType: "direct"
+    };
+  };
+  context.reloadWebFfmpegFrame = async () => {
+    reloadCalls += 1;
+  };
+
+  try {
+    const result = await context.extractAudioWithWebFfmpeg({
+      sourceUrl: "https://upos-sz-mirror.example.test/video-audio.m4s",
+      webFfmpegUrl: "chrome-extension://fuguang-test/web-ffmpeg/index.html",
+      cacheNamespace: "bilibili-direct-runtime-retry",
+      fileName: "video-audio.m4s",
+      mime: "audio/mp4",
+      asrChunkSeconds: 900,
+      duration: 10
+    });
+    assert.equal(fetchCalls, 2, "a transferred direct-media buffer must be downloaded again for the retry");
+    assert.equal(ffmpegCalls, 2, "a fatal WebAssembly runtime error should retry exactly once");
+    assert.equal(reloadCalls, 1, "the poisoned Web FFmpeg iframe must be replaced before retrying");
+    assert.equal(result.sourceType, "direct");
+    assert.equal(result.chunks.length, 1);
+  } finally {
+    context.fetch = originalFetch;
+    context.ensureWebFfmpegFrame = originalEnsureWebFfmpegFrame;
+    context.warmWebFfmpegFrame = originalWarmWebFfmpegFrame;
+    context.requestWebFfmpeg = originalRequestWebFfmpeg;
+    context.reloadWebFfmpegFrame = originalReloadWebFfmpegFrame;
+    context.caches = originalCaches;
+    context.Response = originalResponse;
+  }
+}
+
+{
+  const originalFetch = context.fetch;
+  const originalEnsureWebFfmpegFrame = context.ensureWebFfmpegFrame;
+  const originalWarmWebFfmpegFrame = context.warmWebFfmpegFrame;
+  const originalRequestWebFfmpeg = context.requestWebFfmpeg;
+  const originalReloadWebFfmpegFrame = context.reloadWebFfmpegFrame;
+  let fetchCalls = 0;
+  let reloadCalls = 0;
+  context.ensureWebFfmpegFrame = async () => {};
+  context.warmWebFfmpegFrame = () => {};
+  context.fetch = async () => {
+    fetchCalls += 1;
+    return {
+      ok: true,
+      headers: { get: () => "audio/mp4" },
+      arrayBuffer: async () => vm.runInContext("new Uint8Array([1, 2, 3]).buffer", context)
+    };
+  };
+  context.requestWebFfmpeg = async () => {
+    throw new Error("FFmpeg 提取失败：FFmpeg 返回非零退出码。返回码 1；最近日志：Stream map '0:a:0' matches no streams");
+  };
+  context.reloadWebFfmpegFrame = async () => {
+    reloadCalls += 1;
+  };
+
+  try {
+    await assert.rejects(
+      context.extractAudioWithWebFfmpeg({
+        sourceUrl: "https://cdn.example.test/video-only.mp4",
+        webFfmpegUrl: "chrome-extension://fuguang-test/web-ffmpeg/index.html"
+      }),
+      /matches no streams/
+    );
+    assert.equal(fetchCalls, 1, "a deterministic no-audio input error must not redownload the file");
+    assert.equal(reloadCalls, 0, "a deterministic media error must not be disguised as an engine retry");
+  } finally {
+    context.fetch = originalFetch;
+    context.ensureWebFfmpegFrame = originalEnsureWebFfmpegFrame;
+    context.warmWebFfmpegFrame = originalWarmWebFfmpegFrame;
+    context.requestWebFfmpeg = originalRequestWebFfmpeg;
+    context.reloadWebFfmpegFrame = originalReloadWebFfmpegFrame;
+  }
+}
+
+{
+  const originalFetch = context.fetch;
+  const originalEnsureWebFfmpegFrame = context.ensureWebFfmpegFrame;
+  const originalWarmWebFfmpegFrame = context.warmWebFfmpegFrame;
   const originalExtractLocalMediaAudioWithWebFfmpeg = context.extractLocalMediaAudioWithWebFfmpeg;
   const originalCaches = context.caches;
   const originalResponse = context.Response;

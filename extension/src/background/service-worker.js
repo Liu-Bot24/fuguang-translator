@@ -427,13 +427,10 @@ async function clearTopLevelNavigationState(tabId, { detachSubtitles = false } =
   if (state) {
     invalidateManualVttAttachment(state);
   }
-  try {
-    if (detachSubtitles) {
-      await broadcastMessageToFrames(tabId, { type: MESSAGE.DETACH_PRELOAD_VTT });
-    }
-  } finally {
-    tabState.delete(tabId);
-    scheduleSidepanelStatusChange(tabId);
+  tabState.delete(tabId);
+  scheduleSidepanelStatusChange(tabId);
+  if (detachSubtitles) {
+    await broadcastMessageToFrames(tabId, { type: MESSAGE.DETACH_PRELOAD_VTT });
   }
 }
 

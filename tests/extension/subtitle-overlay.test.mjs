@@ -1107,34 +1107,15 @@ later cue
   assert.equal(harness.overlayText(), "first cue");
   video.currentSrc = "https://media.example.test/quality.mp4?token=new";
   video.src = video.currentSrc;
-  video.currentTime = 77;
+  video.currentTime = 4;
   harness.runIntervals();
-  assert.equal(harness.overlayHidden(), true,
-    "an automatic attachment must stop when its exact DOM changes source without background authorization");
-
-  const rejectedRefresh = await harness.send({
-    type: "FUGUANG_ATTACH_VTT",
-    vtt: OVERLAPPING_VTT,
-    origin: "job-automatic",
-    jobId: "job-quality-stream-refresh",
-    attachmentRevision: 2,
-    preloadGeneration: 2
-  });
-  assert.equal(rejectedRefresh.ok, false);
-  assert.equal(rejectedRefresh.mediaBindingRejected, true);
-  assert.equal(rejectedRefresh.currentSrc, "https://media.example.test/quality.mp4?token=new");
-  assert.equal(Number.isFinite(rejectedRefresh.mediaBindingRejectedAt), true);
-
-  assert.equal((await harness.send({
-    type: "FUGUANG_ATTACH_VTT",
-    vtt: OVERLAPPING_VTT,
-    origin: "job-automatic",
-    jobId: "job-quality-stream-refresh",
-    attachmentRevision: 2,
-    preloadGeneration: 2,
-    allowMediaRebind: true
-  })).ok, true, "a background-authorized same-lineage refresh must rebind the automatic subtitle");
-  assert.equal(harness.overlayText(), "current cue");
+  assert.equal(harness.overlayHidden(), false,
+    "an automatic attachment must survive source URL churn on the same media element");
+  assert.equal(harness.overlayText(), "second cue");
+  const stateResponse = await harness.send({ type: "FUGUANG_GET_VIDEO_STATE" });
+  assert.equal(stateResponse.ok, true);
+  assert.equal(stateResponse.state.subtitleJobId, "job-quality-stream-refresh");
+  assert.equal(stateResponse.state.currentSrc, "https://media.example.test/quality.mp4?token=new");
 }
 
 {
