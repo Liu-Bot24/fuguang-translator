@@ -16,8 +16,11 @@ After opening a video page, Liusheng Subtitles shows available media sources in 
 
 ## 0.1.6 Updates
 
-- Improves the online video subtitle generation pipeline for more complete and stable HLS recognition results.
-- Optimizes online video audio preprocessing to reduce repeated extraction work while keeping recognition segments stable.
+- Moves long-running recognition and translation to a persisted offscreen runtime so the same task can continue from local state after an MV3 background worker restart.
+- Stop now aborts active recognition and translation requests and tracks FunASR remote cancellation. Paid-request checkpoints prevent blind resubmission when an acknowledgement is lost.
+- The side panel automatically restores the task for the active tab. The default translation request timeout increases from 90 to 120 seconds.
+- Improves execution stability for HLS, DASH, MSE, and direct media by retaining required headers per origin, serializing Web FFmpeg extraction, and safely restoring page media hooks.
+- Local-file tasks can reuse a permissioned read-only file handle for retries or re-extraction. Temporary jobs, audio, and paid responses now have local automatic-cleanup policies.
 
 ## Features
 
