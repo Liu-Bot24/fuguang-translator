@@ -100,6 +100,10 @@ API 密钥、模型配置和字幕缓存保存在本机浏览器中。插件不�
 
 感谢 [cat-catch](https://github.com/xifangczy/cat-catch) 的浏览器媒体嗅探实践。音频处理使用 [ffmpeg.wasm](https://github.com/ffmpegwasm/ffmpeg.wasm)。字幕时间和静音处理参考 faster-whisper、WhisperX、stable-ts 和 Speaches 的公开方案。
 
+## 友情链接
+
+- [LINUX DO](https://linux.do/) — 新的理想型社区
+
 ## 许可证
 
 本项目使用 [MIT License](LICENSE) 开源。
