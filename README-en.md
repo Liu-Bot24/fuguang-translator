@@ -21,6 +21,8 @@ After opening a video page, Liusheng Subtitles shows available media sources in 
 - The side panel automatically restores the task for the active tab. The default translation request timeout increases from 90 to 120 seconds.
 - Improves execution stability for HLS, DASH, MSE, and direct media by retaining required headers per origin, serializing Web FFmpeg extraction, and safely restoring page media hooks.
 - Local-file tasks can reuse a permissioned read-only file handle for retries or re-extraction. Temporary jobs, audio, and paid responses now have local automatic-cleanup policies.
+- Ordinary ASR tasks preserve the provider's supported VAD and quality parameters across background recovery, offscreen execution, and ASR reruns, preventing additional silence hallucinations caused by dropped request fields.
+- Translation tasks retain the page title, description, language, and channel so persisted execution keeps the full translation context.
 
 ## Features
 

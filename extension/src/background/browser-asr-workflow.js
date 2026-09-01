@@ -188,8 +188,12 @@ function browserAsrMp3AudioFrameScanStart(bytes) {
 async function transcribeBrowserAudioChunk(chunk, asrConfig, options = {}) {
   const endpoint = browserAsrEndpoint(asrConfig);
   const timeoutMs = normalizeAsrTimeoutMs(asrConfig?.timeoutMs, chunk);
-  const supportedRequestFields = await resolveBrowserAsrSupportedRequestFields(asrConfig, { signal: options.signal });
-  const speechTimestampsEndpoint = await resolveBrowserAsrSpeechTimestampsEndpoint(asrConfig, { signal: options.signal });
+  const supportedRequestFields = Array.isArray(options.supportedRequestFields)
+    ? new Set(options.supportedRequestFields.map(value => String(value || "")).filter(Boolean))
+    : await resolveBrowserAsrSupportedRequestFields(asrConfig, { signal: options.signal });
+  const speechTimestampsEndpoint = Object.hasOwn(options, "speechTimestampsEndpoint")
+    ? String(options.speechTimestampsEndpoint || "")
+    : await resolveBrowserAsrSpeechTimestampsEndpoint(asrConfig, { signal: options.signal });
   const useExternalVadPrecheck = shouldUseBrowserAsrExternalVadPrecheck(supportedRequestFields, speechTimestampsEndpoint);
   const nativeVadAvailable = shouldUseBrowserAsrNativeVadTranscription(supportedRequestFields, speechTimestampsEndpoint);
   const fileName = chunk.file?.name || `chunk-${chunk.index + 1}.mp3`;
@@ -587,7 +591,11 @@ function shouldDisableBrowserAsrServerVadForRecall(asrConfig = {}, reliableSpeec
   if (normalizeProviderType(asrConfig?.providerType) !== "openai") {
     return false;
   }
-  return normalizeAsrVadFilterMode(asrConfig?.vadFilter || asrConfig?.vad_filter || asrConfig?.vadFilterMode) === "auto";
+  const mode = normalizeAsrVadFilterMode(asrConfig?.vadFilter || asrConfig?.vad_filter || asrConfig?.vadFilterMode);
+  if (mode !== "auto") {
+    return mode === "off";
+  }
+  return false;
 }
 
 async function transcribeBrowserCollectedSpeechAudioChunk({

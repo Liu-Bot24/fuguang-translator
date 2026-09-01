@@ -68,6 +68,43 @@ test("offscreen translation executor returns JSON-safe segments, failures and er
   assert.equal(JSON.stringify(result).includes("sk-transient"), false);
 });
 
+test("offscreen translation preserves source text, timing and order across the durable boundary", async () => {
+  const sourceSegments = [
+    { start: 35.159, end: 36.6, text: "凛萱、おはよう。", chunkIndex: 3, segmentIndex: 8 },
+    { start: 37.079, end: 37.939, text: "おはよう。", chunkIndex: 3, segmentIndex: 9 },
+    { start: 39.34, end: 40.62, text: "今日もいい香り。", chunkIndex: 3, segmentIndex: 10 }
+  ];
+  let observed = null;
+  const execute = createOffscreenBrowserTranslationExecutor({
+    paidClient: { createRequestTransport: () => async () => new Response("{}") },
+    async translateBrowserSegments(segments, config, language, metadata) {
+      observed = { segments, config, language, metadata };
+      return segments.map(segment => ({ ...segment, text: `译:${segment.text}` }));
+    },
+    browserTranslationFailures: () => []
+  });
+  const input = JSON.parse(JSON.stringify(translationInput({
+    sourceSegments,
+    targetLanguage: "zh-CN",
+    metadata: {
+      title: "同一视频",
+      description: "日语烹饪节目",
+      pageLanguage: "ja",
+      channel: "料理频道"
+    }
+  })));
+  const result = await execute(input);
+  assert.deepEqual(observed.segments, sourceSegments);
+  assert.equal(observed.language, "zh-CN");
+  assert.deepEqual(observed.metadata, {
+    title: "同一视频",
+    description: "日语烹饪节目",
+    pageLanguage: "ja",
+    channel: "料理频道"
+  });
+  assert.deepEqual(result.segments, sourceSegments.map(segment => ({ ...segment, text: `译:${segment.text}` })));
+});
+
 test("offscreen translation cancellation reaches the same paid runtime instance", async () => {
   let cancelCalls = 0;
   let requestStarted;

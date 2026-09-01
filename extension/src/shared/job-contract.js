@@ -453,6 +453,7 @@ export const FuguangJobContract = (() => {
     const job = record.job || record;
     const candidate = record.candidate || {};
     const presentationBinding = record.presentationBinding || {};
+    const asrCapabilities = sanitizeAsrCapabilities(record.asrCapabilities || job.asrCapabilities);
     const rawFrameId = presentationBinding.frameId;
     const frameId = rawFrameId === null || rawFrameId === undefined || rawFrameId === ""
       ? null
@@ -460,6 +461,7 @@ export const FuguangJobContract = (() => {
     return {
       ...summary,
       executionSpec: sanitizeExecutionSpec(record.modelConfig?.executionSpec || job.executionSpec),
+      ...(asrCapabilities ? { asrCapabilities } : {}),
       source: {
         kind: String(candidate.kind || ""),
         ext: String(candidate.ext || ""),
@@ -469,6 +471,22 @@ export const FuguangJobContract = (() => {
         lineageKey: compactText(presentationBinding.lineageKey, 2000).trim()
       },
       cacheNamespace: String(job.id || "")
+    };
+  }
+
+  function sanitizeAsrCapabilities(value) {
+    if (!value || typeof value !== "object") {
+      return null;
+    }
+    const fields = Array.isArray(value.supportedRequestFields)
+      ? value.supportedRequestFields
+        .map(item => compactText(item, 200).trim())
+        .filter(Boolean)
+        .slice(0, 200)
+      : [];
+    return {
+      supportedRequestFields: [...new Set(fields)],
+      speechTimestampsEndpoint: compactText(value.speechTimestampsEndpoint, 2000).trim()
     };
   }
 

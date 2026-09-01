@@ -788,6 +788,96 @@ test("ordinary ASR VAD precheck forwards its own 30-second timeout to the durabl
   assert.ok(transportOptions.signal instanceof AbortSignal);
 });
 
+test("ordinary ASR reuses the service-worker capability snapshot without probing again in offscreen", async () => {
+  const originalCaches = globalThis.caches;
+  const originalFetch = globalThis.fetch;
+  const audioBytes = new Uint8Array([0xff, 0xfb, 1, 2, 3, 5, 8, 13]);
+  let offscreenProbeCalls = 0;
+  let postedBody = null;
+  globalThis.caches = {
+    async open() {
+      return { async match() { return new Response(audioBytes); } };
+    }
+  };
+  globalThis.fetch = async () => {
+    offscreenProbeCalls += 1;
+    throw new Error("offscreen must not probe capabilities already resolved by the service worker");
+  };
+  try {
+    const executeAsr = createOffscreenBrowserAsrExecutor({
+      paidRuntime: { async writeArtifact() {} },
+      paidClient: {
+        createRequestTransport: () => async (_url, init) => {
+          postedBody = init.body;
+          return new Response(JSON.stringify({
+            segments: [{ start: 3, end: 4.4, text: "quiet but real phrase" }]
+          }), {
+            status: 200,
+            headers: { "content-type": "application/json" }
+          });
+        }
+      }
+    });
+    const result = await executeAsr({
+      jobId: "job-capability-snapshot",
+      runToken: "run-capability-snapshot",
+      executionOwnerId: "owner-capability-snapshot",
+      executionEpoch: 1,
+      chunkIndex: 0,
+      semanticRequestPath: "asr/job-capability-snapshot/run-capability-snapshot/chunk/0",
+      webFfmpegUrl: "chrome-extension://test/ffmpeg.html",
+      asrConfig: {
+        providerType: "openai",
+        baseUrl: "https://snapshot-asr.example/v1",
+        model: "Systran/faster-whisper-large-v3",
+        apiKey: "local",
+        language: "ja",
+        vadFilter: "on"
+      },
+      asrCapabilities: {
+        supportedRequestFields: [
+          "vad_filter",
+          "vad_parameters",
+          "condition_on_previous_text",
+          "no_speech_threshold"
+        ],
+        speechTimestampsEndpoint: ""
+      },
+      chunk: {
+        index: 0,
+        start: 0,
+        end: 30,
+        duration: 30,
+        bytes: audioBytes.byteLength,
+        file: {
+          name: "snapshot.mp3",
+          mime: "audio/mpeg",
+          bytes: audioBytes.byteLength,
+          cacheUrl: "https://fuguang.local/__fuguang_audio_cache/job-capability-snapshot/0.mp3"
+        }
+      }
+    }, { signal: new AbortController().signal });
+    assert.equal(offscreenProbeCalls, 0, "offscreen must use the supplied capability snapshot instead of making a second probe");
+    assert.deepEqual(result.segments.map(segment => segment.text), ["quiet but real phrase"]);
+    assert.ok(postedBody instanceof FormData);
+    assert.equal(postedBody.get("language"), "ja");
+    assert.equal(postedBody.get("vad_filter"), "true");
+    assert.equal(postedBody.get("vad_parameters"), JSON.stringify({
+      threshold: 0.15,
+      min_speech_duration_ms: 0,
+      max_speech_duration_s: 30,
+      min_silence_duration_ms: 160,
+      speech_pad_ms: 800
+    }));
+    assert.equal(postedBody.get("condition_on_previous_text"), "false");
+    assert.equal(postedBody.get("no_speech_threshold"), "0.6");
+    assert.deepEqual(new Uint8Array(await postedBody.get("file").arrayBuffer()), audioBytes);
+  } finally {
+    if (originalCaches === undefined) delete globalThis.caches;
+    else globalThis.caches = originalCaches;
+    globalThis.fetch = originalFetch;
+  }
+});
 test("ordinary ASR preserves paid delivery certainty through the real workflow and executor boundary", async () => {
   const originalCaches = globalThis.caches;
   const audioBytes = new Uint8Array(4096);

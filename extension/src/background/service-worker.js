@@ -795,9 +795,10 @@ async function startBrowserPreload(tabId, candidate, metadata, modelConfig) {
   const executionMetadata = buildExecutionMetadata(metadata, candidate, extractionCandidate);
   validateBrowserPreloadModelConfig(modelConfig);
   const usesFunAsr = isDashScopeFunAsrConfig(modelConfig.asr);
+  const asrCapabilities = usesFunAsr ? null : await browserAsrExecutionCapabilities(modelConfig.asr);
   const browserAsrChunkSeconds = usesFunAsr
     ? dashScopeFunAsrChunkSeconds(executionMetadata)
-    : await browserAsrEffectiveUploadChunkSeconds(modelConfig);
+    : await browserAsrEffectiveUploadChunkSeconds(modelConfig, asrCapabilities);
   const jobId = createDurableJobId();
   const runToken = createDurableRunToken();
   const presentationBinding = createBrowserPresentationBinding(tabId, candidate, executionMetadata.pageUrl || candidate.pageUrl || "");
@@ -857,6 +858,7 @@ async function startBrowserPreload(tabId, candidate, metadata, modelConfig) {
     translatedSegmentsByChunk: new Map(),
     browserAsrDiagnosticsByChunk: new Map(),
     browserAsrChunkSeconds: browserAsrChunkSeconds,
+    asrCapabilities,
     pipeline: usesFunAsr ? "funasr" : "browser"
   };
   browserPreloadJobs.set(jobId, record);
@@ -2626,6 +2628,7 @@ async function processBrowserAsrChunk(record, chunk, options = {}) {
       signal,
       jobId: record.job.id,
       runToken: record.runToken,
+      ...(normalizeBrowserAsrCapabilitiesSnapshot(record.asrCapabilities) || {}),
       onDiagnostics: diagnostics => {
         if (!isBrowserRunInactive(record, runToken, operation)) {
           recordBrowserAsrChunkDiagnostics(record, chunk, diagnostics);
@@ -3977,6 +3980,7 @@ function recoverBrowserJobRecord(ledger, chunks = [], modelConfig = null, option
     translatedSegmentsByChunk,
     browserAsrDiagnosticsByChunk,
     browserAsrChunkSeconds: Number(ledger.extract?.asrChunkSeconds || 0) || 0,
+    asrCapabilities: normalizeBrowserAsrCapabilitiesSnapshot(ledger.asrCapabilities),
     audioChunks,
     browserAsrChunkToTranslationGroup,
     pipeline: ledger.pipeline || "browser",
@@ -5163,6 +5167,9 @@ function browserTranslationSemanticRequestBase(jobId, runToken, index) {
 function browserTranslationExecutionMetadata(metadata = {}) {
   return {
     title: String(metadata.title || ""),
+    description: String(metadata.description || ""),
+    pageLanguage: String(metadata.pageLanguage || ""),
+    channel: String(metadata.channel || ""),
     pageUrl: String(metadata.pageUrl || ""),
     sourceUrl: String(metadata.sourceUrl || ""),
     duration: Number(metadata.duration || 0) || 0
@@ -5194,6 +5201,39 @@ function browserAsrExecutionConfig(config = {}) {
     if (config[key] !== undefined) result[key] = config[key];
   }
   return result;
+}
+
+async function browserAsrExecutionCapabilities(config = {}) {
+  let supportedRequestFields = [];
+  let speechTimestampsEndpoint = "";
+  try {
+    supportedRequestFields = [...await resolveBrowserAsrSupportedRequestFields(config)];
+  } catch {
+    supportedRequestFields = [];
+  }
+  try {
+    speechTimestampsEndpoint = await resolveBrowserAsrSpeechTimestampsEndpoint(config);
+  } catch {
+    speechTimestampsEndpoint = "";
+  }
+  return normalizeBrowserAsrCapabilitiesSnapshot({
+    supportedRequestFields: supportedRequestFields.map(value => String(value || "")).filter(Boolean),
+    speechTimestampsEndpoint: String(speechTimestampsEndpoint || "")
+  });
+}
+
+function normalizeBrowserAsrCapabilitiesSnapshot(value) {
+  if (!value || typeof value !== "object" ||
+      (!Array.isArray(value.supportedRequestFields) && !Object.hasOwn(value, "speechTimestampsEndpoint"))) {
+    return null;
+  }
+  const fields = Array.isArray(value.supportedRequestFields)
+    ? value.supportedRequestFields.map(item => String(item || "").trim()).filter(Boolean)
+    : [];
+  return {
+    supportedRequestFields: [...new Set(fields)],
+    speechTimestampsEndpoint: String(value.speechTimestampsEndpoint || "").trim()
+  };
 }
 
 function browserFunAsrExecutionConfig(config = {}) {
@@ -5228,6 +5268,12 @@ async function getOffscreenBrowserAsrExecutionInput(message, fence) {
   }
   if (chunk.asrExecutionMode && chunk.asrExecutionMode !== "offscreen-durable-v1") {
     return { accepted: false, interrupted: true, terminal: true, reason: "legacy-asr-operation-ambiguous" };
+  }
+  const asrCapabilities = funAsr
+    ? null
+    : (normalizeBrowserAsrCapabilitiesSnapshot(record.asrCapabilities) || await browserAsrExecutionCapabilities(config));
+  if (!funAsr && !record.asrCapabilities) {
+    record.asrCapabilities = asrCapabilities;
   }
   const operation = createOffscreenBrowserOperation(record, fence, { chunkIndex: index, workType: "asr-input" });
   try {
@@ -5264,7 +5310,7 @@ async function getOffscreenBrowserAsrExecutionInput(message, fence) {
         labelSpeakers: browserFunAsrShouldLabelSpeakers(record),
         deadlineAt: Date.now() + Math.max(60_000, Number(config.timeoutMs || 2 * 60 * 60 * 1000) || 2 * 60 * 60 * 1000)
       }
-      : { asrConfig: browserAsrExecutionConfig(config) }),
+      : { asrConfig: browserAsrExecutionConfig(config), asrCapabilities }),
     webFfmpegUrl
   }};
 }
@@ -6114,19 +6160,24 @@ function browserAsrUploadChunkSeconds(modelConfig = {}) {
   return normalizeBrowserAsrUploadChunkSeconds(modelConfig.asrUploadChunkSeconds);
 }
 
-async function browserAsrEffectiveUploadChunkSeconds(modelConfig = {}) {
+async function browserAsrEffectiveUploadChunkSeconds(modelConfig = {}, capabilitySnapshot = null) {
   const configured = browserAsrUploadChunkSeconds(modelConfig);
-  let supportedRequestFields = null;
-  let speechTimestampsEndpoint = "";
-  try {
-    supportedRequestFields = await resolveBrowserAsrSupportedRequestFields(modelConfig.asr || {});
-  } catch {
-    supportedRequestFields = null;
-  }
-  try {
-    speechTimestampsEndpoint = await resolveBrowserAsrSpeechTimestampsEndpoint(modelConfig.asr || {});
-  } catch {
-    speechTimestampsEndpoint = "";
+  const normalizedSnapshot = normalizeBrowserAsrCapabilitiesSnapshot(capabilitySnapshot);
+  let supportedRequestFields = normalizedSnapshot
+    ? new Set(normalizedSnapshot.supportedRequestFields)
+    : null;
+  let speechTimestampsEndpoint = normalizedSnapshot?.speechTimestampsEndpoint || "";
+  if (!normalizedSnapshot) {
+    try {
+      supportedRequestFields = await resolveBrowserAsrSupportedRequestFields(modelConfig.asr || {});
+    } catch {
+      supportedRequestFields = null;
+    }
+    try {
+      speechTimestampsEndpoint = await resolveBrowserAsrSpeechTimestampsEndpoint(modelConfig.asr || {});
+    } catch {
+      speechTimestampsEndpoint = "";
+    }
   }
   if (!browserAsrShouldUseCompatVadOnlyShortWindows(modelConfig.asr || {}, supportedRequestFields, speechTimestampsEndpoint)) {
     return configured;
@@ -6792,6 +6843,7 @@ async function retryBrowserAsrGroup(record, groupIndex) {
         signal: record.abortController?.signal,
         jobId: record.job.id,
         runToken: record.runToken,
+        ...(normalizeBrowserAsrCapabilitiesSnapshot(record.asrCapabilities) || {}),
         onDiagnostics: diagnostics => recordBrowserAsrChunkDiagnostics(record, chunk, diagnostics)
       });
       const recoveryWarning = browserAsrResultWarning(chunkSegments);

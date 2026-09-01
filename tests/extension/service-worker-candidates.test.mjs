@@ -2893,7 +2893,14 @@ assert.equal(context.browserTranslationProviderConcurrency({ modelConfig: { work
     cancelled: false,
     abortController: new AbortController(),
     candidate: { url: "https://media.example.test/offscreen-process.mp3", kind: "audio", ext: "mp3" },
-    metadata: { pageUrl: "https://example.test/watch/offscreen-process" },
+    metadata: {
+      title: "Japanese cooking lesson",
+      description: "A quiet cooking tutorial with spoken Japanese instructions.",
+      pageLanguage: "ja",
+      channel: "Cooking Channel",
+      pageUrl: "https://example.test/watch/offscreen-process",
+      sourceUrl: "https://media.example.test/offscreen-process.mp3"
+    },
     modelConfig: {
       asr: { providerType: "openai", baseUrl: "https://asr.test/v1", model: "", apiKey: "test" },
       translation: { providerType: "openai", baseUrl: "https://llm.test/v1", model: "test", apiKey: "test" },
@@ -2964,7 +2971,18 @@ assert.equal(context.browserTranslationProviderConcurrency({ modelConfig: { work
     });
     assert.equal(missingOpenAiModel.accepted, false);
     assert.match(missingOpenAiModel.error, /配置无法恢复/);
-    record.modelConfig.asr = { providerType: "xai", baseUrl: "https://api.x.ai/v1", model: "", apiKey: "test" };
+    record.modelConfig.asr = {
+      providerType: "xai",
+      baseUrl: "https://api.x.ai/v1",
+      model: "",
+      apiKey: "test",
+      language: "ja",
+      sourceLanguage: "ja",
+      timeoutMs: 120_000,
+      vadFilter: "auto",
+      collectedSpeechAudio: "off",
+      maxUploadBytes: 23_456_789
+    };
     record.job.translation.chunkStatuses[0].attempts = 4;
     const asrInput = await context.getOffscreenBrowserJobExecutionInput({
       jobId: record.job.id,
@@ -2978,6 +2996,117 @@ assert.equal(context.browserTranslationProviderConcurrency({ modelConfig: { work
     assert.equal(asrInput.input.asrConfig.apiKey, "test");
     assert.equal(asrInput.input.asrConfig.providerType, "xai");
     assert.equal(asrInput.input.asrConfig.model, "", "xAI's built-in STT endpoint must not require a model name");
+    assert.deepEqual(JSON.parse(JSON.stringify({
+      language: asrInput.input.asrConfig.language,
+      sourceLanguage: asrInput.input.asrConfig.sourceLanguage,
+      timeoutMs: asrInput.input.asrConfig.timeoutMs,
+      vadFilter: asrInput.input.asrConfig.vadFilter,
+      collectedSpeechAudio: asrInput.input.asrConfig.collectedSpeechAudio,
+      maxUploadBytes: asrInput.input.asrConfig.maxUploadBytes
+    })), {
+      language: "ja",
+      sourceLanguage: "ja",
+      timeoutMs: 120_000,
+      vadFilter: "auto",
+      collectedSpeechAudio: "off",
+      maxUploadBytes: 23_456_789
+    }, "the offscreen boundary must preserve ASR semantics rather than only provider credentials");
+    assert.deepEqual(JSON.parse(JSON.stringify(asrInput.input.asrCapabilities)), {
+      supportedRequestFields: [],
+      speechTimestampsEndpoint: ""
+    }, "providers without capability probing must still carry an explicit empty capability snapshot");
+    const originalFetch = context.fetch;
+    context.fetch = async url => {
+      assert.equal(new URL(String(url)).pathname, "/openapi.json");
+      return {
+        ok: true,
+        json: async () => ({
+          paths: {
+            "/v1/audio/transcriptions": {
+              post: {
+                requestBody: {
+                  content: {
+                    "multipart/form-data": {
+                      schema: {
+                        properties: {
+                          vad_filter: { type: "boolean" },
+                          vad_parameters: { type: "string" },
+                          condition_on_previous_text: { type: "boolean" },
+                          no_speech_threshold: { type: "number" }
+                        }
+                      }
+                    }
+                  }
+                }
+              }
+            },
+            "/v1/audio/speech/timestamps": {
+              post: {
+                requestBody: {
+                  content: {
+                    "multipart/form-data": {
+                      schema: { properties: { file: { type: "string", format: "binary" } } }
+                    }
+                  }
+                }
+              }
+            }
+          }
+        })
+      };
+    };
+    record.modelConfig.asr = {
+      providerType: "openai",
+      baseUrl: "https://snapshot-asr.example/v1",
+      model: "Systran/faster-whisper-large-v3",
+      apiKey: "test",
+      language: "ja",
+      vadFilter: "on"
+    };
+    const openAiCapabilities = await context.browserAsrExecutionCapabilities(record.modelConfig.asr);
+    context.fetch = originalFetch;
+    assert.deepEqual(JSON.parse(JSON.stringify(openAiCapabilities)), {
+      supportedRequestFields: [
+        "vad_filter",
+        "vad_parameters",
+        "condition_on_previous_text",
+        "no_speech_threshold"
+      ],
+      speechTimestampsEndpoint: "https://snapshot-asr.example/v1/audio/speech/timestamps"
+    }, "the service worker must serialize the exact capability decision that crosses into offscreen with the ASR chunk");
+    record.modelConfig.asr = {
+      providerType: "openai",
+      baseUrl: "https://persisted-snapshot-asr.example/v1",
+      model: "Systran/faster-whisper-large-v3",
+      apiKey: "test",
+      language: "ja",
+      vadFilter: "on"
+    };
+    record.asrCapabilities = {
+      supportedRequestFields: [
+        "vad_filter",
+        "vad_parameters",
+        "condition_on_previous_text",
+        "no_speech_threshold"
+      ],
+      speechTimestampsEndpoint: "https://persisted-snapshot-asr.example/v1/audio/speech/timestamps"
+    };
+    let recoveryProbeCalls = 0;
+    context.fetch = async () => {
+      recoveryProbeCalls += 1;
+      throw new Error("offscreen input must reuse the persisted task capability snapshot");
+    };
+    const persistedSnapshotInput = await context.getOffscreenBrowserJobExecutionInput({
+      jobId: record.job.id,
+      runToken: record.runToken,
+      ...fence,
+      chunkIndex: 0,
+      workType: "asr"
+    });
+    context.fetch = originalFetch;
+    assert.equal(persistedSnapshotInput.accepted, true, JSON.stringify(persistedSnapshotInput));
+    assert.deepEqual(JSON.parse(JSON.stringify(persistedSnapshotInput.input.asrCapabilities)), record.asrCapabilities);
+    assert.equal(recoveryProbeCalls, 0, "a durable task must not make a second capability decision after recovery");
     assert.equal(asrInput.input.webFfmpegUrl, "chrome-extension://test-extension/web-ffmpeg/index.html", "production execution input must carry the configured Web FFmpeg URL");
     assert.equal(record.job.translation.chunkStatuses[0].attempts, 4, "preparing an audio chunk must not count as another retry");
     assert.equal(/offscreen/i.test(record.job.translation.chunkStatuses[0].message), false, "user progress must not expose the executor implementation");
@@ -3008,6 +3137,7 @@ assert.equal(context.browserTranslationProviderConcurrency({ modelConfig: { work
     assert.equal(JSON.stringify(asrDurableSnapshot).includes("query-secret"), false);
     assert.equal(JSON.stringify(asrDurableSnapshot).includes("payload-secret"), false);
     const asrRecovered = context.recoverBrowserJobRecord(asrDurableSnapshot.job, asrDurableSnapshot.chunks, record.modelConfig);
+    assert.deepEqual(JSON.parse(JSON.stringify(asrRecovered.asrCapabilities)), record.asrCapabilities, "the task capability snapshot must survive the durable ledger boundary");
     assert.equal(asrRecovered.browserAsrDiagnosticsByChunk.get(0).request.fields[0][0], "model");
     assert.equal(asrRecovered.browserAsrDiagnosticsByChunk.get(0).rawPayload.segments[0].text, "source");
     assert.equal(asrRecovered.browserAsrDiagnosticsByChunk.get(0).error.status, 500);
@@ -3051,6 +3181,15 @@ assert.equal(context.browserTranslationProviderConcurrency({ modelConfig: { work
     assert.equal(executionInput.accepted, true, JSON.stringify(executionInput));
     assert.equal(executionInput.input.sourceSegments[0].text, "source");
     assert.equal(executionInput.input.translationConfig.apiKey, "test");
+    assert.deepEqual(JSON.parse(JSON.stringify(executionInput.input.metadata)), {
+      title: "Japanese cooking lesson",
+      description: "A quiet cooking tutorial with spoken Japanese instructions.",
+      pageLanguage: "ja",
+      channel: "Cooking Channel",
+      pageUrl: "https://example.test/watch/offscreen-process",
+      sourceUrl: "https://media.example.test/offscreen-process.mp3",
+      duration: 0
+    }, "the durable translation boundary must preserve every prompt context field used by v0.1.5");
     await context.commitOffscreenBrowserJobWorkResult({
       jobId: record.job.id,
       runToken: record.runToken,
@@ -3061,11 +3200,11 @@ assert.equal(context.browserTranslationProviderConcurrency({ modelConfig: { work
     });
     assert.equal(record.job.translation.chunkStatuses[0].stage, "completed");
     assert.equal(translationCalls, 0, "translation HTTP execution must not run in the Service Worker");
-    assert.equal(context.offscreenProcessSnapshots.length, 5, "the final group preparation and each paid request/result must have fenced checkpoints");
+    assert.equal(context.offscreenProcessSnapshots.length, 6, "the repeated persisted-snapshot input, final group preparation and each paid request/result must have fenced checkpoints");
     const asrInflightCheckpoint = context.offscreenProcessSnapshots[0].chunks.find(entry => entry.entryType === "translation-group");
-    const preparedTranslationCheckpoint = context.offscreenProcessSnapshots[2].chunks.find(entry => entry.entryType === "translation-group");
-    const translationInflightCheckpoint = context.offscreenProcessSnapshots[3].chunks.find(entry => entry.entryType === "translation-group");
-    const translationCheckpoint = context.offscreenProcessSnapshots[4].chunks.find(entry => entry.entryType === "translation-group");
+    const preparedTranslationCheckpoint = context.offscreenProcessSnapshots[3].chunks.find(entry => entry.entryType === "translation-group");
+    const translationInflightCheckpoint = context.offscreenProcessSnapshots[4].chunks.find(entry => entry.entryType === "translation-group");
+    const translationCheckpoint = context.offscreenProcessSnapshots[5].chunks.find(entry => entry.entryType === "translation-group");
     assert.equal(asrInflightCheckpoint.stage, "asr_inflight");
     assert.equal(preparedTranslationCheckpoint.stage, "asr_done");
     assert.equal(preparedTranslationCheckpoint.sourceSegments[0].text, "source");
@@ -6395,6 +6534,24 @@ function createAtomicAsrAttemptRecord(id) {
       vadFilter: "off"
     }
   }), 900);
+  let snapshotProbeCalls = 0;
+  context.fetch = async () => {
+    snapshotProbeCalls += 1;
+    throw new Error("a persisted capability snapshot must prevent a recovery-time probe");
+  };
+  assert.equal(await context.browserAsrEffectiveUploadChunkSeconds({
+    asr: {
+      providerType: "openai",
+      baseUrl: "https://persisted-vad-only.example/v1",
+      model: "Systran/faster-whisper-large-v3",
+      apiKey: "test",
+      vadFilter: "auto"
+    }
+  }, {
+    supportedRequestFields: ["vad_filter"],
+    speechTimestampsEndpoint: ""
+  }), 30, "job planning must use the persisted capability decision without probing again");
+  assert.equal(snapshotProbeCalls, 0);
   context.fetch = originalFetch;
 }
 
@@ -12009,12 +12166,12 @@ await assertInterruptedRerunContinuesWithAsr("funasr");
     }
   );
   assert.equal(clientVadSegments.length, 1);
-  assert.equal(postedFields.some(([name]) => name === "vad_filter"), false);
+  assert.equal(postedFields.some(([name, value]) => name === "vad_filter" && value === "true"), true);
   assert.equal(postedFields.some(([name, value]) => name === "word_timestamps" && value === "true"), true);
   assert.equal(postedFields.some(([name, value]) => name === "condition_on_previous_text" && value === "false"), true);
   assert.equal(postedFields.some(([name, value]) => name === "without_timestamps" && value === "false"), true);
   assert.equal(postedFields.some(([name, value]) => name === "temperature" && value === "0"), true);
-  assert.equal(postedFields.some(([name]) => name === "vad_parameters"), false);
+  assert.equal(postedFields.some(([name]) => name === "vad_parameters"), true);
   assert.equal(postedFields.some(([name]) => name === "threshold"), false);
   assert.equal(postedFields.some(([name]) => name === "min_speech_duration_ms"), false);
   assert.equal(postedFields.some(([name]) => name === "max_speech_duration_s"), false);
@@ -12107,7 +12264,11 @@ await assertInterruptedRerunContinuesWithAsr("funasr");
   assert.equal(Array.isArray(emptyVadSegments), true);
   assert.equal(emptyVadSegments.length, 1);
   assert.equal(emptyVadSegments[0].text, "speech missed by precheck");
-  assert.equal(postedFields.some(([name]) => name === "vad_filter"), false);
+  assert.equal(
+    postedFields.some(([name, value]) => name === "vad_filter" && value === "true"),
+    true,
+    "外部 VAD 返回空区间时也不能关闭服务端原生 VAD"
+  );
   assert.deepEqual(requested.map(([url, method]) => [new URL(url).pathname, method]), [
     ["/openapi.json", "GET"],
     ["/v1/audio/speech/timestamps", "POST"],
@@ -13286,7 +13447,6 @@ await assertInterruptedRerunContinuesWithAsr("funasr");
       ok: true,
       json: async () => ({
         segments: [
-          { start: 1, end: 13, text: "long uncertain drift" },
           {
             start: 7.2,
             end: 8.4,
@@ -13295,8 +13455,7 @@ await assertInterruptedRerunContinuesWithAsr("funasr");
               { start: 7.2, end: 7.8, word: "recovered", probability: 0.9 },
               { start: 7.8, end: 8.4, word: "sentence", probability: 0.9 }
             ]
-          },
-          { start: 15, end: 16, text: "outside retry gap" }
+          }
         ]
       })
     };
@@ -13318,16 +13477,16 @@ await assertInterruptedRerunContinuesWithAsr("funasr");
     },
     { onDiagnostics: diagnostics => { retryDiagnostics = diagnostics; } }
   );
-  assert.equal(transcriptionRequests.length, 2);
-  assert.equal(transcriptionRequests[0].some(([name, value]) => name === "vad_filter" && value === "true"), false);
-  assert.equal(transcriptionRequests[1].some(([name, value]) => name === "vad_filter" && value === "true"), true);
+  assert.equal(transcriptionRequests.length, 1);
+  assert.equal(
+    transcriptionRequests[0].some(([name, value]) => name === "vad_filter" && value === "true"),
+    true,
+    "auto 模式在服务端明确支持 vad_filter 时必须保留原生 VAD，不能由外部预检替代"
+  );
   assert.equal(JSON.stringify(directVadRecovery.map(segment => segment.text)), JSON.stringify(["recovered sentence"]));
   assert.equal(Math.round(directVadRecovery[0].start * 10) / 10, 37.2);
-  assert.equal(retryDiagnostics.directAttempt.finalSegments.length, 0);
-  assert.equal(retryDiagnostics.retry.reason, "可靠 VAD 语音区间未被直连识别结果覆盖，已开启服务端 VAD 重试。");
-  assert.equal(retryDiagnostics.retry.postprocess.coverageRetryFilterApplied, true);
-  assert.equal(retryDiagnostics.retry.postprocess.coverageRetryInputFinalCount, 2);
-  assert.equal(retryDiagnostics.retry.postprocess.coverageRetryFinalCount, 1);
+  assert.equal(Boolean(retryDiagnostics.directAttempt), false);
+  assert.equal(Boolean(retryDiagnostics.retry), false);
   context.fetch = originalFetch;
 }
 
@@ -13807,10 +13966,14 @@ await assertInterruptedRerunContinuesWithAsr("funasr");
   );
   assert.equal(offscreenMessages.length, 0);
   assert.equal(transcriptionRequests.length, 1);
-  assert.equal(transcriptionRequests[0].some(([name, value]) => name === "vad_filter" && value === "true"), false);
+  assert.equal(
+    transcriptionRequests[0].some(([name, value]) => name === "vad_filter" && value === "true"),
+    true,
+    "auto 模式必须在外部预检之外保留服务端原生 VAD"
+  );
   assert.equal(JSON.stringify(recallSegments.map(segment => segment.text)), JSON.stringify(["clear speech", "quiet low voice"]));
   assert.equal(recallDiagnostics.postprocess.speechActivityFilterApplied, false);
-  assert.equal(recallDiagnostics.postprocess.qualityFiltersDisabled, false);
+  assert.equal(recallDiagnostics.postprocess.qualityFiltersDisabled, true);
   chrome.runtime.sendMessage = originalSendMessage;
   context.fetch = originalFetch;
 }
@@ -14321,7 +14484,7 @@ await assertInterruptedRerunContinuesWithAsr("funasr");
   assert.equal(transcriptionRequests.length, 2);
   assert.equal(transcriptionRequests[0].some(([name, value]) => name === "clip_timestamps" && value === "1,1.8"), true);
   assert.equal(transcriptionRequests[1].some(([name]) => name === "clip_timestamps"), false);
-  assert.equal(transcriptionRequests[1].some(([name]) => name === "vad_filter"), false);
+  assert.equal(transcriptionRequests[1].some(([name, value]) => name === "vad_filter" && value === "true"), true);
   assert.equal(Boolean(failedDiagnostics), true);
   assert.equal(failedDiagnostics.vad.speechIntervals.length, 1);
   assert.equal(failedDiagnostics.clipTimestampsAttempt.error.stage, "asr_request");
@@ -14329,10 +14492,10 @@ await assertInterruptedRerunContinuesWithAsr("funasr");
   assert.equal(failedDiagnostics.clipTimestampsAttempt.error.message, "clip timestamp parse failed");
   assert.equal(failedDiagnostics.clipTimestampsAttempt.rawPayload.error.message, "clip timestamp parse failed");
   assert.equal(failedDiagnostics.clipTimestampsAttempt.matureAsrPlan.request.mode, "external_vad_clip");
-  assert.equal(failedDiagnostics.matureAsrPlan.request.mode, "direct");
+  assert.equal(failedDiagnostics.matureAsrPlan.request.mode, "compatible_vad_filter");
   assert.equal(failedDiagnostics.request.fields.some(([name]) => name === "clip_timestamps"), false);
-  assert.equal(failedDiagnostics.retry.request.fields.some(([name]) => name === "vad_filter"), false);
-  assert.equal(failedDiagnostics.retry.matureAsrPlan.request.mode, "direct");
+  assert.equal(failedDiagnostics.retry.request.fields.some(([name, value]) => name === "vad_filter" && value === "true"), true);
+  assert.equal(failedDiagnostics.retry.matureAsrPlan.request.mode, "compatible_vad_filter");
   context.fetch = originalFetch;
 }
 

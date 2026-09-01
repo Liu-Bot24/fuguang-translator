@@ -236,6 +236,63 @@ test("ordinary ASR multipart requests use an explicit stable body identity witho
   assert.equal(first.operation.inputHash.includes("key-one"), false);
 });
 
+test("ordinary ASR multipart reaches fetch with exact bytes and duplicate fields", async () => {
+  const audioBytes = new Uint8Array([0xff, 0xfb, 1, 2, 3, 5, 8, 13]);
+  let observed = null;
+  const harness = await createHarness(async (_url, init) => {
+    const body = init.body;
+    assert.ok(body instanceof FormData);
+    observed = {
+      model: body.get("model"),
+      language: body.get("language"),
+      vadFilter: body.get("vad_filter"),
+      timestampGranularities: body.getAll("timestamp_granularities[]"),
+      fileName: body.get("file").name,
+      fileType: body.get("file").type,
+      fileBytes: new Uint8Array(await body.get("file").arrayBuffer())
+    };
+    return new Response('{"segments":[]}', { headers: { "content-type": "application/json" } });
+  });
+  const form = new FormData();
+  form.append("model", "whisper-1");
+  form.append("response_format", "verbose_json");
+  form.append("timestamp_granularities[]", "segment");
+  form.append("timestamp_granularities[]", "word");
+  form.append("vad_filter", "true");
+  form.append("language", "ja");
+  form.append("file", new Blob([audioBytes], { type: "audio/mpeg" }), "source-ja.mp3");
+  const response = await harness.client.request(requestInput({
+    provider: "openai",
+    operationType: "asr",
+    semanticRequestPath: "asr/job-a/run-a/chunk/0/primary",
+    url: "https://provider.example/v1/audio/transcriptions",
+    bodyIdentity: {
+      requestFields: [
+        ["model", "whisper-1"],
+        ["response_format", "verbose_json"],
+        ["timestamp_granularities[]", "segment"],
+        ["timestamp_granularities[]", "word"],
+        ["vad_filter", "true"],
+        ["language", "ja"]
+      ],
+      audioHash: "sha256:fixture",
+      fileName: "source-ja.mp3",
+      mime: "audio/mpeg"
+    },
+    init: { method: "POST", headers: { authorization: "Bearer secret" }, body: form }
+  }));
+  assert.equal(response.status, 200);
+  assert.deepEqual(observed, {
+    model: "whisper-1",
+    language: "ja",
+    vadFilter: "true",
+    timestampGranularities: ["segment", "word"],
+    fileName: "source-ja.mp3",
+    fileType: "audio/mpeg",
+    fileBytes: audioBytes
+  });
+});
+
 test("ordinary ASR primary artifact is durably checkpointed and exactly replayed before coverage", async () => {
   const harness = await createHarness(async () => {
     throw new Error("artifact checkpoint must not fetch");

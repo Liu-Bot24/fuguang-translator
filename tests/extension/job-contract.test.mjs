@@ -18,6 +18,10 @@ test("job ledger stays small, derives chunk counts, and excludes runtime secrets
       documentId: "document-a",
       lineageKey: "asr:https://example.test/watch/1:/video.m3u8"
     },
+    asrCapabilities: {
+      supportedRequestFields: ["vad_filter", "vad_filter", "no_speech_threshold", ""],
+      speechTimestampsEndpoint: "https://asr.example.test/v1/audio/speech/timestamps"
+    },
     modelConfig: {
       targetLanguage: "zh-CN",
       asr: { apiKey: "custom-asr-credential-value" },
@@ -85,6 +89,10 @@ test("job ledger stays small, derives chunk counts, and excludes runtime secrets
   assert.equal(ledger.schemaVersion, 4);
   assert.equal(ledger.executionSpec.fingerprint, "a".repeat(64));
   assert.equal(ledger.executionSpec.apiKey, undefined);
+  assert.deepEqual(ledger.asrCapabilities, {
+    supportedRequestFields: ["vad_filter", "no_speech_threshold"],
+    speechTimestampsEndpoint: "https://asr.example.test/v1/audio/speech/timestamps"
+  });
   assert.equal(ledger.source.identity, "https://media.example.test/video.m3u8");
   assert.equal(ledger.source.frameId, 7);
   assert.equal(ledger.source.documentId, "document-a");

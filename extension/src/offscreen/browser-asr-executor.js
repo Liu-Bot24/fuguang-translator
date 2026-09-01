@@ -53,6 +53,10 @@ export function createOffscreenBrowserAsrExecutor(options = {}) {
       jobId: execution.jobId,
       runToken: execution.runToken,
       semanticRequestPath: execution.semanticRequestPath,
+      ...(execution.asrCapabilities ? {
+        supportedRequestFields: execution.asrCapabilities.supportedRequestFields,
+        speechTimestampsEndpoint: execution.asrCapabilities.speechTimestampsEndpoint
+      } : {}),
       requestTransport,
       returnResultEnvelope: true,
       collectSpeechAudio: async payload => ({ ok: true, result: await collectSpeechAudio({
@@ -130,6 +134,7 @@ function normalizeExecutionInput(input = {}) {
   if (!asrConfig.baseUrl || !asrConfig.apiKey || (FuguangBrowserAsrProvider.browserAsrProviderNeedsModel(asrConfig) && !asrConfig.model)) {
     throw new Error("Offscreen ASR input has no usable provider configuration.");
   }
+  const asrCapabilities = normalizeAsrCapabilities(input.asrCapabilities);
   return {
     jobId,
     runToken,
@@ -139,7 +144,22 @@ function normalizeExecutionInput(input = {}) {
     chunkIndex,
     chunk,
     asrConfig,
+    asrCapabilities,
     webFfmpegUrl: requiredText(input.webFfmpegUrl, "webFfmpegUrl")
+  };
+}
+
+function normalizeAsrCapabilities(value = {}) {
+  if (!value || typeof value !== "object" ||
+      (!Array.isArray(value.supportedRequestFields) && !Object.hasOwn(value, "speechTimestampsEndpoint"))) {
+    return null;
+  }
+  const fields = Array.isArray(value?.supportedRequestFields)
+    ? value.supportedRequestFields.map(item => String(item || "").trim()).filter(Boolean)
+    : [];
+  return {
+    supportedRequestFields: [...new Set(fields)],
+    speechTimestampsEndpoint: String(value?.speechTimestampsEndpoint || "").trim()
   };
 }
 
